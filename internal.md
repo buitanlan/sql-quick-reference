@@ -347,6 +347,25 @@ Checkpoint quá dày: I/O spike, full page writes (PG FPI).
 
 ## 10. Visibility: MVCC vs lock + version
 
+### 10.0 Hình dung: photocopy trên bàn vs khóa cửa phòng
+
+Cùng mục tiêu: người đọc không thấy bản *chưa lưu*, người ghi không làm hỏng người đọc. Hai cách:
+
+```text
+Cách A — khóa cửa (SQL Server mặc định, RCSI off)
+  Muốn đọc phòng → cầm chìa S, đứng trong phòng.
+  Muốn sửa → cần chìa X, đuổi người đang đọc.
+  Sửa xong (in-place): phòng chỉ còn bản mới. Không có “phòng phụ”.
+
+Cách B — photocopy (PostgreSQL; SQL Server RCSI gần ý này)
+  Người đọc cầm tờ photocopy lúc họ bắt đầu câu/txn.
+  Người ghi viết tờ mới (PG: thêm tuple trên heap) hoặc sửa phòng thật
+  + cất tờ cũ vào kho version (SS RCSI: tempdb/PVS).
+  Người đọc không vào phòng đang sửa → không đợi (SELECT thường).
+```
+
+Hệ quả trực tiếp: PG `SELECT` không block `UPDATE`. SS không RCSI thì có. PG bảng update nhiều **phình** (tờ cũ trên heap). SS RCSI **phình kho version**. Không có cách nào “không khóa, không photocopy, luôn đúng”.
+
 Đây là chỗ **cùng mục tiêu, khác máy**.
 
 **PostgreSQL:** mỗi `UPDATE`/`DELETE` tạo tuple mới. Snapshot (`xmin`/`xmax`) quyết định thấy bản nào. `SELECT` không S-lock. Writer-writer cùng tuple: row lock. Chi tiết [transactions.md](transactions.md) §8.

@@ -12,6 +12,7 @@ Khóa, wait, deadlock, tempdb/xmin: [concurrency.md](concurrency.md). Kiến tr�
 ## Mục lục
 
 - [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+  - [1.1 Hình dung: isolation là “bản chụp”](#11-hình-dung-isolation-là-bản-chụp-không-phải-độ-mạnh)
 - [2. Bắt đầu / kết thúc](#2-bắt-đầu--kết-thúc)
 - [3. Autocommit \& implicit](#3-autocommit--implicit)
 - [4. Isolation levels](#4-isolation-levels)
@@ -55,6 +56,45 @@ Version store = opt-in    Tuple cũ nằm trên heap
 ```
 
 Đừng giải thích PostgreSQL bằng `NOLOCK`/`HOLDLOCK`, đừng giải thích SQL Server bằng “MVCC mặc định”. Optimized locking **2025** giảm lock memory — **không** biến SS thành PG. Chi tiết khóa: [concurrency.md](concurrency.md).
+
+### 1.1 Hình dung: isolation là “bản chụp”, không phải “độ mạnh”
+
+Isolation **không** phải thang 1–4 “càng cao càng đúng”. Nó trả lời một câu: *trong lúc tôi đang làm việc, tôi có được phép thấy (và bị ảnh hưởng bởi) thay đổi của người khác không?*
+
+Hình dung hai người sửa **cùng một bảng tính** trên mạng:
+
+| Bạn muốn | Đời thường | Isolation gần đúng |
+|---|---|---|
+| Thấy ô vừa bị người kia sửa, dù họ chưa bấm Lưu | Đọc nháp | `READ UNCOMMITTED` (chỉ SS; PG **không** cho) |
+| Chỉ thấy ô đã Lưu; lần sau mở lại ô đó *có thể* đã đổi | Làm việc trên file sống | `READ COMMITTED` (mặc định cả hai) |
+| Trong phiên của tôi, ô tôi đã đọc **không đổi** | Mở bản sao lúc bắt đầu, làm trên bản sao | PG `REPEATABLE READ` / SS `SNAPSHOT` |
+| Cả *danh sách hàng* tôi đếm cũng không thêm hàng mới | Bản sao + không ai chèn vào vùng tôi đang đếm | PG `SERIALIZABLE` (SSI) / SS `SERIALIZABLE` (range lock) |
+
+Hai engine **chụp bản sao khác nhau**:
+
+```text
+PostgreSQL (mặc định RC)
+  Mỗi câu SELECT/UPDATE = một tấm ảnh mới.
+  Câu 1 thấy balance=100. Người kia COMMIT 50.
+  Câu 2 (cùng txn) thấy 50.  → “non-repeatable” là đúng thiết kế, không phải bug.
+
+PostgreSQL RR / SERIALIZABLE
+  Cả txn = một tấm ảnh lúc bắt đầu đọc.
+  Câu 2 vẫn thấy 100. Nếu bạn UPDATE hàng đó sau khi người kia COMMIT
+  → engine nói “ảnh của bạn lỗi thời” (40001), không lặng lẽ ghi đè.
+
+SQL Server RC (chưa RCSI)
+  Không chụp ảnh: muốn đọc thì cầm chìa khóa S trên ô đó một lúc.
+  Người kia muốn sửa phải đợi bạn nhả. Bạn xong hàng là nhả — câu sau có thể thấy giá mới.
+
+SQL Server RCSI
+  Đọc = xem bản photocopy trong kho version; không cầm S.
+  Người kia sửa ô thật. Bạn vẫn xem photocopy của *câu đang chạy*, không đợi.
+```
+
+**Hệ quả khi port:** copy `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` từ SS sang PG thì phantom *biến mất* (PG RR chặn phantom; SS RR thì không). Copy ngược lại: PG RR ≈ SS `SNAPSHOT`, **không** ≈ SS RR (khóa S).
+
+Chi tiết anomaly: §5. Write skew (cả hai đọc đúng, ghi khác hàng, invariant vỡ): §6.2 — đây là chỗ “ảnh” không cứu được trừ SSI / range lock / constraint.
 
 ---
 
@@ -289,23 +329,45 @@ RCSI **không** sửa lost update: reader không S, hai writer vẫn có thể �
 
 PostgreSQL RR: T2 `UPDATE` hàng T1 đã sửa → `40001` concurrent update. Đó là bảo vệ; app phải retry, không nuốt.
 
-### 6.2 Write skew
+### 6.2 Write skew — hai người đều “thấy còn một”, cùng bước ra
 
-Invariant: `on_call` phải có ít nhất một người.
+Lost update (§6.1) là **cùng một ô**: hai người trừ kho, người sau đè người trước. Write skew **không đụng cùng hàng** — vì vậy RR/RCSI/`FOR UPDATE` một hàng *không* thấy vấn đề.
+
+Invariant nghiệp vụ: ca trực phải còn **≥ 1** người `active`.
 
 ```text
-T1: SELECT COUNT(*) FROM on_call WHERE active;     -- 2
-T2: SELECT COUNT(*) FROM on_call WHERE active;     -- 2
-T1: UPDATE on_call SET active = 0 WHERE name = 'Ada'; COMMIT;
-T2: UPDATE on_call SET active = 0 WHERE name = 'Bob'; COMMIT;
--- Còn 0 người trực. RR không chặn vì mỗi txn ghi hàng khác.
+Bảng on_call:  Ada active=1,  Bob active=1     (đếm = 2)
+
+T1 đọc: “còn 2, mình off được”
+T2 đọc: “còn 2, mình off được”
+T1 ghi Ada=0, COMMIT          — còn Bob, invariant còn đúng
+T2 ghi Bob=0, COMMIT          — còn 0. Không ai đụng hàng của ai.
+                              Engine RR: “mỗi người sửa hàng khác → OK”
 ```
 
-- PostgreSQL `SERIALIZABLE` (SSI): một txn abort `40001`.
-- SQL Server `SERIALIZABLE`: range/predicate lock có thể chặn; không phải lúc nào cũng “đúng invariant” nếu predicate phức tạp — test.
-- Cách chắc: constraint / một hàng “counter” / `UPDATE … WHERE (SELECT COUNT(*)) > 1`.
+Đây không phải dirty read, không phải lost update (Ada vẫn là 0, Bob vẫn là 0 — không ai bị đè). Invariant **toàn cục** vỡ vì mỗi txn chỉ nhìn snapshot của mình.
 
-RCSI/SI **không** chặn write skew. Snapshot thấy cùng “2 người trực”, cả hai ghi hàng khác, commit.
+```text
+         Ada          Bob
+T0       1            1
+T1 đọc   ───────── đếm=2 ─────────
+T2 đọc   ───────── đếm=2 ─────────
+T1 ghi   0            1
+T2 ghi   0            0     ← không conflict từng hàng
+```
+
+Chặn bằng gì:
+
+| Cách | Cơ chế | Nhược |
+|---|---|---|
+| PG `SERIALIZABLE` (SSI) | Engine nhớ “T1 đọc tập active, T2 ghi Bob ∈ tập đó” → abort một bên `40001` | App phải retry; không phải lock range |
+| SS `SERIALIZABLE` | Key-range / predicate lock trên `active=1` | Predicate phức tạp có thể **không** khóa đủ — test |
+| Constraint / một hàng `on_call_count` | Một chỗ ghi, unique/check | Đổi schema |
+| `UPDATE … WHERE (SELECT COUNT(*) FILTER (WHERE active)) > 1` | Atomic trên engine | Vẫn cần isolation/khóa đúng; test race |
+
+RCSI/SI **không** chặn write skew: cả hai thấy photocopy “còn 2”, ghi hai hàng khác, commit. `UPDLOCK` trên *một* bác sĩ cũng không đủ — phải khóa **cả tập** đang đọc, hoặc SSI, hoặc một counter.
+
+**Ghi chú:** Khi review “trừ tồn kho” → lost update (§6.1). Khi review “chỉ được off nếu còn người khác” / “hai tài khoản tổng ≥ 0” → write skew. Đừng chữa write skew bằng RCSI.
 
 ---
 
@@ -363,6 +425,14 @@ Dirty read, đọc hai lần một hàng, bỏ hàng đang move page. **Không**
 ---
 
 ## 8. PostgreSQL: MVCC
+
+### 8.0 Hình dung: không tẩy ô, chỉ thêm tờ mới
+
+SQL Server (không RCSI) gần với “sửa tại chỗ + khóa cửa”. PostgreSQL gần với **sổ tay không tẩy**: mỗi lần sửa là viết **dòng mới**, dòng cũ gạch `xmax` = “hết hiệu lực khi txn này commit”. Người đọc cầm **tấm ảnh** (snapshot): chỉ thấy dòng có `xmin` đã commit trước ảnh, và `xmax` chưa commit (hoặc commit sau ảnh).
+
+Vì thế `SELECT` không cần chìa khóa trên hàng — họ không đụng dòng người khác đang viết; họ đọc dòng *cũ hơn* trên heap. Người ghi **cùng một hàng** vẫn phải xếp hàng (tuple lock): không hai txn cùng gắn `xmax` lên một bản live.
+
+Bảng phình vì dòng cũ nằm đó đến `VACUUM`. Đó không phải fragmentation kiểu `REORGANIZE` — là **lịch sử còn trên đĩa**. [internal.md](internal.md) §10.
 
 Mỗi hàng (tuple) có `xmin` (txn tạo) / `xmax` (txn xóa hoặc cập nhật). `UPDATE`/`DELETE` **không ghi đè tại chỗ**: tạo tuple mới, gắn `xmax` lên bản cũ. `SELECT` thường **không** lấy row lock; chỉ thấy tuple visible theo snapshot.
 

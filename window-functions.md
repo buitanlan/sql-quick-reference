@@ -142,6 +142,22 @@ Offset **không** nhìn frame. `LAG` hàng trước theo `ORDER BY`, bất kể 
 
 ## 5. Bẫy `LAST_VALUE`
 
+### 5.0 Hình dung: cửa sổ mặc định chỉ nhìn *tới ghế mình*
+
+`OVER (ORDER BY ngày)` không có nghĩa “cả nhóm khách”. Mặc định frame = từ đầu nhóm **đến hàng đang đứng**. `FIRST_VALUE` = người đầu hàng (thường đúng). `LAST_VALUE` = người *cuối cửa sổ* = **chính mình** (hoặc vài ghế cùng ngày nếu `RANGE`). Muốn “đơn cuối của khách” phải mở cửa sổ `UNBOUNDED FOLLOWING`.
+
+```text
+Hàng đang xử lý = ghế 2 trong hàng 4 ghế
+
+  [1] [2] [3] [4]
+   |___|          ← frame mặc định (đến CURRENT ROW)
+        LAST_VALUE = ghế 2, không phải ghế 4
+   |______________|  ← UNBOUNDED FOLLOWING
+        LAST_VALUE = ghế 4
+```
+
+`IGNORE NULLS` chỉ nhảy ghế trống *trong cửa sổ đang mở* — không tự mở đến cuối nhóm.
+
 Mặc định khi có `ORDER BY` mà **không** ghi frame, hàm phụ thuộc frame dùng:
 
 ```text

@@ -14,6 +14,7 @@ Sargable, phân trang, khóa hàng: [indexes.md](indexes.md), [joins.md](joins.m
 - [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
 - [2. Hình dạng câu lệnh](#2-hình-dạng-câu-lệnh)
 - [3. Logical processing](#3-logical-processing)
+  - [3.0 Hình dung: bếp, không phải đọc kịch bản](#30-hình-dung-bếp-không-phải-đọc-kịch-bản)
   - [3.1 Thứ tự logic](#31-thứ-tự-logic)
   - [3.2 Alias, HAVING, window](#32-alias-having-window)
   - [3.3 DISTINCT so với LIMIT](#33-distinct-so-với-limit)
@@ -94,6 +95,45 @@ SELECT * FROM orders ORDER BY total DESC, id DESC LIMIT 10 OFFSET 0;
 ---
 
 ## 3. Logical processing
+
+SQL **không** chạy từ trên xuống như ngôn ngữ thủ tục. Bạn viết `SELECT` trước, engine **nghĩ** `FROM` trước. Đây là nguồn “sao `WHERE y` lỗi trong khi `ORDER BY y` được”.
+
+### 3.0 Hình dung: bếp, không phải đọc kịch bản
+
+Mỗi câu `SELECT` là một **dây chuyền**. Khối sau chỉ được dùng thứ khối trước đã làm ra.
+
+```text
+  FROM/JOIN     →  một bảng ảo (nhân hàng, NULL outer)
+       ↓
+  WHERE         →  loại hàng (không thấy alias SELECT, không thấy SUM)
+       ↓
+  GROUP BY      →  gộp thành nhóm; hàng lẻ biến mất
+       ↓
+  HAVING        →  loại *nhóm* (được SUM, không phải lọc hàng gốc)
+       ↓
+  WINDOW        →  đánh số / cộng dồn *trên tập còn lại* (không gộp mất hàng)
+       ↓
+  SELECT list   →  đặt tên cột, DISTINCT, biểu thức
+       ↓
+  ORDER BY      →  sắp (được alias SELECT)
+       ↓
+  OFFSET/FETCH  →  cắt trang
+```
+
+Optimizer **được** đảo thứ tự vật lý (đẩy `WHERE` vào join, hash thay loop) miễn **kết quả logic** giống dây chuyền trên. `EXPLAIN` nói *làm thế nào*; dây chuyền nói *kết quả phải thế nào*. Tranh cãi “mất hàng” → vẽ dây chuyền, không tranh hash vs nested loop trước.
+
+Ví dụ gắn dây chuyền:
+
+```sql
+SELECT department, SUM(amount) AS total
+FROM payments          -- 1. mọi payment
+WHERE status = 'ok'    -- 2. loại failed (không dùng SUM)
+GROUP BY department    -- 3. mỗi phòng một nhóm
+HAVING SUM(amount) > 0 -- 4. loại phòng tổng ≤ 0
+ORDER BY total DESC;   -- 7. alias total đã có sau bước 6
+```
+
+`WHERE total > 0` sai vì `total` chưa sinh. `WHERE SUM(amount) > 0` sai vì aggregate thuộc bước 4.
 
 ### 3.1 Thứ tự logic
 

@@ -17,6 +17,7 @@ Khóa khi join rồi cập nhật: [concurrency.md](concurrency.md). `UPDATE …
 - [4. OUTER](#4-outer)
 - [5. CROSS](#5-cross)
 - [6. Predicate: ON vs WHERE](#6-predicate-on-vs-where)
+  - [6.0 Hình dung: OUTER giữ người trái](#60-hình-dung-outer-là-giữ-người-bên-trái-dù-phải-trống)
 - [7. Semi / anti \& bẫy NOT IN NULL](#7-semi--anti--bẫy-not-in-null)
   - [7.1 NOT IN + NULL](#71-not-in--null--bẫy-đầy-đủ)
   - [7.2 PG 19: ANTI JOIN rewrite](#72-pg-19-anti-join-rewrite)
@@ -157,6 +158,34 @@ Nhầm `CROSS` trên bảng lớn = incident. Review mọi `FROM a CROSS JOIN b`
 
 ## 6. Predicate: ON vs WHERE
 
+### 6.0 Hình dung: OUTER là “giữ người bên trái, dù phải trống”
+
+`INNER JOIN` = chỉ cặp **khớp**. `LEFT JOIN` = mọi hàng trái, phải **có thì điền, không thì NULL**.
+
+`ON` quyết định **cặp nào được điền**. `WHERE` quyết định **hàng nào còn sau khi đã join**. Với `LEFT`, lọc cột *phải* trong `WHERE` biến NULL thành “loại hàng” → mất đúng những hàng outer sinh ra. Câu lệnh vẫn viết `LEFT` nhưng kết quả = `INNER`.
+
+Đi từng hàng (Ada không đơn; Bob đơn paid; Cara đơn `new`):
+
+```text
+Sau FROM customers LEFT JOIN orders ON customer_id
+  Ada  |  NULL,NULL     ← outer: không khớp khóa
+  Bob  |  #9, paid
+  Cara |  #8, new
+
+Thêm AND o.status='paid' vào ON
+  Ada  |  NULL,NULL     ← vẫn giữ: điều kiện paid thất bại ≠ xóa Ada
+  Bob  |  #9, paid      ← khớp khóa + paid
+  Cara |  NULL,NULL     ← có đơn nhưng không paid → coi như không khớp join
+
+Đưa o.status='paid' xuống WHERE
+  Ada  |  NULL = 'paid' → UNKNOWN → loại
+  Bob  |  paid          → giữ
+  Cara |  NULL = 'paid' → loại
+  → chỉ còn Bob = INNER JOIN … AND status='paid'
+```
+
+Với **INNER JOIN**, `ON` và `WHERE` cùng predicate cho **cùng kết quả** (không có hàng “giữ với NULL”). Reviewer thấy `LEFT` + `WHERE` cột phải → đọc lại như trên, đừng tin tên `LEFT`.
+
 Với **OUTER JOIN**, đẩy điều kiện phía *không được giữ hàng* xuống `WHERE` biến join thành **INNER**: hàng không khớp có cột phải = `NULL`, predicate `status = 'paid'` thành `UNKNOWN` → loại.
 
 Ví dụ đủ — khách và đơn thanh toán, **vẫn giữ khách không có đơn paid**:
@@ -204,6 +233,10 @@ LEFT JOIN customers AS p ON p.id = c.parent_id;
 
 ## 7. Semi / anti & bẫy NOT IN NULL
 
+**Hình dung.** Join thường **nhân hàng** (một khách 3 đơn → 3 hàng). Semi = câu hỏi có/không: “khách này *có* đơn không?” — trả khách **một lần**. Anti = “khách này *không* có đơn”.
+
+`EXISTS` / `NOT EXISTS` đọc đúng câu hỏi đó. `IN` gần semi *nếu không NULL*. `NOT IN` với một `NULL` trong danh sách = hỏi “x khác mọi phần tử, kể cả *không biết*?” — logic ba giá trị trả **UNKNOWN**, `WHERE` loại hết. Không phải bug engine.
+
 **Semi:** “trái có ít nhất một phải” — mỗi hàng trái **một lần**, dù nhiều con.
 
 ```sql
@@ -233,6 +266,20 @@ WHERE o.id IS NULL;
 ```
 
 ### 7.1 `NOT IN` + NULL — bẫy đầy đủ
+
+Ba giá trị: `TRUE` / `FALSE` / `UNKNOWN`. `WHERE` chỉ giữ `TRUE`.
+
+`x NOT IN (a, b)` ≡ `x <> a AND x <> b`.  
+`x <> NULL` ≡ `UNKNOWN` (không biết “khác” cái chưa có giá trị).  
+`TRUE AND UNKNOWN` ≡ `UNKNOWN` → hàng biến mất. **Mọi** `x` đều biến mất nếu list có một NULL — kể cả `x = 1` và list là `(2, NULL)`.
+
+```text
+1 NOT IN (2, 3)     →  1≠2 AND 1≠3  → TRUE
+1 NOT IN (2, NULL)  →  1≠2 AND 1≠NULL → TRUE AND UNKNOWN → UNKNOWN → loại
+1 NOT IN (SELECT NULL)  → tương tự, kết quả rỗng
+```
+
+Đây là lý do **cấm** `NOT IN (SELECT nullable)` trên review. `NOT EXISTS` hỏi “có *hàng khớp* không?” — NULL trong đơn không biến cả truy vấn thành rỗng.
 
 ```sql
 -- Subquery có NULL: cả biểu thức không bao giờ TRUE

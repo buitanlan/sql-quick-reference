@@ -12,6 +12,7 @@ DDL lock, `REPACK`: [ddl.md](ddl.md), [indexes.md](indexes.md). Retry: [transact
 ## Mục lục
 
 - [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+  - [1.1 Hình dung: khóa là biển “đừng đụng”](#11-hình-dung-khóa-là-biển-đừng-đụng-không-phải-isolation)
 - [2. SQL Server: granularity \& mode](#2-sql-server-granularity--mode)
 - [3. Escalation](#3-escalation)
 - [4. Optimized locking (2025)](#4-optimized-locking-2025)
@@ -49,6 +50,28 @@ Transaction **ngắn**. Giữ khóa qua HTTP/UI = queue dài (SS) hoặc `idle i
 
 PostgreSQL 19: `log_lock_waits` **bật mặc định**; `pg_stat_lock`. SQL Server 2025: optimized locking **tắt mặc định** trên on-prem (bật per database); Azure SQL luôn on.
 
+### 1.1 Hình dung: khóa là biển “đừng đụng”, không phải isolation
+
+Isolation (§ trên [transactions.md](transactions.md)) = *tôi thấy gì*. Khóa = *ai phải đứng chờ, hoặc ai bị giết khi vòng chờ*.
+
+Hình dung hành lang khách sạn:
+
+```text
+Hàng (KEY/RID / tuple)  = một phòng
+Page                     = một tầng (nhiều phòng)
+Bảng (OBJECT)            = cả tòa
+Intent IS/IX             = biển ở sảnh: “có người đang làm việc trên một tầng”
+                          không khóa từng phòng, nhưng chặn ai muốn khóa cả tòa
+```
+
+Muốn sửa phòng 1204, SQL Server không chỉ treo X trên 1204: còn treo **IX trên bảng** (“có người ghi trong tòa này”). Vì thế `ALTER TABLE` (Sch-M / `ACCESS EXCLUSIVE`) phải đợi hết khách — không phải vì DDL “nặng”, mà vì biển sảnh không tương thích.
+
+PostgreSQL `SELECT` **không** treo biển trên phòng. `UPDATE` treo tuple. `DROP TABLE` / `VACUUM FULL` treo `ACCESS EXCLUSIVE` = đuổi cả tòa, kể cả người chỉ đi qua (`SELECT`).
+
+Deadlock = hai người, mỗi người đã vào một phòng, muốn phòng của nhau, không ai chịu ra. Engine **giết một người** (SS `1205`, PG `40P01`) — không phải “chờ thêm”. SSI `40001` là chuyện **khác**: không vòng khóa, mà “hai bản chụp không xếp thành một lịch sử”. Đừng retry `40001` như timeout mạng rồi hy vọng hết write skew mà không đổi isolation/schema.
+
+Escalation (SS) = quá nhiều biển phòng → đổi thành một biển cả tòa. Một X bảng: mọi người khác dừng. TID locking 2025 (§4) = thay nghìn biển phòng bằng một biển “giao dịch số 88 đang sửa” — ít escalate, **không** đổi chuyện bạn thấy gì.
+
 ```text
 Đợi gì?
   SS pessimistic: S ↔ X trên KEY/PAGE/OBJECT
@@ -62,6 +85,24 @@ PostgreSQL 19: `log_lock_waits` **bật mặc định**; `pg_stat_lock`. SQL Ser
 ## 2. SQL Server: granularity & mode
 
 Granularity: RID / KEY / PAGE / OBJECT (bảng) / DATABASE / METADATA. Intent (IS/IX/SIX) trên cấp cao hơn trước khi khóa hàng/page.
+
+**Vì sao intent tồn tại.** Nếu chỉ khóa hàng, `DROP TABLE` phải quét *mọi* hàng xem có S/X không — không làm được. Biển IX trên bảng = “có ghi bên trong”: `Sch-M` thấy IX là biết phải đợi, không cần liệt kê từng KEY.
+
+```text
+Session A: UPDATE … WHERE id=5
+  1. Xin IX trên bảng Orders     (biển sảnh: có người ghi)
+  2. Xin IX trên page chứa id=5
+  3. Xin X trên KEY id=5
+
+Session B: SELECT * FROM Orders (RC, chưa RCSI)
+  1. Xin IS trên bảng            — IS + IX = tương thích (cùng tòa, khác việc)
+  2. Xin S trên từng KEY đọc     — gặp KEY id=5 đang X → ĐỢI
+
+Session C: ALTER TABLE Orders ADD …
+  1. Xin Sch-M trên bảng         — Sch-M không đi với IX → ĐỢI A xong
+```
+
+RCSI: Session B **bỏ bước S trên KEY**, đọc version — không đợi A. Session C vẫn đợi IX. RCSI không làm DDL “nhẹ hơn”.
 
 | Mode | Ý nghĩa |
 |---|---|
@@ -261,6 +302,22 @@ Không fairness: worker có thể đói. Không dùng cho “đúng thứ tự t
 ## 8. Deadlock 1205 / 40P01 / 40001
 
 Hai session, thứ tự khóa **ngược**. Engine chọn victim. Đây là chuyện **lock wait cycle** — khác SSI `40001` (không nhất thiết có cycle).
+
+**Hình dung hai loại “40001 / 1205” hay bị trộn:**
+
+```text
+Deadlock (SS 1205, PG 40P01)
+  Hai người, mỗi người đã khóa một phòng, muốn phòng kia.
+  Có chu trình chờ. Engine giết một người để đứt chu trình.
+  Chữa: khóa theo thứ tự cố định (id tăng), txn ngắn.
+
+SSI / serialization (PG 40001, SS SNAPSHOT 3960)
+  Không cần chu trình khóa. Hai bản chụp “đều hợp lệ riêng”
+  nhưng xếp chung một lịch sử thì vỡ invariant (write skew).
+  Chữa: SERIALIZABLE + retry, hoặc một chỗ ghi (counter), không phải “thêm hint NOLOCK”.
+```
+
+Cùng mã `40001` trên PostgreSQL vừa deadlock vừa SSI — đọc **message** (`deadlock detected` vs `could not serialize access`). Retry giống nhau (cả txn); *nguyên nhân* khác.
 
 ### 8.1 Kịch bản hai session (chuyển khoản)
 

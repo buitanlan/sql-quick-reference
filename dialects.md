@@ -414,6 +414,22 @@ SQL Server 3-part không có “READ ONLY txn chặn ghi DB kia” cùng cơ ch�
 
 ## 6. NULL — ba giá trị logic
 
+### 6.0 Hình dung: NULL là “chưa biết”, không phải 0 hay chuỗi rỗng
+
+Trong ngôn ngữ thường, thiếu dữ liệu hay được gán `0` / `""`. SQL **cấm** nghĩ vậy. `NULL` = *không có giá trị để so*. Câu hỏi “x có bằng 5 không?” khi x thiếu → **không phải có, không phải không** → `UNKNOWN`.
+
+`WHERE` chỉ giữ hàng **chắc chắn đúng** (`TRUE`). `UNKNOWN` bị loại — nên `WHERE x = NULL` không bao giờ ra hàng, kể cả hàng thiếu. Phải `IS NULL`.
+
+Ba cửa ra khác nhau cho cùng `UNKNOWN`:
+
+| Chỗ | Engine làm gì với UNKNOWN | Vì sao |
+|---|---|---|
+| `WHERE` / `JOIN ON` | Loại | Lọc = chỉ lấy chắc đúng |
+| `CHECK` | Cho qua | Constraint = chỉ đuổi chắc sai |
+| `IF` proc | Như false | Nhánh THEN cần chắc đúng |
+
+`NOT IN` + một NULL trong list: mọi so sánh `<> NULL` = UNKNOWN → cả câu `AND` sụp — [joins.md](joins.md) §7.1.
+
 SQL dùng **three-valued logic**: `TRUE` / `FALSE` / `UNKNOWN`. `NULL` không phải “giá trị đặc biệt của mọi kiểu” theo nghĩa sentinel — nó là *thiếu*. So sánh với `NULL` bằng `=` cho `UNKNOWN`, không phải `TRUE`.
 
 ```sql

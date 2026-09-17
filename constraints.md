@@ -17,6 +17,7 @@ PostgreSQL 19 **beta**: FK check nhanh hơn (implementation, không đổi ngữ
 - [4. FOREIGN KEY: hành động](#4-foreign-key-hành-động)
 - [5. FK phải được index](#5-fk-phải-được-index)
 - [6. CHECK \& NULL pass](#6-check--null-pass)
+  - [6.0 Hình dung: bảo vệ chỉ đuổi khi chắc SAI](#60-hình-dung-bảo-vệ-chỉ-đuổi-khi-chắc-chắn-sai)
 - [7. NOT NULL \& DEFAULT](#7-not-null--default)
 - [8. EXCLUDE (PostgreSQL)](#8-exclude-postgresql)
 - [9. Temporal WITHOUT OVERLAPS \& leftover](#9-temporal-without-overlaps--leftover)
@@ -185,6 +186,21 @@ Index này còn phục vụ `JOIN` / `WHERE customer_id = ?`. Composite FK: inde
 
 ## 6. CHECK & NULL pass
 
+### 6.0 Hình dung: bảo vệ chỉ đuổi khi chắc chắn SAI
+
+`CHECK` không phải `WHERE`. `WHERE` loại `UNKNOWN`. `CHECK` chỉ **từ chối `FALSE`**. `UNKNOWN` (vì NULL) = “chưa chứng minh sai” → **cho qua**.
+
+Hình dung bảo vệ cửa: chỉ chặn người *rõ ràng* không đủ tuổi. Người không mang giấy (NULL) được vào — trừ khi rule viết `tuổi IS NOT NULL AND tuổi >= 18`.
+
+```text
+CHECK (total >= 0)
+  total = 10   → TRUE    → vào
+  total = -1   → FALSE   → đuổi
+  total = NULL → UNKNOWN → vào   ← hay bị hiểu nhầm là “CHECK hỏng”
+```
+
+`CHECK (status IN ('new','paid'))` với `status` NULL → `IN` ra UNKNOWN → insert được. Muốn cấm: `NOT NULL` trên cột, hoặc `CHECK (status IS NOT NULL AND status IN (…))`.
+
 `CHECK` fail khi predicate = **FALSE**. `UNKNOWN` (NULL) **qua** — SQL chuẩn.
 
 ```sql
@@ -267,6 +283,12 @@ Partial `EXCLUDE … WHERE (active)`: chỉ hàng thỏa predicate — giống u
 ---
 
 ## 9. Temporal WITHOUT OVERLAPS & leftover
+
+### 9.0 Hình dung: sửa *một khúc* lịch sử, không sửa cả hàng
+
+Bảng thường: một SKU một hàng — `UPDATE` đổi cả dòng. Bảng application-time: một SKU là **đoạn trên trục thời gian**. `FOR PORTION OF` = “chỉ khúc giữa năm 2026”. Engine **cắt bánh**: khúc giữa lấy giá mới; hai đầu bánh (leftover) là hàng **mới** giữ giá cũ. Không phải “sửa cell rồi xong”.
+
+Vì leftover là `INSERT`, trigger insert chạy, `WITHOUT OVERLAPS` kiểm leftover với hàng *khác*. Race RC: hai session cắt cùng bánh — leftover có thể mất; `SELECT FOR UPDATE` cùng predicate trước. Chi tiết DML: [dml.md](dml.md).
 
 Application-time (SQL:2011): period trên hàng, **không** chồng cho cùng thực thể.
 
