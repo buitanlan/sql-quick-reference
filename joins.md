@@ -407,6 +407,14 @@ Index `(customer_id, total DESC, id DESC)` biến `APPLY`/`LATERAL` + `TOP`/`LIM
 
 ## 9. Join algorithm
 
+**Hình dung ba cách ghép.**
+
+- **Nested loop:** cầm từng khách, tra index đơn của khách đó. Ít khách + index = nhanh. Nhiều khách + quét cả bảng đơn mỗi lần = thảm họa.
+- **Hash:** đổ một bên vào bảng băm trong RAM, dò bên kia. Không cần sắp. Hết RAM thì tràn `tempdb` / `work_mem`.
+- **Merge:** hai danh sách **đã xếp cùng khóa**, đi như khóa kéo. Chưa xếp thì phải sort trước — sort có thể đắt hơn hash.
+
+Optimizer chọn theo **ước lượng số hàng**. Thống kê cũ → chọn sai cách. Đổi `OPTION (LOOP JOIN)` / `enable_hashjoin` chỉ để thử, không phải sửa dữ liệu.
+
 | Thuật toán | Khi nào | Rủi ro |
 |---|---|---|
 | Nested loop | Outer nhỏ-vừa, inner **seek** tốt (index = khóa) | Outer lớn + inner scan = thảm họa |

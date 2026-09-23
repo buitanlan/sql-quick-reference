@@ -79,6 +79,12 @@ Một số PREVIEW còn `ALTER DATABASE SCOPED CONFIGURATION SET PREVIEW_FEATURE
 
 ## 3. json vs jsonb vs nvarchar
 
+**Hình dung.** `json` PostgreSQL (và `nvarchar` + `ISJSON`) = **tờ giấy** nguyên văn: khoảng trắng, thứ tự key, key trùng đều còn — mỗi lần đọc phải parse lại.
+
+`jsonb` (và kiểu `json` binary SQL Server 2025) = **đã bóc** thành cấu trúc: hết khoảng trắng, key trùng thì key sau thắng, so sánh theo giá trị không theo chuỗi. `{"b":1,"a":2}` và `{"a":2,"b":1}` bằng nhau trên `jsonb`, không bằng nhau nếu so text.
+
+Cột luôn lọc `status = 'open'` → cột quan hệ hoặc expression index, đừng so cả tờ giấy. Cập nhật một key trên document 10 MB thường **viết lại cả giá trị**.
+
 | | SQL Server 2025 | PostgreSQL |
 |---|---|---|
 | Native binary | `json` (UTF-8 nội bộ, ~2 GB/row) **PREVIEW** on-prem / **GA Azure** | **`jsonb`** |

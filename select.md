@@ -528,6 +528,10 @@ WHERE rn = 1;
 
 ## 11. GRAPH_TABLE (PostgreSQL 19)
 
+**Hình dung.** Không có “database đồ thị” riêng. Bạn vẫn có bảng `customers`, `orders`, `customer_orders`. `CREATE PROPERTY GRAPH` chỉ **dán nhãn**: bảng nào là đỉnh, bảng nào là cạnh. `MATCH (c)-[e]->(o)` là cách viết join cho dễ đọc; planner **dịch lại thành JOIN**. `EXPLAIN` thấy Hash/Nested Loop, không thấy node graph. Thiếu index FK thì vẫn chậm như join thường.
+
+Path độ dài thay đổi `{1,4}` / shortest path **chưa có** ở PG 19 — viết vài hop cố định hoặc recursive CTE ([cte-subqueries.md](cte-subqueries.md)). SQL Server `AS NODE`/`AS EDGE` là sản phẩm khác, không phải SQL/PGQ.
+
 SQL/PGQ: property graph là **metadata** trên bảng quan hệ (vertex/edge), không phải storage riêng. `GRAPH_TABLE` trả về bảng, đứng trong `FROM` như table function. Planner **rewrite thành join thường** — `EXPLAIN` không có executor graph riêng. Index PK/FK vẫn bắt buộc. DDL tạo graph: [ddl.md](ddl.md) §11.
 
 PostgreSQL 19 **beta**: đối chiếu release notes trước production.

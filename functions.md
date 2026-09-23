@@ -648,6 +648,14 @@ PG 19 thêm một số hàm tiện (`encode` format mới §2.4; `random(min,max
 
 ## 11. Determinism: `now()` vs `clock_timestamp()`
 
+**Hình dung hai đồng hồ.**
+
+PostgreSQL `now()` = đồng hồ **treo lúc `BEGIN`**. Ngủ 5 giây, `now()` vẫn giờ mở txn — mọi hàng `INSERT` trong txn đó cùng mốc. `clock_timestamp()` = đồng hồ tường: mỗi lần gọi một số khác, kể cả trong một `SELECT`.
+
+SQL Server `SYSDATETIME()` **không** treo lúc `BEGIN TRAN`. Cùng txn, câu sau có thể muộn hơn câu trước. Đừng port `DEFAULT now()` thành “luôn một instant cả txn” trên T-SQL mà không gán biến `@t` lúc mở.
+
+Hàm đổi mỗi lần gọi (`random`, `NEWID`, `clock_timestamp`) **không** được làm cột computed persisted / expression index: index sẽ sai so với lần đọc sau.
+
 Hàm **nondeterministic** không dùng trong persisted computed, expression index (PG `IMMUTABLE`), indexed view (SS còn SET options).
 
 | Nguồn | Ổn trong txn? | Ổn trong statement? | Nhãn / catalog |

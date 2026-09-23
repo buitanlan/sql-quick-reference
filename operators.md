@@ -64,6 +64,8 @@ SELECT '1' + '2';             -- SQL Server: '12' (varchar+varchar)
 
 ## 2. Precedence
 
+**Hình dung.** SQL không phải C#: `NOT` và `AND` dễ đọc nhầm, PostgreSQL `^` là **lũy thừa** (rất chặt) trong khi SQL Server `^` là **XOR**. `2 ^ 3 + 1` trên PG = 9, không phải bit. Nghi ngờ thì ngoặc — rẻ hơn debug.
+
 Rút gọn (cao → thấp), gần ANSI + dialect:
 
 1. `.` `[]` `::` (PG cast) `()`
@@ -205,6 +207,14 @@ Empty subquery: `> ALL ()` = TRUE; `> ANY ()` = FALSE (chuẩn). Test khi port.
 ---
 
 ## 5. Logic & three-valued
+
+**Hình dung: `AND` không phải `if`.**
+
+Trong C, `if (a && expensive())` thường **không gọi** `expensive` khi `a` sai. SQL **không hứa** vậy. Optimizer được đảo `AND`/`OR`. `WHERE denom <> 0 AND num / denom > 1` vẫn có thể chia 0.
+
+Muốn thứ tự chắc: `CASE WHEN denom <> 0 THEN num / denom END > 1`.
+
+`NOT a = b AND c` đọc được hai cách. Luôn ngoặc: `WHERE NOT (a = b) AND c = 1`.
 
 ```sql
 AND   OR   NOT

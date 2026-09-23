@@ -263,6 +263,18 @@ SUM(total) FILTER (WHERE status = 'paid') OVER (PARTITION BY customer_id)
 
 ## 7. Frame: `ROWS` / `RANGE` / `GROUPS`
 
+**Hình dung.** `ROWS` đếm **ghế**. `2 PRECEDING` = hai ghế ngay trước, dù cùng ngày hay khác ngày.
+
+`RANGE` đếm **giá trị khóa**. Hai đơn cùng `created_at` là *cùng một nhóm bạn* (peer). Running sum `RANGE … CURRENT ROW` **cộng hết** đơn cùng ngày, không dừng ở “hàng đang đứng”. Hai hàng cùng ngày có thể ra **cùng** tổng — hay bị tưởng bug.
+
+`GROUPS` (chỉ PostgreSQL) đếm **nhóm peer**: “một nhóm ngày trước”, không phải “một hàng”.
+
+```text
+Ngày:  1   1   2        qty 10, 20, 5
+ROWS 1 PRECEDING của hàng thứ hai: chỉ ghế trước (10) + mình
+RANGE CURRENT ROW: cả hai hàng ngày 1 (10+20) vì cùng khóa
+```
+
 ```text
 ROWS   BETWEEN 2 PRECEDING AND CURRENT ROW     -- đúng 3 hàng (nếu đủ)
 RANGE  BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW   -- + mọi peer cùng ORDER BY

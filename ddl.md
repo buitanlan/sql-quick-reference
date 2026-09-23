@@ -49,6 +49,14 @@ PostgreSQL 19 **beta** (GA mục tiêu cuối 10/2026): `REPACK`, `MERGE`/`SPLIT
 
 ## 2. Transactional DDL vs implicit commit
 
+**Hình dung hai cuốn sổ.**
+
+PostgreSQL: schema nằm **trong** transaction. `CREATE TABLE` rồi `ROLLBACK` → bảng biến mất, như chưa viết.
+
+SQL Server: nhiều lệnh DDL **đóng sổ giữa chừng** (commit ngầm phần DML/DDL trước). `BEGIN TRAN` + `CREATE` + lỗi + `ROLLBACK` **không** hứa “schema như lúc mở”. Migration SS phải idempotent (`IF NOT EXISTS`), không dựa một rollback cứu cả script.
+
+Ngoại lệ PG (không nằm trong txn): `CREATE INDEX CONCURRENTLY`, `REPACK`, `VACUUM` — chúng cần thấy commit của người khác; txn đang mở thì “đóng băng” thế giới.
+
 **PostgreSQL:** hầu hết `CREATE`/`ALTER`/`DROP` nằm trong `BEGIN`…`ROLLBACK` → schema hoàn nguyên. Migration một txn: tạo bảng, FK, index thường, seed — fail thì sạch.
 
 ```sql
@@ -486,6 +494,8 @@ Khác replication 19 (không lặp hết): `CREATE SUBSCRIPTION … SERVER` (tha
 ---
 
 ## 10. REPACK vs REBUILD
+
+**Hình dung hai pha.** `VACUUM` thường = dọn rác *trong* file đang dùng (người vẫn đọc). `REPACK` / `VACUUM FULL` = **photo bản sạch** sang file mới rồi **đổi tên**. Không concurrent: cửa đóng suốt lúc chụp (`ACCESS EXCLUSIVE`). `CONCURRENTLY`: chụp trong lúc khách vẫn vào, ghi nhật ký thay đổi (logical decoding), rồi khóa cửa **chỉ lúc đổi tên**. Khóa ngắn, nhưng WAL/slot tăng lúc chụp.
 
 Thống nhất ý `VACUUM FULL` (compact heap) + `CLUSTER` (sort theo index). Lệnh cũ **còn chạy**.
 

@@ -272,6 +272,10 @@ Cập nhật một key JSON lớn = rewrite giá trị (cả hai, trừ patch nh
 
 ## 8. WAL vs transaction log
 
+**Hình dung.** Sổ cái (WAL / `.ldf`) viết **trước** khi trang dữ liệu trên đĩa chắc đã mới. Mất điện: đọc sổ từ checkpoint, làm lại những gì chưa kịp ghi heap. `COMMIT` trả về = “sổ đã xuống đĩa” (mặc định), **không** = “trang bảng đã xuống đĩa”.
+
+Vì thế log đầy thì **dừng ghi**, dù data file còn chỗ. Nguyên nhân hay: backup log chưa chạy (SS FULL), replication slot / CES / mirroring **giữ** sổ không cho cắt. PostgreSQL slot chết = `pg_wal` phình; SQL Server = `LOG_BACKUP` / `REPLICATION` trong `log_reuse_wait_desc`.
+
 Cùng ý: ghi redo **trước** (hoặc theo rule) để crash recovery.
 
 ```text

@@ -266,6 +266,10 @@ $$;
 
 ## 6. Trigger set-based
 
+**Hình dung.** Một `INSERT` 10.000 hàng là **một phong bì**, không phải 10.000 lần bấm Save. SQL Server `inserted`/`deleted` là cả phong bì. Vòng `WHILE` “lấy TOP 1 từ inserted” đúng trên SSMS một hàng, sai hoặc cực chậm khi bulk.
+
+PostgreSQL `FOR EACH ROW` gọi hàm **mỗi hàng** (được, nhưng đắt). `FOR EACH STATEMENT` một lần — muốn từng hàng thì `REFERENCING NEW TABLE`.
+
 Một lệnh `INSERT`/`UPDATE`/`DELETE` 10k hàng = **một** lần bắn trigger (SS `AFTER` / PG `FOR EACH STATEMENT`) hoặc 10k lần hàm row (PG `FOR EACH ROW`). Logic phải đúng trên *tập*, không trên “hàng tôi vừa gõ SSMS”.
 
 ```sql
@@ -403,6 +407,8 @@ PL/pgSQL `EXECUTE` khác T-SQL `EXECUTE(@sql)` (ad-hoc) và khác `EXECUTE proc`
 
 ## 8. Optimized `sp_executesql` (compilation storm)
 
+**Hình dung.** Mở app, 500 connection cùng gửi một câu parameterized chưa có trong cache. Mỗi connection **tự biên** plan — CPU optimizer bão. 2025 `OPTIMIZED_SP_EXECUTESQL`: một người biên, người khác **xếp hàng rồi dùng chung** bản đã biên. Không làm plan *đúng hơn* (sniffing vẫn còn); chỉ hết cảnh 500 người biên cùng lúc.
+
 Lịch sử: nhiều session cùng **text** `sp_executesql` (khác parameter) **compile song song**, mỗi session nhét một bản plan — CPU optimizer nhảy, plan cache phình, cold cache sau failover/restart thành storm.
 
 **2025:** database scoped `OPTIMIZED_SP_EXECUTESQL` — compile `sp_executesql` *serialize* giống stored procedure / trigger:
@@ -506,6 +512,12 @@ PostgreSQL: không `CREATE EXTERNAL MODEL`. App / extension gọi API, ghi `vect
 ---
 
 ## 11. Quyền: `SECURITY DEFINER` & `search_path`
+
+**Hình dung.** `SECURITY INVOKER` = hàm chạy bằng quyền **người gọi**. `SECURITY DEFINER` = hàm chạy bằng quyền **chủ hàm** (thường superuser/admin) — tiện kiểm tra mật khẩu, nguy hiểm nếu tên bảng không khóa.
+
+PostgreSQL tìm `pwds` theo `search_path`. Attacker tạo **bảng tạm cùng tên** nằm *trước* schema admin → hàm definer đọc nhầm bảng attacker, vẫn với quyền admin. Chữa: `SET search_path = admin, pg_temp` (`pg_temp` **cuối**) và viết `admin.pwds`, không viết `pwds`.
+
+SQL Server tương tự: `EXECUTE AS OWNER` + dynamic SQL không `QUOTENAME` = leo quyền. [dialects.md](dialects.md).
 
 ```sql
 GRANT EXECUTE ON dbo.GetOrders TO app_user;

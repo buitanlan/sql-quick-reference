@@ -452,6 +452,10 @@ Dump PG 19: dollar-quote **không** chịu `standard_conforming_strings` (không
 
 ## 10. Typed literal, unknown, parameter
 
+**Hình dung.** PostgreSQL `'foo'` chưa phải `text` cho đến khi câu lệnh **buộc** kiểu (cột đích, `::text`, toán tử đã biết). `PREPARE p AS SELECT $1` thất bại vì `$1` không có chỗ để đoán. SQL Server bắt khai báo `@p nvarchar(20)` từ đầu — không có kiểu “unknown”.
+
+Chuỗi không prefix `N` trên SQL Server đi theo collation **không Unicode** của database: ký tự Việt có thể thành `?` trước khi vào cột `nvarchar`.
+
 PostgreSQL `'foo'` có kiểu **unknown** cho đến insert / operator / `CAST`. Nguồn lỗi `inconsistent types deduced for parameter` / `could not determine data type`.
 
 ```sql

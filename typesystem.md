@@ -244,6 +244,10 @@ PostgreSQL `varchar(n)`: `n` là **ký tự**, không phải byte. `'é'` đếm
 
 ## 4. Ngày giờ
 
+**Hình dung offset.** `datetimeoffset` (SQL Server) nhớ “15:00 **+07**”. `timestamptz` (PostgreSQL) nhớ **instant UTC** rồi *hiện* theo `TimeZone` session — hai client khác múi giờ thấy chữ khác, cùng một khoảnh khắc. Không có chỗ “giữ +07 gốc” trên `timestamptz`. `timestamp` không `tz` là đồng hồ tường **không biết múi** — đừng cộng với `timestamptz` rồi đoán.
+
+`timestamp` trên T-SQL **không** phải thời gian: đó là `rowversion` (số tăng khi hàng đổi). Map sang PG `timestamp` là bug cổ điển.
+
 ### 4.1 Bảng kiểu
 
 | Kiểu | SQL Server | PostgreSQL |

@@ -117,6 +117,10 @@ INSERT INTO invoice (qty, price) VALUES (2, 10);  -- total generated
 
 ## 3. UPDATE & fan-out PostgreSQL
 
+**Hình dung.** Bạn bảo “đơn 7 lấy tổng từ bảng staging”. Staging có **hai** dòng `order_id = 7` (10 và 99). SQL Server `MERGE` thường **lỗi** “nhiều nguồn”. PostgreSQL `UPDATE … FROM` **không lỗi**: chọn **một** trong hai (plan quyết), ghi, im. Lần sau có thể số kia. Đừng đọc “chạy được” thành “đúng”.
+
+Sửa: nguồn phải **một hàng / khóa** (`DISTINCT ON`, `GROUP BY`, subquery).
+
 ```sql
 -- SQL Server
 UPDATE o

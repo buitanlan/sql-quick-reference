@@ -67,6 +67,25 @@ PG CLUSTER/REPACK     = sort một lần, insert sau phá thứ tự
 
 ## 2. B-tree: thứ tự cột
 
+### 2.0 Hình dung: danh bạ, không phải “cột nào cũng được”
+
+B-tree là danh bạ xếp theo **thứ tự khóa từ trái sang phải**. Tra “Nguyễn, Hà Nội” thì sách phải xếp *họ trước, thành phố sau*. Sách xếp *thành phố trước* không giúp nhảy tới họ Nguyễn — bạn phải lật mọi trang Hà Nội.
+
+```text
+Index (customer_id, created_at)
+
+  customer 10, 2026-01
+  customer 10, 2026-02     ← WHERE customer_id = 10 AND created_at >= '2026-02' nhảy đúng chỗ
+  customer 11, 2026-01
+
+Index (created_at, customer_id)
+
+  2026-01, customer 10
+  2026-01, customer 11     ← WHERE customer_id = 10 phải quét mọi ngày
+```
+
+**Sargable** = predicate để engine *nhảy* trong danh bạ, không tính lại từng dòng. `YEAR(created_at) = 2026` = “lấy năm của từng trang rồi mới so” — danh bạ vô dụng. Viết `created_at >= '2026-01-01' AND created_at < '2027-01-01'`. Hàm trên **cột** phá seek; hàm trên **hằng** (`WHERE created_at >= DATEADD(...)`) thường vẫn seek. Phụ lục A.
+
 Mặc định cả hai engine: B-tree (SQL Server clustered/nonclustered; PostgreSQL `USING btree`).
 
 ```sql
@@ -110,6 +129,8 @@ Cột equality **không** bắt buộc “selective nhất trước” nếu que
 ---
 
 ## 3. Clustered vs heap vs CLUSTER / REPACK
+
+**Hình dung.** SQL Server clustered = sách **đóng gáy theo thứ tự khóa** và giữ thứ tự khi thêm trang. PostgreSQL heap = chồng giấy; index là mục lục “trang 17, dòng 3”. `CLUSTER` / `REPACK` chỉ **xếp lại một lần** — giấy mới sau đó lại chồng lộn.
 
 **SQL Server:** tối đa **một** clustered index = thứ tự trang dữ liệu. Thường PK clustered. Không clustered = **heap**; nonclustered trỏ **RID**. Có clustered: nonclustered chứa khóa clustered (lookup). PK rộng (GUID, composite) làm mọi NCI phình.
 

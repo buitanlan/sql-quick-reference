@@ -174,6 +174,17 @@ PostgreSQL không có hint `WITH (NOLOCK)` — `;` trước `WITH` không bắt 
 
 ## 6. `RECURSIVE`
 
+**Hình dung: đi từng thế hệ, không nhìn cả cây một lúc.**
+
+Anchor = “bắt đầu từ sếp id=1”. Vòng sau chỉ thấy **con của những người vừa tìm ở vòng trước**, không thấy ông nội trừ khi bạn tự ghi cột `path`. Không có điều kiện dừng (`depth`, `CYCLE`, `MAXRECURSION`) thì vòng tròn org → chạy mãi.
+
+```text
+Vòng 0 (anchor):     [CEO]
+Vòng 1:              [VP-A, VP-B]          JOIN org ON parent = người vòng 0
+Vòng 2:              [staff của VP]        JOIN trên kết quả vòng 1, không phải cả bảng lịch sử
+Kết quả = UNION ALL mọi vòng
+```
+
 Hai thành phần: **anchor** (không tự tham chiếu) + **recursive member** (`UNION ALL` tới CTE). Mỗi bước chỉ thấy *working table* vòng trước, không thấy toàn bộ lịch sử trừ khi bạn tự mang cột path.
 
 ```sql
@@ -326,6 +337,10 @@ Hint nằm ở *câu gọi*, không trong `RETURN (SELECT …)` của inline TVF
 ---
 
 ## 10. Materialize / inline
+
+**Hình dung.** CTE là **công thức**, không phải tô đã nấu. Gọi hai lần có thể nấu hai lần (inline) hoặc nấu một lần rồi múc (materialize). SQL Server thường nấu lại. PostgreSQL 12+ hay nấu một lần khi CTE được gọi **hai lần** — trừ khi bạn viết `NOT MATERIALIZED`.
+
+Hệ quả: `random()` / `NEWID()` trong CTE rồi `JOIN` hai alias → hai số khác nhau nếu nấu lại; một số nếu múc. Predicate `WHERE id = 1` **không** đẩy vào công thức đã nấu sẵn (materialize) — scan cả tô. Inline thì index vẫn dùng được.
 
 CTE **không** phải temp. SS docs: mỗi tham chiếu có thể **re-execute**. PG 12+: CTE không đệ quy, không volatile, *một* tham chiếu → thường **inline**; *nhiều* tham chiếu → thường **materialize**.
 
