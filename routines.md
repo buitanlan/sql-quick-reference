@@ -561,7 +561,7 @@ AS
 
 `OWNER` ≈ definer. Default schema của user impersonate + synonym = bẫy tên. Module signing / certificate khi cần cross-db. Dynamic SQL trong `EXECUTE AS OWNER` vẫn injection nếu nối identifier — quyền *cao hơn* + injection = mất DB.
 
-**Ghi chú:** Review mọi `SECURITY DEFINER` / `EXECUTE AS OWNER`: `SET search_path` (PG), schema cố định (SS), không `%s` / string-concat identifier, `PUBLIC` đã revoke.
+**Ghi chú:** Review mọi `SECURITY DEFINER` / `EXECUTE AS OWNER`: `SET search_path` (PG), schema cố định (SS), không `%s` / string-concat identifier, `PUBLIC` đã revoke. Mô hình `GRANT`/`DENY`/RLS: [permissions.md](permissions.md).
 
 ---
 

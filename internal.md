@@ -616,7 +616,7 @@ Extension C 19: hook `get_relation_info_hook` → `build_simple_rel_hook` — re
 
 ## 18. Bảo mật engine
 
-Cùng ý: login/role, GRANT, RLS (cả hai), encryption at rest (TDE vs filesystem/pgcrypto), audit.
+Cùng ý: login/role, GRANT, RLS (cả hai), encryption at rest (TDE vs filesystem/pgcrypto), audit. Chi tiết ủy quyền: [permissions.md](permissions.md).
 
 Khác:
 

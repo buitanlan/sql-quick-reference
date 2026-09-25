@@ -9,7 +9,7 @@ SQL không phải một ngôn ngữ duy nhất: ANSI/ISO SQL là lõi, mỗi eng
 
 **Cách đọc bộ này.** Hai khối dialect cạnh nhau **không** nghĩa là cùng guarantee: isolation cùng tên (`REPEATABLE READ`) không portable — [transactions.md](transactions.md). Thứ tự *viết* `SELECT` ≠ *logical processing* — [select.md](select.md). Cùng ý “page / WAL / vacuum” nhưng **kiến trúc khác** — [internal.md](internal.md). API gắn **PREVIEW**/beta có thể đổi theo CU hoặc trước GA. Cuối mỗi file: Best practices, **Bẫy khi review**, Version gates — dùng khi review PR, không phải phụ lục.
 
-**Chủ đề trừu tượng.** Isolation, khóa, MVCC, WAL, logical processing, `ON` vs `WHERE`, `NOT IN` + NULL, `CHECK` nuốt NULL, B-tree/sargable, CTE đệ quy, fan-out `UPDATE`, DDL trong transaction, `now()` vs đồng hồ tường, `json` vs `jsonb`, `ROWS` vs `RANGE`, trigger theo tập, `SECURITY DEFINER` — dễ hiểu sai nếu chỉ nhớ bảng. Các file đó có mục **Hình dung**: ví dụ đời thường, dòng thời gian, rồi mới tới cú pháp. Đọc Hình dung trước khi copy snippet.
+**Chủ đề trừu tượng.** Isolation, khóa, MVCC, WAL, logical processing, `ON` vs `WHERE`, `NOT IN` + NULL, `CHECK` nuốt NULL, B-tree/sargable, CTE đệ quy, fan-out `UPDATE`, DDL trong transaction, `now()` vs đồng hồ tường, `json` vs `jsonb`, `ROWS` vs `RANGE`, trigger theo tập, `SECURITY DEFINER`, `GRANT`/`DENY`/RLS ([permissions.md](permissions.md)) — dễ hiểu sai nếu chỉ nhớ bảng. Các file đó có mục **Hình dung**: ví dụ đời thường, dòng thời gian, rồi mới tới cú pháp. Đọc Hình dung trước khi copy snippet.
 
 Tính năng theo phiên bản (SQL Server 2025 / PostgreSQL 19) nằm **trong file chủ đề** (vector → typesystem, `REPACK` → ddl, optimized locking → concurrency, …), không tách changelog riêng.
 
@@ -42,6 +42,7 @@ Tham khảo: [SQL Server 2025 what's new](https://learn.microsoft.com/sql/sql-se
 - [Window function](window-functions.md)
 - [CTE & subquery](cte-subqueries.md)
 - [Routine (procedure, function, trigger)](routines.md)
+- [Quyền](permissions.md)
 
 ### Engine
 

@@ -540,7 +540,7 @@ REVOKE INSERT ON app.orders FROM app;
 ALTER … OWNER TO …
 ```
 
-`AUTHORIZATION` lúc `CREATE SCHEMA`. `SECURITY DEFINER` / `EXECUTE AS`: [routines.md](routines.md) + `search_path`.
+`AUTHORIZATION` lúc `CREATE SCHEMA`. Principal, `PUBLIC`, schema, RLS, ownership: [permissions.md](permissions.md). `SECURITY DEFINER` / `EXECUTE AS`: [routines.md](routines.md) + `search_path`.
 
 PG 19: `GRANT`/`REVOKE … GRANTED BY` — role hiệu lực khi ghi ACL. `USAGE` trên property graph — đọc docs, không bịa quyền. SQL Server 2025: Purview policies discontinued → role `##MS_*##` — [internal.md](internal.md), không keyword SQL mới trong file này.
 
