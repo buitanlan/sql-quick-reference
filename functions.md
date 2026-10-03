@@ -1,6 +1,6 @@
 # Hàm built-in
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
 > File này: **built-in**. Hàm / procedure / trigger do người viết: [routines.md](routines.md). Window: [window-functions.md](window-functions.md). JSON: [json.md](json.md). Kiểu `vector` / `date`: [typesystem.md](typesystem.md).
 
 Hàm SQL không phải thư viện C: mỗi lời gọi gắn với *kiểu*, *collation*, *determinism*, và *khi nào engine đánh giá*. Cùng tên `SUBSTRING` / `now()` trên hai dialect **không** cùng hợp đồng. Optimizer được nhân bản hay hoãn gọi miễn kết quả logic giữ — trừ hàm volatile. File này là ngữ nghĩa để review, không phải bảng “mọi hàm có trên trái đất”.
@@ -9,7 +9,7 @@ Hàm SQL không phải thư viện C: mỗi lời gọi gắn với *kiểu*, *c
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. Chuỗi](#2-chuỗi)
   - [2.1 Độ dài, cắt, trim](#21-độ-dài-cắt-trim)
   - [2.2 Nối, tách, gộp](#22-nối-tách-gộp)
@@ -18,11 +18,11 @@ Hàm SQL không phải thư viện C: mỗi lời gọi gắn với *kiểu*, *c
 - [3. Regex](#3-regex)
   - [3.1 SQL Server 2025 `REGEXP_*`](#31-sql-server-2025-regexp_)
   - [3.2 PostgreSQL `regexp_*` / `~`](#32-postgresql-regexp_--)
-  - [3.3 Port flag \& RE2](#33-port-flag--re2)
+  - [3.3 Port flag & RE2](#33-port-flag--re2)
 - [4. Fuzzy (PREVIEW)](#4-fuzzy-preview)
 - [5. Ngày giờ](#5-ngày-giờ)
-  - [5.1 “Hiện tại” \& `CURRENT_DATE`](#51-hiện-tại--current_date)
-  - [5.2 Cộng trừ \& trunc — `DATEADD` bigint](#52-cộng-trừ--trunc--dateadd-bigint)
+  - [5.1 “Hiện tại” & `CURRENT_DATE`](#51-hiện-tại--current_date)
+  - [5.2 Cộng trừ & trunc — `DATEADD` bigint](#52-cộng-trừ--trunc--dateadd-bigint)
   - [5.3 `AT TIME ZONE`](#53-at-time-zone)
 - [6. Aggregate](#6-aggregate)
   - [6.1 `COUNT` / `SUM` / `AVG`](#61-count--sum--avg)
@@ -30,17 +30,18 @@ Hàm SQL không phải thư viện C: mỗi lời gọi gắn với *kiểu*, *c
   - [6.3 `FILTER`](#63-filter)
 - [7. Điều kiện](#7-điều-kiện)
 - [8. `CAST` / `TRY_CAST`](#8-cast--try_cast)
-- [9. Vector \& AI](#9-vector--ai)
+- [9. Vector & AI](#9-vector--ai)
   - [9.1 `VECTOR_DISTANCE` / `NORM` / `NORMALIZE` / `PROPERTY`](#91-vector_distance--norm--normalize--property)
   - [9.2 `AI_GENERATE_*`](#92-ai_generate_)
   - [9.3 pgvector](#93-pgvector)
 - [10. System](#10-system)
 - [11. Determinism: `now()` vs `clock_timestamp()`](#11-determinism-now-vs-clock_timestamp)
 - [12. Worked examples](#12-worked-examples)
-- [13. Best practices \& checklist](#13-best-practices--checklist)
+- [13. Best practices & checklist](#13-best-practices--checklist)
 - [14. Bẫy khi review](#14-bẫy-khi-review)
 - [15. Version gates](#15-version-gates)
-- [Phụ lục A. Sargable \& collation](#phụ-lục-a-sargable--collation)
+- [Phụ lục A. Sargable & collation](#phụ-lục-a-sargable--collation)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -73,7 +74,7 @@ Gọi HTTP từ hàm (`AI_GENERATE_EMBEDDINGS`, `sp_invoke_external_rest_endpoin
 | Cắt | `LEFT` `RIGHT` `SUBSTRING` | `left` `right` `substring` |
 | Hoa/thường | `UPPER` `LOWER` | `upper` `lower` |
 | Trim | `TRIM` `LTRIM` `RTRIM` | `trim` `btrim` `ltrim` `rtrim` |
-| Nối | `CONCAT` `CONCAT_WS` `+` `\|\|` (2022+) | `concat` `concat_ws` `\|\|` |
+| Nối | `CONCAT` `CONCAT_WS` `+` `\|\|` (2025) | `concat` `concat_ws` `\|\|` |
 | Tách | `STRING_SPLIT` | `string_to_array` / `unnest` / `regexp_split_to_table` |
 | Gộp | `STRING_AGG` | `string_agg` |
 | Pad | `REPLICATE` / `SPACE` | `lpad` `rpad` `repeat` |
@@ -112,7 +113,7 @@ SELECT CONCAT_WS(', ', first_name, last_name);
 
 -- SQL Server: + phụ thuộc CONCAT_NULL_YIELDS_NULL (mặc định ON → NULL)
 SELECT N'a' + NULL;                           -- NULL
-SELECT STRING_SPLIT(N'a,b,c', N',', 1);       -- enable_ordinal = 1 (2022+): cột ordinal
+SELECT value, ordinal FROM STRING_SPLIT(N'a,b,c', N',', 1) ORDER BY ordinal; -- 2022+
 SELECT STRING_AGG(name, N',') WITHIN GROUP (ORDER BY name);
 
 -- PostgreSQL
@@ -121,9 +122,9 @@ SELECT unnest(string_to_array('a,b,c', ','));
 SELECT string_agg(name, ',' ORDER BY name);
 ```
 
-`STRING_SPLIT` không bảo đảm thứ tự nếu **không** `enable_ordinal`. `string_to_array` giữ thứ tự. Gộp có `ORDER BY` tường minh — thiếu thì thứ tự **không xác định**.
+`STRING_SPLIT` không bảo đảm thứ tự hàng kể cả khi có enable_ordinal; phải ORDER BY ordinal. `string_to_array` giữ thứ tự. Gộp có `ORDER BY` tường minh — thiếu thì thứ tự **không xác định**.
 
-Delimiter regex: SS `REGEXP_SPLIT_TO_TABLE` (§3); PG `regexp_split_to_table`. `STRING_SPLIT` chỉ delimiter *một* ký tự (2022+ cho phép nhiều ký tự trên một số bản — đối chiếu Learn theo CU, đừng giả delimiter regex).
+Delimiter regex: SS `REGEXP_SPLIT_TO_TABLE` (§3); PG `regexp_split_to_table`. `STRING_SPLIT` chỉ nhận separator một ký tự; enable_ordinal không thay giới hạn này. Dùng REGEXP_SPLIT_TO_TABLE khi cần pattern.
 
 **Ghi chú:** `CONCAT` nuốt NULL; `||` / `+` (ANSI NULL) **không**. Review “sao mất đoạn giữa” thường là NULL cột, không phải bug `CONCAT`.
 
@@ -139,17 +140,17 @@ SELECT UNISTR(N'ABC#00C0#0181#0187', N'#');   -- escape tùy chọn '#'
 SELECT N'Hello! ' + NCHAR(0xd83d) + NCHAR(0xde00);  -- từng code unit — dài hơn
 ```
 
-`char`/`varchar` đầu vào cần collation **UTF-8** (code page 65001) hoặc Unicode-only. Collation legacy (code page ≠ 0 và ≠ 65001) **không** tương thích `UNISTR`. `NCHAR` chỉ một code unit; `UNISTR` nhận nhiều escape trong một literal.
+`char`/`varchar` đầu vào cần collation **UTF-8** (code page 65001) hoặc Unicode-only. Collation legacy (code page ≠ 0 và ≠ 65001) **không** tương thích `UNISTR`. `NCHAR` nhận codepoint ngoài BMP khi collation hỗ trợ supplementary characters; `UNISTR` nhận nhiều escape trong một literal.
 
 PostgreSQL **không** có `UNISTR`. Literal Unicode:
 
 ```sql
 SELECT U&'Hello! \+01F603';                   -- escape U& standard
-SELECT U&'d\00E9j\00E0' UESCAPE '!';          -- UESCAPE đổi dấu (mặc định \)
+SELECT U&'d!00E9j!00E0' UESCAPE '!';          -- UESCAPE đổi dấu (mặc định \)
 SELECT chr(128515);                           -- codepoint → text
 ```
 
-Đừng bịa `unistr()` trên PG 19. `E'...'` + `\u` phụ thuộc `standard_conforming_strings` (19 **luôn on** — backslash trong literal thường **không** escape trừ `E''`).
+Đừng bịa `unistr()` trên PG 19. E-string PostgreSQL hỗ trợ `\uXXXX` và `\UXXXXXXXX` độc lập với standard_conforming_strings; literal thường giữ backslash khi setting on.
 
 **Ghi chú:** `\xxxx` = UTF-16; `\+xxxxxx` = codepoint. Surrogate pair (`\D83D\DE00`) ≠ một `\+01F600` cùng glyph — test fixture, đừng mix mù.
 
@@ -392,7 +393,8 @@ COUNT(*)                 -- mọi hàng, kể cả cột NULL
 COUNT(col)               -- bỏ NULL col
 COUNT(DISTINCT col)      -- DISTINCT + NULL: NULL không đếm
 
-SELECT AVG(n) FROM (VALUES (1), (2), (NULL)) AS t(n);   -- 1.5, không chia 3
+SELECT AVG(n) FROM (VALUES (1), (2), (NULL)) AS t(n); -- PostgreSQL: 1.5; SQL Server: 1
+-- AVG bỏ NULL; CAST n sang decimal nếu cần phần lẻ trên SQL Server.
 ```
 
 `AVG` integer SS: chia nguyên rồi lên kiểu kết quả — `AVG` của `int` có thể **cắt**. PG `avg(int)` → `numeric`. Tiền tệ: `AVG(CAST(n AS decimal(19,4)))`.
@@ -531,7 +533,7 @@ END;
 
 ## 9. Vector & AI
 
-SQL Server **2025** kiểu `vector(n)` (tối đa **1998** dim, mặc định float32). Lưu binary, expose JSON array. Distance **exact** — `VECTOR_DISTANCE` **không** dùng vector index dù có.
+SQL Server **2025** kiểu `vector(n)` mặc định float32, tối đa **1998** chiều. `vector(n, float16)` tối đa **3996** chiều và vẫn PREVIEW trên SQL Server 2025. Lưu binary, expose JSON array. Distance **exact** — `VECTOR_DISTANCE` **không** dùng vector index dù có.
 
 ### 9.1 `VECTOR_DISTANCE` / `NORM` / `NORMALIZE` / `PROPERTY`
 
@@ -640,7 +642,7 @@ SELECT pg_current_xact_id_if_assigned();               -- NULL nếu chưa xin x
 
 `SCOPE_IDENTITY()` vs `@@IDENTITY` vs `IDENT_CURRENT`: trigger chèn bảng khác làm `@@IDENTITY` lệch — dùng `SCOPE_IDENTITY()` hoặc `OUTPUT`. PG: `RETURNING id` / `lastval()` / `currval(seq)` — `lastval` session-wide.
 
-PG 19 thêm một số hàm tiện (`encode` format mới §2.4; `random(min,max)` cho date/timestamp; `bytea`↔`uuid`; `error_on_null()`; `tid_block()` / `tid_offset()`; `pg_get_role_ddl()` …) — dùng khi cần, không nhét mọi API vào app.
+PG 19 thêm một số hàm tiện (`encode` format mới §2.4; `random(min,max)` cho date/timestamp; `bytea`↔`uuid`; `error_on_null()`; `tid_block()` / `tid_offset()`; các hàm thống kê/bảo trì) — dùng khi cần, không nhét mọi API vào app.
 
 **Ghi chú:** `txid_current()` / `pg_current_xact_id()` **gán xid** nếu chưa có. Monitoring: bản `*_if_assigned`. [transactions.md](transactions.md).
 
@@ -827,7 +829,7 @@ Chuẩn hóa query nếu model không L2-normalize. Cột đã normalize: cosine
 | `GREATEST` / `LEAST` | **2022+** | lõi |
 | `TRY_CAST` | 2012+ | — |
 | `STRING_SPLIT` ordinal | **2022+** | `unnest` + `ordinality` |
-| `\|\|` nối chuỗi | **2022+** | lõi |
+| `\|\|` nối chuỗi | **2025** | lõi |
 | `UNISTR` | **2025** | `U&` / `chr` |
 | `BASE64_ENCODE`/`DECODE` | **2025** (`url_safe`) | `encode`/`decode`; **`base64url` / `base32hex` = 19** |
 | `vector` / `VECTOR_DISTANCE` / `NORM` / `NORMALIZE` / `PROPERTY` | **2025** | pgvector ext |
@@ -850,3 +852,13 @@ Collation: `LIKE` / `=` / `UPPER` theo collation cột. `UNISTR` trên `varchar`
 `CAST(col AS date)` trên `datetime` SS có thể vẫn seek tùy convert; `CONVERT(varchar, d, 23) = '2026-09-13'` thì không. PG `ts::date` phá index `timestamptz` trừ khi range tường minh.
 
 Compat 170: `REGEXP_LIKE` / TVF. Engine 2025 + compat 160: scalar `REGEXP_REPLACE`/`SUBSTR`/`INSTR`/`COUNT` vẫn chạy; TVF cần 170 hoặc `ALLOW_BUILTIN_TVF_IN_ALL_COMPAT_LEVELS`. Đừng nâng 170 chỉ vì một `REGEXP_LIKE` nếu chưa baseline Query Store — [internal.md](internal.md).
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [T-SQL STRING_SPLIT](https://learn.microsoft.com/en-us/sql/t-sql/functions/string-split-transact-sql?view=sql-server-ver17)
+- [T-SQL PRODUCT](https://learn.microsoft.com/en-us/sql/t-sql/functions/product-aggregate-transact-sql?view=sql-server-ver17)
+- [PostgreSQL lexical structure / E-string](https://www.postgresql.org/docs/19/sql-syntax-lexical.html)

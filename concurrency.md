@@ -1,6 +1,6 @@
 # Khóa & concurrency
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
 > Bổ sung [transactions.md](transactions.md): đây là **lock, wait, deadlock, version store**. Isolation quyết định *thấy gì*; file này là *đợi gì, giết ai*.
 
 SQL Server mặc định **pessimistic** (lock manager) + tùy chọn row versioning (RCSI/SI). PostgreSQL **MVCC**: reader không block writer; writer block writer trên **cùng tuple**. Cùng `FOR UPDATE` / `UPDLOCK` không cùng hàng đợi. Optimized locking **2025** giảm lock memory — **không** đổi isolation. Deadlock `1205` vs `40001`/`40P01`. `SKIP LOCKED` ≠ `READPAST` hết nuance. Slot CES / logical replication / Fabric mirroring giữ xmin/log.
@@ -11,30 +11,53 @@ DDL lock, `REPACK`: [ddl.md](ddl.md), [indexes.md](indexes.md). Retry: [transact
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
-  - [1.1 Hình dung: khóa là biển “đừng đụng”](#11-hình-dung-khóa-là-biển-đừng-đụng-không-phải-isolation)
-- [2. SQL Server: granularity \& mode](#2-sql-server-granularity--mode)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
+  - [1.1 Hình dung: khóa là biển “đừng đụng”, không phải isolation](#11-hình-dung-khóa-là-biển-đừng-đụng-không-phải-isolation)
+- [2. SQL Server: granularity & mode](#2-sql-server-granularity--mode)
 - [3. Escalation](#3-escalation)
 - [4. Optimized locking (2025)](#4-optimized-locking-2025)
 - [5. PostgreSQL: lock bảng](#5-postgresql-lock-bảng)
 - [6. FOR UPDATE và biến thể](#6-for-update-và-biến-thể)
 - [7. SKIP LOCKED vs READPAST](#7-skip-locked-vs-readpast)
 - [8. Deadlock 1205 / 40P01 / 40001](#8-deadlock-1205--40p01--40001)
-- [9. Hint \& timeout](#9-hint--timeout)
+  - [8.1 Kịch bản hai session (chuyển khoản)](#81-kịch-bản-hai-session-chuyển-khoản)
+  - [8.2 SQL Server — chạy thật](#82-sql-server--chạy-thật)
+  - [8.3 PostgreSQL — cùng chuyện](#83-postgresql--cùng-chuyện)
+  - [8.4 `40001` không phải deadlock khóa](#84-40001-không-phải-deadlock-khóa)
+  - [8.5 Tránh](#85-tránh)
+- [9. Hint & timeout](#9-hint--timeout)
 - [10. tempdb governor, ADR, bloat / xmin](#10-tempdb-governor-adr-bloat--xmin)
+  - [10.1 Tempdb space governor (SQL Server 2025)](#101-tempdb-space-governor-sql-server-2025)
+  - [10.2 ADR trong tempdb (2025)](#102-adr-trong-tempdb-2025)
+  - [10.3 PostgreSQL bloat / xmin](#103-postgresql-bloat--xmin)
 - [11. CES, mirroring, replication slot](#11-ces-mirroring-replication-slot)
-- [12. pg\_stat\_lock \& log\_lock\_waits](#12-pg_stat_lock--log_lock_waits)
+  - [11.1 Change Event Streaming (SQL Server 2025, PREVIEW)](#111-change-event-streaming-sql-server-2025-preview)
+  - [11.2 Fabric mirroring (GA 2025)](#112-fabric-mirroring-ga-2025)
+  - [11.3 PostgreSQL slot](#113-postgresql-slot)
+  - [11.4 Chẩn đoán chuỗi block](#114-chẩn-đoán-chuỗi-block)
+- [12. pg_stat_lock & log_lock_waits](#12-pg_stat_lock--log_lock_waits)
+  - [12.1 `pg_stat_lock` (PostgreSQL 19)](#121-pg_stat_lock-postgresql-19)
+  - [12.2 `log_lock_waits` mặc định on (19)](#122-log_lock_waits-mặc-định-on-19)
 - [13. Parallel autovacuum vs lock](#13-parallel-autovacuum-vs-lock)
-  - [13.1 Tương thích lock bảng](#131-tương-thích-lock-bảng-postgresql)
-  - [13.2 Latch ≠ lock](#132-latch--lock-sql-server)
+  - [13.1 Tương thích lock bảng (PostgreSQL)](#131-tương-thích-lock-bảng-postgresql)
+  - [13.2 Latch ≠ lock (SQL Server)](#132-latch--lock-sql-server)
   - [13.3 Hotspot một hàng / một page](#133-hotspot-một-hàng--một-page)
 - [14. Worked examples](#14-worked-examples)
-- [15. Best practices \& checklist](#15-best-practices--checklist)
+  - [14.1 RMW tồn kho](#141-rmw-tồn-kho)
+  - [14.2 Queue SKIP LOCKED](#142-queue-skip-locked)
+  - [14.3 Deadlock hai session (đủ vòng)](#143-deadlock-hai-session-đủ-vòng)
+  - [14.4 1138 tempdb](#144-1138-tempdb)
+  - [14.5 Deadlock retry (pseudo)](#145-deadlock-retry-pseudo)
+  - [14.6 Incident: head blocker idle](#146-incident-head-blocker-idle)
+  - [14.7 Incident: log không truncate](#147-incident-log-không-truncate)
+  - [14.8 LAQ vs predicate không khớp](#148-laq-vs-predicate-không-khớp)
+- [15. Best practices & checklist](#15-best-practices--checklist)
 - [16. Bẫy khi review](#16-bẫy-khi-review)
 - [17. Version gates](#17-version-gates)
-- [Phụ lục A. pg\_stat\_lock](#phụ-lục-a-pg_stat_lock--đọc-số)
-- [Phụ lục B. Optimized locking — bật/tắt](#phụ-lục-b-optimized-locking--thứ-tự-bậttắt)
-- [Phụ lục C. Hai session — thứ tự khóa](#phụ-lục-c-hai-session--thứ-tự-khóa-mẫu)
+- [Phụ lục A. `pg_stat_lock` — đọc số](#phụ-lục-a-pg_stat_lock--đọc-số)
+- [Phụ lục B. Optimized locking — thứ tự bật/tắt](#phụ-lục-b-optimized-locking--thứ-tự-bậttắt)
+- [Phụ lục C. Hai session — thứ tự khóa mẫu](#phụ-lục-c-hai-session--thứ-tự-khóa-mẫu)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -251,7 +274,7 @@ SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id
     FOR UPDATE OF o;                 -- chỉ khóa alias o
 ```
 
-`OF alias` bắt buộc khi join — thiếu = khóa **mọi** bảng trong FROM (bất ngờ).
+`OF alias` giới hạn bảng bị khóa; khi join mà không ghi OF, PostgreSQL áp khóa lên các bảng đóng góp hàng vào kết quả. Outer join có thêm giới hạn với phía nullable.
 
 SQL Server không `FOR UPDATE` trên `SELECT` ngoài cursor. Dùng hint:
 
@@ -261,9 +284,9 @@ FROM dbo.Stock WITH (UPDLOCK, ROWLOCK, HOLDLOCK)
 WHERE Sku = N'A';
 ```
 
-`HOLDLOCK` giữ đến cuối txn (serializable phạm vi). `UPDLOCK` không `HOLDLOCK` = U lock theo isolation (RC nhả sớm hơn RR). Optimized locking: `UPDLOCK` vẫn cần cho RMW — TID không thay U lock lúc đọc.
+`UPDLOCK` giữ update lock đến cuối transaction, kể cả READ COMMITTED. `HOLDLOCK` thêm ngữ nghĩa SERIALIZABLE, bảo vệ cả khoảng khóa khi predicate phù hợp. Đọc-rồi-ghi phải nằm trong cùng transaction; ở autocommit, khóa được nhả khi SELECT kết thúc. Optimized locking không thay cơ chế bảo vệ RMW này.
 
-**Ghi chú:** PG `SELECT FOR UPDATE` ở RC: sau khi đợi, statement **re-check** hàng — hàng có thể biến mất. RR/SSI: conflict `40001`. Temporal `FOR PORTION OF`: khóa trước — [dml.md](dml.md), [constraints.md](constraints.md).
+**Ghi chú:** PG `SELECT FOR UPDATE` ở RC: sau khi đợi, statement **re-check** hàng — hàng có thể biến mất. RR/SSI: conflict `40001`. Chia range bằng DML ứng dụng: khóa trước — [dml.md](dml.md), [constraints.md](constraints.md).
 
 ---
 
@@ -279,7 +302,7 @@ ORDER BY id
 FOR UPDATE SKIP LOCKED
 LIMIT 10;
 
--- SQL Server
+-- SQL Server: biến thể READ COMMITTED với RCSI OFF.
 SELECT TOP (10) Id
 FROM dbo.JobQueue WITH (READPAST, UPDLOCK, ROWLOCK)
 WHERE Status = N'ready'
@@ -295,7 +318,7 @@ ORDER BY Id;
 
 Không fairness: worker có thể đói. Không dùng cho “đúng thứ tự tuyệt đối” trừ một worker. `NOWAIT` = lỗi ngay nếu đụng lock, không skip.
 
-**Ghi chú:** `READPAST` trên isolation serializable / hint range: đọc docs — skip page lock khác skip row. Test. Thiếu `UPDLOCK` + `READPAST` = đọc skip nhưng không giữ hàng → hai worker lấy cùng job.
+**Ghi chú:** READPAST bỏ row lock, không bỏ page lock; ROWLOCK không bảo đảm không escalation. Ở READ COMMITTED khi RCSI ON, dùng READCOMMITTEDLOCK để READPAST hợp lệ (không kết hợp ROWLOCK vì cùng nhóm granularity hint). Giữ SELECT claim và UPDATE trạng thái trong cùng transaction, hoặc dùng một UPDATE ... OUTPUT nguyên tử. SELECT autocommit có UPDLOCK vẫn nhả khóa trước statement tiếp theo. [Table hints](https://learn.microsoft.com/en-us/sql/t-sql/queries/hints-transact-sql-table?view=sql-server-ver17).
 
 ---
 
@@ -404,7 +427,7 @@ RR/SSI: snapshot đụng ghi. Không có cycle lock trong `pg_locks`. Retry gi�
 
 ### 8.5 Tránh
 
-**Một thứ tự khóa toàn cục** (luôn `UPDATE` id nhỏ trước), txn ngắn, không hotspot một hàng counter, atomic `UPDATE … WHERE id = ?`. Hai chiều chuyển khoản: `WHERE id IN (1,2)` một câu không đủ nếu engine không khóa cùng thứ tự — `SELECT … FOR UPDATE` / `UPDLOCK` **ORDER BY id** trước rồi mới sửa.
+**Một thứ tự khóa toàn cục** (luôn khóa id nhỏ trước), transaction ngắn và UPDATE nguyên tử giúp giảm deadlock. PostgreSQL có thể SELECT ... ORDER BY id FOR UPDATE khi khóa sắp xếp ổn định. Trên SQL Server, ORDER BY chỉ bảo đảm thứ tự kết quả, không bảo đảm thứ tự lấy lock trước Sort; đọc từng khóa theo thứ tự bằng các statement UPDLOCK trong cùng transaction rồi mới sửa.
 
 ---
 
@@ -658,7 +681,7 @@ Xem §8.1–8.3. Runbook:
 1. Repro hai cửa sổ, dừng giữa hai `UPDATE`.
 2. SS: XEvent deadlock graph — resource KEY `Accounts` id 1 vs 2.
 3. PG: log `deadlock detected` + `40P01`.
-4. Fix: `SELECT id FROM accounts WHERE id IN (1,2) ORDER BY id FOR UPDATE` (PG) / `WITH (UPDLOCK, HOLDLOCK) … ORDER BY Id` (SS) trước khi sửa.
+4. Fix: PostgreSQL SELECT ... ORDER BY id FOR UPDATE với id ổn định; SQL Server đọc khóa nhỏ rồi khóa lớn bằng hai SELECT ... WITH (UPDLOCK, HOLDLOCK) trong cùng transaction trước khi sửa.
 5. App: retry jitter — không chỉ “catch và chạy lại câu thứ hai”.
 
 ### 14.4 1138 tempdb
@@ -753,7 +776,7 @@ UPDATE dbo.Orders SET Status = N'closed' WHERE Status = N'open' AND Id = @id;
 - Tắt `log_lock_waits` vì ồn, mất tín hiệu.
 - Parallel autovacuum = “chặn OLTP như VACUUM FULL”.
 - 1138 xử lý như 1205 (retry mù).
-- On-prem bật optimized locking không ADR/RCSI.
+- Bật optimized locking thiếu ADR; muốn LAQ nhưng chưa bật RCSI.
 
 ---
 
@@ -811,7 +834,9 @@ LAQ không vào RR/SR. TID không thay `UPDLOCK` RMW. Schema lock nguyên.
 BEGIN;  -- PG: BEGIN;  SS: BEGIN TRAN;
 SELECT * FROM accounts WHERE id IN (1, 2) ORDER BY id
     FOR UPDATE;                              -- PG
--- SS: SELECT … WITH (UPDLOCK, HOLDLOCK, ROWLOCK) WHERE Id IN (1,2) ORDER BY Id;
+-- SQL Server: hai statement liên tiếp trong cùng transaction, theo thứ tự Id.
+-- SELECT Id FROM dbo.Accounts WITH (UPDLOCK, HOLDLOCK) WHERE Id = 1;
+-- SELECT Id FROM dbo.Accounts WITH (UPDLOCK, HOLDLOCK) WHERE Id = 2;
 UPDATE accounts SET balance = balance - 10 WHERE id = 1;
 UPDATE accounts SET balance = balance + 10 WHERE id = 2;
 COMMIT;
@@ -820,3 +845,11 @@ COMMIT;
 Không `ORDER BY` = planner có thể khóa 2 rồi 1 — deadlock với session ngược. Optimized locking không sắp thứ tự.
 
 ---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [SQL Server optimized locking](https://learn.microsoft.com/en-us/sql/relational-databases/performance/optimized-locking?view=sql-server-ver17)
+- [T-SQL READPAST and RCSI](https://learn.microsoft.com/en-us/sql/t-sql/queries/hints-transact-sql-table?view=sql-server-ver17)
+- [PostgreSQL SELECT locking clauses](https://www.postgresql.org/docs/19/sql-select.html)

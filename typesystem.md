@@ -1,6 +1,6 @@
 # Hệ thống kiểu dữ liệu
 
-> **Baseline:** SQL Server **2025** · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** · PostgreSQL **19 Beta 4**.<br>
 > SQL không có CTS/.NET: kiểu là **column type** + **cast rule** + **operator class**. Hai engine **không** map 1-1.
 
 Khi nói “cột `id` là int”, bạn chưa đủ thông tin để port. Cần biết storage, miền giá trị, typmod (`varchar(20)`, `numeric(12,2)`), collation, operator nào hợp lệ (`=`, `&&`, `->`), và indexability. `int` SQL Server và `integer` PostgreSQL gần nhau; `datetime` vs `timestamptz`, `bit` vs `boolean`, `nvarchar` vs `text`, `json` 2025 vs `jsonb` thì **không**. File này giải thích ngữ nghĩa — map máy móc 1-1 là nguồn bug.
@@ -11,36 +11,42 @@ Literal gắn kiểu: [literals.md](literals.md). Toán tử theo kiểu: [opera
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. Số](#2-số)
   - [2.1 Integer](#21-integer)
   - [2.2 Decimal / numeric](#22-decimal--numeric)
   - [2.3 Float, Inf, NaN](#23-float-inf-nan)
-  - [2.4 Identity \& sequence](#24-identity--sequence)
-  - [2.5 Overflow \& `PRODUCT()`](#25-overflow--product)
-- [3. Chuỗi \& binary](#3-chuỗi--binary)
+  - [2.4 Identity & sequence](#24-identity--sequence)
+  - [2.5 Overflow & `PRODUCT()`](#25-overflow--product)
+- [3. Chuỗi & binary](#3-chuỗi--binary)
 - [4. Ngày giờ](#4-ngày-giờ)
   - [4.1 Bảng kiểu](#41-bảng-kiểu)
   - [4.2 Đồng hồ trong transaction](#42-đồng-hồ-trong-transaction)
   - [4.3 `AT TIME ZONE`](#43-at-time-zone)
   - [4.4 `CURRENT_DATE` vs `GETDATE`](#44-current_date-vs-getdate)
-- [5. Boolean \& bit](#5-boolean--bit)
+- [5. Boolean & bit](#5-boolean--bit)
 - [6. UUID / uniqueidentifier](#6-uuid--uniqueidentifier)
 - [7. JSON](#7-json)
 - [8. XML](#8-xml)
 - [9. Array, range, composite (PostgreSQL)](#9-array-range-composite-postgresql)
-- [10. Vector \& AI generate](#10-vector--ai-generate)
+- [10. Vector & AI generate](#10-vector--ai-generate)
 - [11. Spatial / hierarchy / sql_variant](#11-spatial--hierarchy--sql_variant)
 - [12. NULL, domain, enum](#12-null-domain-enum)
-- [13. Cast \& type precedence](#13-cast--type-precedence)
+- [13. Cast & type precedence](#13-cast--type-precedence)
 - [14. LOB / TOAST](#14-lob--toast)
 - [15. Hai session — ví dụ làm việc](#15-hai-session--ví-dụ-làm-việc)
-- [16. Best practices \& checklist](#16-best-practices--checklist)
+  - [15.1 `now()` vs `SYSDATETIME` trong txn dài](#151-now-vs-sysdatetime-trong-txn-dài)
+  - [15.2 `json_array()` rỗng sau nâng PG 19](#152-json_array-rỗng-sau-nâng-pg-19)
+  - [15.3 `PRODUCT` overflow](#153-product-overflow)
+  - [15.4 Vector half vs float32](#154-vector-half-vs-float32)
+  - [15.5 UUID v7 vs v4 PK](#155-uuid-v7-vs-v4-pk)
+- [16. Best practices & checklist](#16-best-practices--checklist)
 - [17. Bẫy khi review](#17-bẫy-khi-review)
 - [18. Version gates](#18-version-gates)
 - [Phụ lục A. `PRODUCT` — kiểu vào / ra](#phụ-lục-a-product--kiểu-vào--ra)
-- [Phụ lục B. JSON on-prem vs Azure](#phụ-lục-b-json-on-prem-vs-azure--cùng-chữ-json)
-- [Phụ lục C. Half-precision vector](#phụ-lục-c-half-precision-vector--dung-lượng)
+- [Phụ lục B. Kiểu json và môi trường SQL Server](#phụ-lục-b-kiểu-json-và-môi-trường-sql-server)
+- [Phụ lục C. Half-precision vector — dung lượng](#phụ-lục-c-half-precision-vector--dung-lượng)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -58,7 +64,7 @@ Khi port một cột, hỏi:
 4. So sánh / collation / NaN.
 5. Index (btree, gin, columnstore, vector).
 
-**Ghi chú:** `vector` SQL Server **2025** và `vector` pgvector **cùng tên, khác ship**: native vs extension, distance hàm vs operator `<->`, ANN index **PREVIEW** vs IVFFlat/HNSW. `json` 2025 on-prem nhiều phần **PREVIEW**; `jsonb` PG GA lâu.
+**Ghi chú:** `vector` SQL Server **2025** và `vector` pgvector **cùng tên, khác ship**: native vs extension, distance hàm vs operator `<->`, ANN index **PREVIEW** vs IVFFlat/HNSW. json 2025 hiện GA; `jsonb` PG GA lâu.
 
 ---
 
@@ -115,9 +121,9 @@ SELECT pg_typeof(1.0 / 2);           -- numeric
 SELECT SQL_VARIANT_PROPERTY(1.0 / 2, 'BaseType');  -- numeric
 ```
 
-**Ghi chú:** `money` SQL Server (4 decimal, rounding ngân hàng kỳ lạ, overflow kiểu riêng) và `money` PostgreSQL (scale 2, **không** portable, bị ghét trên docs) — đừng dùng cột mới. Port `money` → `numeric(19,4)` có chủ đích.
+**Ghi chú:** `money` SQL Server (4 chữ số thập phân, có nguy cơ truncation/rounding trong tính toán) và `money` PostgreSQL (fractional precision phụ thuộc `lc_monetary`, **không** portable) — đừng dùng cột mới. Port `money` → `numeric(19,4)` có chủ đích.
 
-Chia `numeric` vs `float` đổi báo cáo tài chính. Literal `1.23e0` là float — [literals.md](literals.md).
+Chia `numeric` vs `float` đổi báo cáo tài chính. Literal `1.23e0` là float trên SQL Server nhưng khởi đầu là numeric trên PostgreSQL — [literals.md](literals.md).
 
 ### 2.3 Float, Inf, NaN
 
@@ -125,16 +131,16 @@ Chia `numeric` vs `float` đổi báo cáo tài chính. Literal `1.23e0` là flo
 -- PostgreSQL
 SELECT 'Infinity'::float8, '-Infinity'::float8, 'NaN'::float8;
 SELECT 'NaN'::numeric;
--- NaN = NaN là TRUE với numeric PG (SQL) — khác IEEE float (NaN = NaN → false)
+-- PostgreSQL coi NaN bằng NaN ở cả numeric và float để hỗ trợ sort/index.
 
-SELECT 'NaN'::float8 = 'NaN'::float8;     -- false
+SELECT 'NaN'::float8 = 'NaN'::float8;     -- true
 SELECT 'NaN'::numeric = 'NaN'::numeric;   -- true
 SELECT 'NaN'::numeric IS NOT DISTINCT FROM 'NaN'::numeric; -- true
 ```
 
-SQL Server `real`/`float` không có literal `NaN`/`Infinity` kiểu PG; overflow integer → lỗi; một số phép float có thể ra Inf tùy phiên bản/expression — **đừng** thiết kế nghiệp vụ dựa vào Inf.
+SQL Server không hỗ trợ literal NaN/Infinity như PostgreSQL; không dựa vào giá trị không hữu hạn như hợp đồng dữ liệu portable.
 
-Sắp xếp: PG `NaN` numeric lớn hơn mọi số (đi cuối `ORDER BY ASC`). Unique index: hai `NaN` numeric **đụng** nhau.
+Sắp xếp: PG NaN (numeric và float) lớn hơn mọi số (đi cuối `ORDER BY ASC`). Unique index: hai `NaN` numeric **đụng** nhau.
 
 **Ghi chú:** Vector SQL Server lưu float32 (hoặc half) — NaN trong embedding là bug model, không “SQL NaN”. Đừng unique-index cột `vector`.
 
@@ -195,9 +201,9 @@ SELECT exp(sum(ln(factor))) FROM rates WHERE factor > 0;
 **Ghi chú kiểu `PRODUCT`:**
 
 - Không phải kiểu cột. Aggregate, giống `SUM`/`AVG` — bỏ NULL, mọi hàng NULL → `NULL`.
-- Kiểu ra theo kiểu vào: `int` nhân tràn → lỗi; `numeric` theo precision. Đừng `PRODUCT` trên `float` cho lãi suất kép rồi so tiền.
+- Kiểu ra: int giữ int, bigint giữ bigint; decimal có scale 0 trả decimal(38,0), scale khác 0 trả decimal(38,6). Overflow vẫn có thể xảy ra; float/real trả float và có sai số.
 - Zero trong nhóm → 0. Âm: dấu theo số lượng âm (như nhân tay). PG `ln()` **không** nhận ≤ 0 — filter `factor > 0` đổi nghiệp vụ (bỏ hàng).
-- Window `PRODUCT(…) OVER (…)`: nếu engine hỗ trợ aggregate window chuẩn — SQL Server aggregate thường vào `OVER`; đo trên 2025, không bịa `PRODUCT` FILTER. PG: không hàm này.
+- PRODUCT hỗ trợ OVER trong SQL Server 2025; không hỗ trợ FILTER hoặc IGNORE NULLS như offset function. PG: không hàm này.
 
 `DATEADD` bigint **2025**: khoảng giây lớn không còn overflow `int`. PG: `+ interval '1 second' * n` với `n` bigint/`numeric`.
 
@@ -401,45 +407,25 @@ T1, T2 insert NEWSEQUENTIALID()/uuidv7(): append-ish, ít split hơn
 
 ## 7. JSON
 
-SQL Server **2025** có kiểu **`json` native** (binary, tối đa ~2 GB/giá trị, UTF-8 nội bộ). Docs: **PREVIEW trên on-prem 2025**; GA Azure SQL / MI (policy 2025). Trước 2025: `nvarchar` + `JSON_VALUE` / `ISJSON`. Hàm cũ vẫn chạy trên `nvarchar` **và** `json`.
-
-PostgreSQL: `json` (text, giữ khoảng trắng / thứ tự key / key trùng) và **`jsonb`** (binary, indexable). **`jsonb` là mặc định nên dùng.**
+SQL Server 2025 có kiểu json native GA, lưu binary UTF-8; đầu vào phải là object hoặc array, không nhận scalar JSON top-level. PostgreSQL json giữ văn bản/key trùng; jsonb có cấu trúc binary, hỗ trợ so sánh/index và giữ giá trị cuối của key trùng.
 
 ```sql
 -- SQL Server 2025
 CREATE TABLE dbo.Event (
-    Id   int NOT NULL PRIMARY KEY,
-    Doc  json NOT NULL
+    Id int NOT NULL PRIMARY KEY CLUSTERED,
+    Doc json NOT NULL
 );
 SELECT JSON_OBJECT('id': 1, 'name': N'Ada');
-SELECT JSON_OBJECTAGG(k VALUE v) FROM pairs;     -- 2025; on-prem nhiều mục PREVIEW
+SELECT JSON_OBJECTAGG(k: v) FROM pairs;
 
 -- PostgreSQL
-CREATE TABLE event (
-    id  int PRIMARY KEY,
-    doc jsonb NOT NULL
-);
+CREATE TABLE event (id integer PRIMARY KEY, doc jsonb NOT NULL);
 SELECT jsonb_build_object('id', 1, 'name', 'Ada');
 ```
 
-**PREVIEW on-prem (nhiều mục JSON 2025):**
+JSON INDEX, JSON_CONTAINS, json.modify, wildcard/WITH ARRAY WRAPPER và các aggregate JSON đều thuộc SQL Server 2025 hiện tại; xem [JSON overview](https://learn.microsoft.com/en-us/sql/relational-databases/json/json-data-sql-server?view=sql-server-ver17). JSON INDEX yêu cầu clustered primary key; kiểu json tự nó không có yêu cầu này.
 
-- `CREATE JSON INDEX` — clustered PK bắt buộc; path `FOR` không chồng; tối ưu `JSON_VALUE` / `JSON_PATH_EXISTS` / `JSON_CONTAINS`.
-- `JSON_CONTAINS`, wildcard path ANSI, `JSON_QUERY … WITH ARRAY WRAPPER`.
-- `JSON_OBJECTAGG` / `JSON_ARRAYAGG` (`RETURNING JSON`).
-- Method `modify` trên kiểu `json`.
-
-```sql
-CREATE JSON INDEX jix ON dbo.Doc (Payload) FOR ('$.status');  -- PREVIEW
-```
-
-JSON INDEX **không** trên heap-only (thiếu clustered PK). Path `$.a` recursive gồm `$.a.b`. Aggregate JSON GA trên Azure/Fabric DW trong khi on-prem preview — feature flag lệch môi trường.
-
-Toán tử `->` / `->>` / `@>` là PostgreSQL. SQL Server dùng hàm `JSON_VALUE` / `JSON_QUERY` / `JSON_MODIFY` / `JSON_CONTAINS` — [json.md](json.md), [operators.md](operators.md).
-
-`json_array()` 0 hàng: PG **19** trả `[]` (trước: `NULL`) — breaking khi upgrade. SQL Server `JSON_ARRAY()` constructor khác hàm aggregate `JSON_ARRAYAGG` — không nhầm `json_array()` PG.
-
-**Ghi chú:** Đừng đổi `nvarchar` JSON sang `json` hàng loạt on-prem trước khi chấp nhận **PREVIEW** + clustered PK cho index. So sánh `=` trên `json`/`jsonb`/SS `json` **không** cùng (khoảng trắng, thứ tự key, binary canonical).
+JSON_VALUE/JSON_QUERY/OPENJSON/JSON_MODIFY vẫn phục vụ cột nvarchar. PostgreSQL dùng ->/->>/@>; SQL Server dùng hàm. PostgreSQL json không có equality operator, còn jsonb có; cần cast json sang jsonb trước NULLIF/so sánh cấu trúc. json_array(subquery rỗng) từ 19 trả []; constructor json_array() không đối số vốn trả []. Chi tiết [json.md](json.md).
 
 ---
 
@@ -469,7 +455,7 @@ SELECT ARRAY[1,2,3];
 SELECT tags[1], tags @> ARRAY['sql'] FROM posts;   -- 1-based index
 UPDATE posts SET tags = tags || 'sql';
 
--- Range / multirange (application-time PG 18+ WITHOUT OVERLAPS; DML PG 19 FOR PORTION OF)
+-- Range / multirange (application-time PG 18+ WITHOUT OVERLAPS; FOR PORTION OF đã bị rút khỏi 19)
 SELECT int4range(1, 10, '[)');                     -- 1 ≤ x < 10
 SELECT datemultirange(daterange('2026-01-01', '2026-06-01'));
 
@@ -505,7 +491,7 @@ SELECT VECTORPROPERTY(@q, 'Dimensions');
 |---|---|---|
 | Kiểu `vector(n)` | **GA** | Binary storage; client thấy JSON array |
 | Phần tử float32 (4 byte) | **GA** | Mặc định |
-| Half-precision (2 byte) | **GA** (kiểu) | Giảm RAM/IO; đo recall — không đổi `VECTOR_DISTANCE` API |
+| Half-precision float16 (2 byte) | **PREVIEW** | vector(n, float16), cần PREVIEW_FEATURES; tối đa 3996 chiều, Azure/Fabric có trạng thái riêng |
 | `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTOR_NORMALIZE` / `VECTORPROPERTY` | **GA** | Metric `'cosine'` / docs metric khác — đối chiếu Learn, không bịa tên metric |
 | `CREATE EXTERNAL MODEL` / `ALTER` / `DROP` | GA surface | REST embedding, credential **tách** engine |
 | `AI_GENERATE_EMBEDDINGS` / `AI_GENERATE_CHUNKS` | GA surface | Chunk + gọi model đã định nghĩa |
@@ -588,7 +574,7 @@ ALTER TYPE order_status ADD VALUE 'cancelled';
 
 **Ghi chú:** Enum PG khó bỏ giá trị; rename/reorder hạn chế. Lookup table portable hơn khi nghiệp vụ đổi trạng thái. Unique + NULL: [dialects.md §6.2](dialects.md#62-unique--null), [constraints.md](constraints.md).
 
-Domain trên `vector` / `json` — được về mặt type PG; SQL Server alias `FROM json` / `FROM vector(n)`: kiểm `sys.types`, đừng giả CLR. On-prem `json` **PREVIEW**: alias không làm GA.
+PostgreSQL cho domain trên json hoặc kiểu extension như pgvector khi đã cài extension. SQL Server không cho alias type dựa trên json hoặc vector; xem giới hạn kiểu dữ liệu.
 
 ---
 
@@ -618,7 +604,7 @@ SELECT pg_typeof(1 + 1.2);                  -- numeric
 SELECT pg_typeof(1 + 1.2::float8);          -- double precision
 ```
 
-`CAST(N'[0.1, 0.2]' AS vector(2))` (SS) vs `'[0.1, 0.2]'::vector` (pgvector): JSON-array text → binary. Sai số chiều → lỗi. `CAST(… AS json)` on-prem 2025: surface **PREVIEW** cho kiểu native.
+`CAST(N'[0.1, 0.2]' AS vector(2))` (SS) vs `'[0.1, 0.2]'::vector` (pgvector): JSON-array text → binary. Sai số chiều → lỗi. `CAST(… AS json)` on-prem 2025: kiểu native GA; test driver và dữ liệu object/array trước khi migrate.
 
 PG 19 `error_on_null()` — hàm, không phải cast. Dùng khi cần fail NULL, không nhét mọi API vào cột.
 
@@ -643,7 +629,7 @@ PostgreSQL: giá trị lớn **TOAST** (nén + out-of-line). PG **19**: `default
 ### 15.2 `json_array()` rỗng sau nâng PG 19
 
 ```text
-T1 (PG 18): SELECT json_array() FROM t WHERE false;     -- NULL (0 hàng)
+T1 (PG 18): SELECT json_array(SELECT id FROM t WHERE false); -- một hàng chứa NULL
 T2 (PG 19): cùng query                                 -- []
 Client: if (doc == null) “không phần tử” → vỡ; [] là array rỗng hợp lệ
 ```
@@ -684,7 +670,7 @@ T2: INSERT gen_random_uuid() / NEWID()
 - Thời điểm UTC: PG `timestamptz`; SQL Server `datetime2` + quy ước UTC **hoặc** `datetimeoffset` nếu cần giữ offset gốc.
 - Chuỗi: PG `text`/`varchar`; SQL Server `nvarchar` trừ khi chắc code page. Tránh `ntext`/`text`/`image`.
 - Boolean: PG `boolean`; SQL Server `bit` + so sánh `= 1`.
-- JSON: PG `jsonb`; SQL Server 2025 `json` native — on-prem nhiều phần **PREVIEW**; không `nvarchar` mới nếu đã chấp nhận preview.
+- JSON: jsonb PostgreSQL và json native SQL Server 2025; dùng cột quan hệ cho key cần FK/join, kiểm driver và kế hoạch migration.
 - PK phân tán: `uuidv7()` / `NEWSEQUENTIALID`, không v4 làm clustered key.
 - Vector: kiểu + distance **GA** SQL 2025; ANN index / `VECTOR_SEARCH` **PREVIEW**. Half-precision đo recall. PG: `pgvector` — ghi rõ extension. `AI_GENERATE_*` + credential, không key trong proc.
 - `PRODUCT`: neo `numeric`; nhớ NULL/zero/âm. PG không có hàm.
@@ -708,7 +694,7 @@ T2: INSERT gen_random_uuid() / NEWID()
 - `serial` dump thiếu `OWNED BY` / grant sequence.
 - `sql_variant` / `money` cột mới.
 - `vector` **index** trên prod khi mới `PREVIEW_FEATURES`.
-- `json` native on-prem như đã GA Azure; JSON INDEX trên heap.
+- JSON INDEX trên heap; scalar JSON cast vào kiểu json SQL Server chỉ nhận object/array.
 - `json` text PG (giữ key trùng) vs `jsonb` vs SQL Server `json` binary — so sánh `=` khác nhau.
 - Implicit `'1'+2` T-SQL sống sót khi port — PG lỗi lúc chạy.
 - `CURRENT_DATE` cột vs hàm sau nâng 2025.
@@ -724,11 +710,11 @@ T2: INSERT gen_random_uuid() / NEWID()
 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
-| Kiểu `json` native | **2025 PREVIEW** on-prem (Azure GA hơn) | `json`/`jsonb` lâu (`jsonb` 9.4+) |
-| `JSON_OBJECTAGG` / `JSON_ARRAYAGG` | **2025** (on-prem nhiều **PREVIEW**) | `json_object_agg` lâu |
-| `JSON INDEX` / `JSON_CONTAINS` | **2025 PREVIEW** | GIN `@>` |
+| Kiểu `json` native | **2025 GA** | `json`/`jsonb` lâu (`jsonb` 9.4+) |
+| `JSON_OBJECTAGG` / `JSON_ARRAYAGG` | **2025 GA** | `json_object_agg` lâu |
+| `JSON INDEX` / `JSON_CONTAINS` | **GA** | GIN `@>` |
 | `vector(n)` + distance | **2025 GA** | pgvector (extension) |
-| Half-precision vector | **2025** | pgvector typmod/storage — docs extension |
+| Half-precision vector | **2025 PREVIEW**; float16 cần PREVIEW_FEATURES | pgvector halfvec theo version extension |
 | `VECTOR_SEARCH` / vector index | **2025 PREVIEW** | pgvector IVFFlat/HNSW |
 | `AI_GENERATE_EMBEDDINGS` / `AI_GENERATE_CHUNKS` / `EXTERNAL MODEL` | **2025** | app-side / extension |
 | `CURRENT_DATE` | **2025** | lõi |
@@ -759,40 +745,28 @@ FROM dbo.Rates
 WHERE factor IS NOT NULL;
 ```
 
-| Đầu vào | Rủi ro |
-|---|---|
-| `int` / `bigint` | Overflow statement abort — ép `numeric` trước khi nhân dồn |
-| `numeric(p,s)` | Precision tích có thể vượt `p` — khai báo rộng hơn cột nguồn |
-| `float`/`real` | Sai số kép; Inf không phải hợp đồng nghiệp vụ |
-| Có 0 | Tích = 0 (đúng nhân); PG `ln(0)` fail nếu mô phỏng `exp(sum(ln()))` |
-| Có âm | Dấu theo số lượng âm; `ln` âm không thực — filter `> 0` **đổi** tích |
-| NULL | Bỏ như `SUM`; mọi hàng NULL → `NULL` (không phải 1) |
+| Đầu vào | Kiểu trả về | Rủi ro |
+|---|---|---|
+| tinyint / smallint / int | int | Overflow; ép kiểu trước aggregate |
+| bigint | bigint | Overflow vẫn có thể xảy ra |
+| decimal(p,0) | decimal(38,0) | Tích vượt precision 38 vẫn lỗi |
+| decimal(p,s), s > 0 | decimal(38,6) | Scale đầu ra 6; kiểm làm tròn và overflow |
+| money / smallmoney | money | Giới hạn range của money |
+| float / real | float | Sai số tích lũy |
 
-Window: nếu dùng `PRODUCT(x) OVER (ORDER BY d)` — đo trên 2025; không `FILTER`/`IGNORE NULLS` giả ANSI. PG: CTE nhân dồn `exp(sum(ln(x)) OVER (…))` cùng hạn chế dấu/zero.
+PRODUCT bỏ NULL; nhóm không có giá trị khác NULL trả NULL. Có zero thì tích bằng zero; số lượng giá trị âm quyết định dấu. Mô phỏng bằng exp(sum(ln(x))) chỉ dùng trực tiếp khi mọi x dương.
+
+PRODUCT hỗ trợ OVER; running product cần frame/ORDER BY xác định; không `FILTER`/`IGNORE NULLS` giả ANSI. PG: CTE nhân dồn `exp(sum(ln(x)) OVER (…))` cùng hạn chế dấu/zero.
 
 `DATEADD(…, bigint, …)` **2025** là hàm datetime, không aggregate — đừng nhóm với `PRODUCT` trong review “hàm mới 2025” rồi quên overflow từng loại.
 
 ---
 
-## Phụ lục B. JSON on-prem vs Azure — cùng chữ `json`
+## Phụ lục B. Kiểu json và môi trường SQL Server
 
-| Mảnh | On-prem 2025 | Azure SQL / MI (policy 2025) |
-|---|---|---|
-| Kiểu `json` binary | **PREVIEW** (docs) | GA hơn on-prem |
-| `JSON_VALUE` / `OPENJSON` / `FOR JSON` trên `nvarchar` | GA (lâu) | GA |
-| `CREATE JSON INDEX` | **PREVIEW** | đối chiếu portal — đừng copy flag |
-| `JSON_OBJECTAGG` / `JSON_ARRAYAGG` | **PREVIEW** nhiều phần | thường GA cloud sớm hơn |
-| `JSON_CONTAINS` | **PREVIEW** | đối chiếu Learn |
+json native hiện GA trên SQL Server 2025 và các nền tảng Azure/Fabric nêu trong Learn. Không cần bật PREVIEW_FEATURES chỉ để dùng JSON. Môi trường vẫn cần kiểm build/CU, driver, update policy của Managed Instance và giới hạn cụ thể của API.
 
-Hai session — staging Azure, prod on-prem:
-
-```text
-T1 (Azure): CREATE TABLE … (Doc json); CREATE JSON INDEX …
-T2 (on-prem, PREVIEW_FEATURES off): CREATE TABLE … (Doc json);  -- kiểu có thể fail / preview
-    CREATE JSON INDEX …                                         -- fail
-```
-
-Rollback: `nvarchar(max)` + `ISJSON` dễ hơn `json` + index clustered PK. Đổi kiểu hàng loạt = rewrite LOB — [internal.md](internal.md).
+json không thể làm key B-tree thông thường hoặc base type cho alias; JSON INDEX riêng yêu cầu clustered PK. Migrate nvarchar sang json cần kiểm object/array hợp lệ, dung lượng và kế hoạch rollback. Xem [JSON data type](https://learn.microsoft.com/en-us/sql/t-sql/data-types/json-data-type?view=sql-server-ver17). Vector float16 vẫn PREVIEW trên SQL Server 2025; xem [Vector data type](https://learn.microsoft.com/en-us/sql/t-sql/data-types/vector-data-type?view=sql-server-ver17).
 
 ---
 
@@ -813,3 +787,13 @@ T2: INSERT cột half-precision — kiểm implicit; đo cosine drift
 ```
 
 pgvector: typmod chiều; storage half tùy version extension — đọc docs extension, không bịa tên type SQL Server trên PG.
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL numeric types](https://www.postgresql.org/docs/19/datatype-numeric.html)
+- [SQL Server JSON data type](https://learn.microsoft.com/en-us/sql/t-sql/data-types/json-data-type?view=sql-server-ver17)
+- [PRODUCT return types](https://learn.microsoft.com/en-us/sql/t-sql/functions/product-aggregate-transact-sql?view=sql-server-ver17)

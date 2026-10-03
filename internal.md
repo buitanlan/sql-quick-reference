@@ -1,6 +1,6 @@
 # Kiến trúc nội bộ — giống và khác
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
 > File này so sánh **engine**, không phải cú pháp. Isolation: [transactions.md](transactions.md). Khóa: [concurrency.md](concurrency.md). Index/storage: [indexes.md](indexes.md). DDL vật lý: [ddl.md](ddl.md). JSON binary: [json.md](json.md). Constraint: [constraints.md](constraints.md).
 
 Hai sản phẩm cùng nói “SQL”, cùng có page, WAL/log, buffer, statistics, replica — nhưng **không cùng máy**. Port schema rồi đo QPS mà không hiểu process model, visibility, vacuum vs ghost cleanup, tempdb vs `pgsql_tmp` là đoán mò. Mục tiêu: biết chỗ **cùng ý** (để chuyển khái niệm) và chỗ **cùng tên nhưng khác guarantee** (để không copy runbook).
@@ -11,46 +11,61 @@ Delta phiên bản (TDS 8, `WAIT FOR`, optimized locking, …) gom **§20** — 
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. Bảng ánh xạ nhanh](#2-bảng-ánh-xạ-nhanh)
-- [3. Process \& memory](#3-process--memory)
+- [3. Process & memory](#3-process--memory)
+  - [3.1 SQL Server — một process, nhiều scheduler](#31-sql-server--một-process-nhiều-scheduler)
+  - [3.2 PostgreSQL — postmaster + backend](#32-postgresql--postmaster--backend)
+  - [3.3 Ghi chú](#33-ghi-chú)
   - [3.4 Shared memory vs clerk](#34-shared-memory-vs-clerk)
   - [3.5 NUMA và I/O worker](#35-numa-và-io-worker)
 - [4. Kết nối, session, protocol](#4-kết-nối-session-protocol)
-- [5. Catalog \& database](#5-catalog--database)
+- [5. Catalog & database](#5-catalog--database)
+  - [5.1 SQL Server: instance ⊃ database ⊃ schema ⊃ object](#51-sql-server-instance--database--schema--object)
+  - [5.2 PostgreSQL: cluster ⊃ database ⊃ schema](#52-postgresql-cluster--database--schema)
+  - [5.3 System column](#53-system-column)
 - [6. Storage: file, page, heap](#6-storage-file-page-heap)
+  - [6.1 Page](#61-page)
+  - [6.2 Bảng vật lý](#62-bảng-vật-lý)
+  - [6.3 File](#63-file)
 - [7. TOAST vs LOB](#7-toast-vs-lob)
 - [8. WAL vs transaction log](#8-wal-vs-transaction-log)
   - [8.1 Full page write vs VLF](#81-full-page-write-vs-vlf)
-  - [8.2 Delayed durability](#82-delayed-durability-vs-synchronous_commitoff)
+  - [8.2 Delayed durability vs synchronous_commit=off](#82-delayed-durability-vs-synchronous_commitoff)
   - [8.3 Logical decode giữ xmin](#83-logical-decode-giữ-xmin)
 - [9. Buffer, checkpoint, dirty page](#9-buffer-checkpoint-dirty-page)
 - [10. Visibility: MVCC vs lock + version](#10-visibility-mvcc-vs-lock--version)
-  - [10.1 Snapshot xmin vs version store](#101-snapshot-xmin-vs-version-store-size)
+  - [10.0 Hình dung: photocopy trên bàn vs khóa cửa phòng](#100-hình-dung-photocopy-trên-bàn-vs-khóa-cửa-phòng)
+  - [10.1 Snapshot xmin vs version store size](#101-snapshot-xmin-vs-version-store-size)
   - [10.2 HOT vs in-place](#102-hot-vs-in-place)
 - [11. Dọn rác: vacuum vs ghost / ADR](#11-dọn-rác-vacuum-vs-ghost--adr)
-- [12. Temp: tempdb vs pgsql\_tmp](#12-temp-tempdb-vs-pgsql_tmp)
-- [13. Optimizer \& statistics](#13-optimizer--statistics)
+- [12. Temp: tempdb vs pgsql_tmp](#12-temp-tempdb-vs-pgsql_tmp)
+- [13. Optimizer & statistics](#13-optimizer--statistics)
 - [14. Parallelism](#14-parallelism)
-- [15. HA \& replication](#15-ha--replication)
-  - [15.4 Crash recovery](#154-crash-recovery--hai-máy)
+- [15. HA & replication](#15-ha--replication)
+  - [15.1 SQL Server](#151-sql-server)
+  - [15.2 PostgreSQL](#152-postgresql)
+  - [15.3 Ánh xạ sai thường gặp](#153-ánh-xạ-sai-thường-gặp)
+  - [15.4 Crash recovery — hai máy](#154-crash-recovery--hai-máy)
   - [15.5 Connection storm](#155-connection-storm)
-  - [15.6 Redo vs đọc replica](#156-redo-vs-đọc-replica)
-- [16. Backup \& restore](#16-backup--restore)
+  - [15.6 Redo vs “đọc replica”](#156-redo-vs-đọc-replica)
+- [16. Backup & restore](#16-backup--restore)
 - [17. Extensibility](#17-extensibility)
 - [18. Bảo mật engine](#18-bảo-mật-engine)
 - [19. Edition, compat, GUC](#19-edition-compat-guc)
 - [20. Điểm 2025 / 19 trên kiến trúc](#20-điểm-2025--19-trên-kiến-trúc)
 - [21. Chọn engine khi nào](#21-chọn-engine-khi-nào)
-- [22. Best practices \& checklist](#22-best-practices--checklist)
+- [22. Best practices & checklist](#22-best-practices--checklist)
 - [23. Bẫy khi review](#23-bẫy-khi-review)
 - [24. Version gates](#24-version-gates)
-- [Phụ lục A. Incident map](#phụ-lục-a-incident-map--đúng-máy)
-- [Phụ lục B. Recovery window](#phụ-lục-b-sơ-đồ-recovery-window)
-- [Phụ lục C. ctid / RID](#phụ-lục-c-ctid--rid-không-ổn-định)
-- [Phụ lục D. Buffer vs OS cache](#phụ-lục-d-buffer-pool-vs-os-cache--đo)
-- [Phụ lục E. Autovacuum parallel](#phụ-lục-e-autovacuum-parallel-vs-oltp)
-- [Phụ lục F. Checklist kiến trúc](#phụ-lục-f-checklist-kiến-trúc-why)
+- [Phụ lục A. Incident map — đúng máy](#phụ-lục-a-incident-map--đúng-máy)
+- [Phụ lục B. Sơ đồ recovery window](#phụ-lục-b-sơ-đồ-recovery-window)
+- [Phụ lục C. `ctid` / RID không ổn định](#phụ-lục-c-ctid--rid-không-ổn-định)
+- [Phụ lục D. Buffer pool vs OS cache — đo](#phụ-lục-d-buffer-pool-vs-os-cache--đo)
+  - [Checkpoint spike](#checkpoint-spike)
+- [Phụ lục E. Autovacuum parallel vs OLTP](#phụ-lục-e-autovacuum-parallel-vs-oltp)
+- [Phụ lục F. Checklist kiến trúc (WHY)](#phụ-lục-f-checklist-kiến-trúc-why)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -264,9 +279,9 @@ Giá trị lớn không nằm nguyên 8 KB.
 
 **PostgreSQL TOAST:** bảng toast riêng, nén (`pglz` / **`lz4` mặc định 19**), out-of-line. `bytea`/`jsonb`/`text` dài. `default_toast_compression`.
 
-**SQL Server:** `varchar(max)` / `varbinary(max)` / `nvarchar(max)` in-row đến ngưỡng rồi LOB page (`text/image` cũ deprecated). `json` 2025 binary ~2 GB/row (**PREVIEW** on-prem). Columnstore có LOB riêng; 2025 shrink CS cải thiện.
+**SQL Server:** `varchar(max)` / `varbinary(max)` / `nvarchar(max)` in-row đến ngưỡng rồi LOB page (`text/image` cũ deprecated). `json` 2025 binary ~2 GB/row (**GA**). Columnstore có LOB riêng; 2025 shrink CS cải thiện.
 
-Cập nhật một key JSON lớn = rewrite giá trị (cả hai, trừ patch nhỏ khi engine hỗ trợ — `json.modify` PREVIEW). Chi tiết [json.md](json.md).
+Cập nhật một key JSON lớn = rewrite giá trị (cả hai, trừ patch nhỏ khi engine hỗ trợ — `json.modify` GA). Chi tiết [json.md](json.md).
 
 ---
 
@@ -608,9 +623,9 @@ PG 19 incompatibility chặn upgrade: `btree_gist` inet/cidr ([indexes.md](index
 | Index AM | Cố định + columnstore + vector **PREVIEW** | GiST/GIN/BRIN/hash + AM tùy biến (`IndexAmRoutines` **static 19**) |
 | Foreign data | Linked server, PolyBase (2025 parquet không service) | FDW (`postgres_fdw`, `file_fdw`) |
 | AI | `vector`, external model, REST proc | `pgvector`, app-side |
-| Graph | SQL Graph cũ (NODE/EDGE) — không PGQ | **SQL/PGQ 19** `GRAPH_TABLE` (rewrite join) |
+| Graph | SQL Graph NODE/EDGE/MATCH | SQL/PGQ đã rút khỏi 19 Beta 4; dùng JOIN/recursive CTE |
 
-Extension C 19: hook `get_relation_info_hook` → `build_simple_rel_hook` — rebuild extension. SQL/PGQ = metadata + join, không engine graph riêng — [select.md](select.md).
+Extension C 19: hook `get_relation_info_hook` → `build_simple_rel_hook` — rebuild extension. SQL/PGQ đã bị rút khỏi PostgreSQL 19 Beta 4; xem [select.md](select.md).
 
 ---
 
@@ -668,8 +683,8 @@ Không lặp changelog ngôn ngữ (nằm ở file chủ đề). Chỉ **hạ t�
 
 Không phải “cái nào mạnh hơn”. Gợi ý kiến trúc:
 
-- Đã nằm Windows/Azure SQL/AG/T-SQL lớn → SS 2025; vector/JSON on-prem còn preview — đo Azure vs on-prem.
-- Extension, FDW, MVCC đọc nhiều, SQL/PGQ, kiểm soát GUC → PG 19 (GA khi ổn).
+- Đã nằm Windows/Azure SQL/AG/T-SQL lớn → SS 2025; JSON 2025 GA; vector index còn preview — kiểm từng nền tảng.
+- Extension, FDW, MVCC đọc nhiều và kiểm soát GUC → PostgreSQL; triển khai major 19 sau GA và kiểm tương thích extension.
 - Cùng app hai backend: viết ANSI + lớp dialect; **không** share isolation level theo tên; test bloat vs tempdb vs lock.
 
 ---
@@ -703,7 +718,7 @@ Không phải “cái nào mạnh hơn”. Gợi ý kiến trúc:
 - `pg_upgrade` giữ `btree_gist` inet.
 - RCSI = MVCC heap PG.
 - Optimized locking = hết deadlock / write skew.
-- JSON/vector on-prem = GA vì Azure GA.
+- Tưởng vector index SQL Server đã GA vì kiểu vector/JSON đã GA.
 - Parallel autovacuum = `ACCESS EXCLUSIVE`.
 
 ---
@@ -717,7 +732,7 @@ Không phải “cái nào mạnh hơn”. Gợi ý kiến trúc:
 | Temp | ADR + governor GA (1138) | I/O workers scale; COPY SIMD |
 | Visibility cleanup | Ghost + ADR | Parallel AV; all-visible on scan; `REPACK` |
 | Replica extras | QS+stats secondary ON; Fabric mirror | Sequence logical; `WAIT FOR LSN` |
-| Preview | Vector index, CES, fuzzy, nhiều JSON on-prem | Cả 19 **beta** đến GA |
+| Preview | Vector index, CES, fuzzy | Cả 19 **beta** đến GA |
 
 Cú pháp: [select.md](select.md), [dml.md](dml.md), [ddl.md](ddl.md), [json.md](json.md), [typesystem.md](typesystem.md). Isolation: [transactions.md](transactions.md). Khóa: [concurrency.md](concurrency.md).
 
@@ -795,7 +810,7 @@ Ghost SS: không score table; REBUILD ≠ VACUUM
 
 Scan 19 đánh dấu all-visible: index-only rẻ hơn, không thay freeze.
 
-Version deltas (TDS 8, WAIT FOR, TID/LAQ, JSON on-prem PREVIEW, `json_array` `[]`) nằm **§20** và file chủ đề — không nhét what's-new vào sơ đồ process/WAL. Review kiến trúc: process, WAL, visibility, HA, temp — rồi mới cổng phiên bản.
+Version deltas (TDS 8, WAIT FOR, TID/LAQ, JSON 2025 GA, `json_array` `[]`) nằm **§20** và file chủ đề — không nhét what's-new vào sơ đồ process/WAL. Review kiến trúc: process, WAL, visibility, HA, temp — rồi mới cổng phiên bản.
 
 Process: SS một `sqlservr`; PG postmaster + backend. WAL: `.ldf`/VLF vs `pg_wal`. Visibility: RCSI/PVS vs heap xmax. HA: AG listener vs streaming + slot + `WAIT FOR LSN`. Temp: tempdb 1138 vs `pgsql_tmp`. Pool bắt buộc phía PG; SS implicit tran vẫn cần `COMMIT`.
 
@@ -824,3 +839,13 @@ Connection storm: SS `THREADPOOL` / PBKDF2; PG `max_connections` + `work_mem` ×
 7. **Nâng PG: gist inet, strings always on; SS: TDS 8, gỡ DQS**.
 8. **Delta phiên bản ở §20** — file này là máy, không changelog.
 
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL 19 release notes](https://www.postgresql.org/docs/19/release-19.html)
+- [SQL Server 2025 engine features](https://learn.microsoft.com/en-us/sql/sql-server/what-s-new-in-sql-server-2025?view=sql-server-ver17)
+- [PostgreSQL pg_stat_statements / query ID](https://www.postgresql.org/docs/19/pgstatstatements.html)

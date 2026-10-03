@@ -1,6 +1,6 @@
 # Giao dịch & isolation
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
 > Isolation **không** portable. Cùng tên `REPEATABLE READ` trên hai engine **không** cùng guarantee — đây là nguồn bug hay gặp khi port.
 
 SQL xử lý đồng thời bằng **transaction**: một đơn vị công việc hoặc thành công hết (`COMMIT`) hoặc không để lại hiệu ứng (`ROLLBACK`). Isolation quyết định *mình thấy gì của người khác* và *người khác thấy gì của mình* trước khi commit. Hai engine hiện thực isolation khác nhau (khóa vs MVCC/SSI) nên không thể copy `SET TRANSACTION ISOLATION LEVEL` rồi cho rằng hành vi giống nhau.
@@ -11,25 +11,60 @@ Khóa, wait, deadlock, tempdb/xmin: [concurrency.md](concurrency.md). Kiến tr�
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
-  - [1.1 Hình dung: isolation là “bản chụp”](#11-hình-dung-isolation-là-bản-chụp-không-phải-độ-mạnh)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
+  - [1.1 Hình dung: isolation là “bản chụp”, không phải “độ mạnh”](#11-hình-dung-isolation-là-bản-chụp-không-phải-độ-mạnh)
 - [2. Bắt đầu / kết thúc](#2-bắt-đầu--kết-thúc)
-- [3. Autocommit \& implicit](#3-autocommit--implicit)
+  - [2.1 `BEGIN` T-SQL không phải transaction](#21-begin-t-sql-không-phải-transaction)
+  - [2.2 Lồng nhau — ngữ nghĩa khác nhau](#22-lồng-nhau--ngữ-nghĩa-khác-nhau)
+  - [2.3 Đọc trạng thái](#23-đọc-trạng-thái)
+  - [2.4 Transaction có tên (SQL Server)](#24-transaction-có-tên-sql-server)
+  - [2.5 `COMMIT AND CHAIN` (PostgreSQL)](#25-commit-and-chain-postgresql)
+- [3. Autocommit & implicit](#3-autocommit--implicit)
 - [4. Isolation levels](#4-isolation-levels)
 - [5. Hiện tượng đọc (anomalies)](#5-hiện-tượng-đọc-anomalies)
-- [6. Lost update \& write skew](#6-lost-update--write-skew)
+  - [5.1 Non-repeatable — ví dụ](#51-non-repeatable--ví-dụ)
+  - [5.2 Phantom — ví dụ](#52-phantom--ví-dụ)
+  - [5.3 Dirty read chỉ SQL Server RU](#53-dirty-read-chỉ-sql-server-ru)
+- [6. Lost update & write skew](#6-lost-update--write-skew)
+  - [6.1 Lost update](#61-lost-update)
+  - [6.2 Write skew — hai người đều “thấy còn một”, cùng bước ra](#62-write-skew--hai-người-đều-thấy-còn-một-cùng-bước-ra)
 - [7. SQL Server: locking, RCSI, SNAPSHOT, ADR](#7-sql-server-locking-rcsi-snapshot-adr)
+  - [7.1 Pessimistic (mặc định, RCSI off)](#71-pessimistic-mặc-định-rcsi-off)
+  - [7.2 RCSI](#72-rcsi)
+  - [7.3 SNAPSHOT isolation](#73-snapshot-isolation)
+  - [7.4 ADR — chỗ để version + recovery](#74-adr--chỗ-để-version--recovery)
+  - [7.5 NOLOCK / READ UNCOMMITTED](#75-nolock--read-uncommitted)
+  - [7.6 Isolation không thay constraint](#76-isolation-không-thay-constraint)
 - [8. PostgreSQL: MVCC](#8-postgresql-mvcc)
-- [9. Savepoint, XACT\_ABORT, abort](#9-savepoint-xact_abort-abort)
+  - [8.0 Hình dung: không tẩy ô, chỉ thêm tờ mới](#80-hình-dung-không-tẩy-ô-chỉ-thêm-tờ-mới)
+  - [8.1 Snapshot theo level](#81-snapshot-theo-level)
+  - [8.2 Visibility & vacuum](#82-visibility--vacuum)
+  - [8.3 `now()` vs đồng hồ](#83-now-vs-đồng-hồ)
+- [9. Savepoint, XACT_ABORT, abort](#9-savepoint-xact_abort-abort)
+  - [9.1 Lỗi statement — khác nhau](#91-lỗi-statement--khác-nhau)
+  - [9.2 Bảng so sánh abort](#92-bảng-so-sánh-abort)
+  - [9.3 Driver](#93-driver)
 - [10. DDL trong transaction](#10-ddl-trong-transaction)
 - [11. WAIT FOR LSN (PostgreSQL 19)](#11-wait-for-lsn-postgresql-19)
+  - [11.1 MODE](#111-mode)
+  - [11.2 TIMEOUT và NO_THROW](#112-timeout-và-no_throw)
+  - [11.3 Ràng buộc (đừng bịa)](#113-ràng-buộc-đừng-bịa)
 - [12. FDW READ ONLY (PostgreSQL 19)](#12-fdw-read-only-postgresql-19)
 - [13. Retry 40001 / 1205](#13-retry-40001--1205)
+  - [13.1 SQL Server 1205](#131-sql-server-1205)
+  - [13.2 PostgreSQL 40001 vs 40P01](#132-postgresql-40001-vs-40p01)
+  - [13.3 XACT_ABORT và retry](#133-xact_abort-và-retry)
 - [14. Durability: COMMIT chưa chắc đĩa](#14-durability-commit-chưa-chắc-đĩa)
 - [15. Worked examples](#15-worked-examples)
-- [16. Best practices \& checklist](#16-best-practices--checklist)
+  - [15.1 Trừ kho — một statement](#151-trừ-kho--một-statement)
+  - [15.2 RYW standby (PG 19)](#152-ryw-standby-pg-19)
+  - [15.3 Unique fail — hai abort model](#153-unique-fail--hai-abort-model)
+  - [15.4 FDW trong txn read-only (19)](#154-fdw-trong-txn-read-only-19)
+  - [15.5 SNAPSHOT 3960 vs PG 40001](#155-snapshot-3960-vs-pg-40001)
+- [16. Best practices & checklist](#16-best-practices--checklist)
 - [17. Bẫy khi review](#17-bẫy-khi-review)
 - [18. Version gates](#18-version-gates)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -139,7 +174,7 @@ COMMIT;                         -- @@TRANCOUNT = 0  — mới ghi log
 
 `ROLLBACK TRAN savepoint` chỉ về savepoint. `ROLLBACK` không tên hủy cả stack. Stored proc `COMMIT` khi caller vẫn `@@TRANCOUNT = 2` = **không** durable — caller tưởng đã xong.
 
-**PostgreSQL** không có nested transaction thật. `BEGIN` trong txn đang mở là lỗi (trừ protocol/client giả lập). Dùng **savepoint** để rollback từng phần.
+**PostgreSQL** không có nested transaction thật. BEGIN trong transaction đang mở phát warning và giữ nguyên transaction hiện tại. Dùng **savepoint** để rollback từng phần.
 
 ```sql
 BEGIN;
@@ -455,7 +490,7 @@ ERROR:  could not serialize access due to concurrent update
 SQLSTATE: 40001
 ```
 
-Retry cả transaction từ đầu (đọc lại). Temporal `FOR PORTION OF` dễ race hơn ở RC — xem [dml.md](dml.md), leftover + `WITHOUT OVERLAPS`: [constraints.md](constraints.md).
+Retry cả transaction từ đầu (đọc lại). Chia range bằng nhiều DML ở RC cần khóa và retry toàn transaction; xem [dml.md](dml.md) và [constraints.md](constraints.md).
 
 SSI thêm *si* (serialization anomaly): write skew abort dù không đụng cùng tuple. Mã vẫn `40001`, message khác (`reason code` trong log: `pivot` / `rw-conflict`).
 
@@ -565,9 +600,9 @@ ADO.NET `SqlException` Number **2627** (unique) / **547** (FK) — txn có thể
 
 ## 10. DDL trong transaction
 
-**PostgreSQL:** hầu hết DDL transactional. `CREATE TABLE` + `ROLLBACK` → bảng biến mất. Ngoại lệ: `VACUUM`, `CREATE INDEX CONCURRENTLY`, `REINDEX CONCURRENTLY`, `REPACK`, `ALTER TYPE … ADD VALUE` (một số ngữ cảnh lịch sử) — **không** trong transaction block.
+**PostgreSQL:** hầu hết DDL transactional. `CREATE TABLE` + `ROLLBACK` → bảng biến mất. VACUUM, CREATE INDEX CONCURRENTLY, REINDEX CONCURRENTLY và REPACK không chạy trong transaction block. ALTER TYPE ... ADD VALUE có thể chạy trong transaction, nhưng giá trị enum mới chỉ được dùng sau COMMIT; xem [ALTER TYPE](https://www.postgresql.org/docs/19/sql-altertype.html).
 
-**SQL Server:** nhiều DDL gây commit ngầm (`CREATE DATABASE` không nằm trong user txn hữu ích). `CREATE INDEX` lớn khó gói rollback sạch. Đừng giả định “DDL như DML”.
+**SQL Server:** CREATE/ALTER TABLE, CREATE INDEX thường và TRUNCATE có thể rollback trong user transaction. CREATE/DROP DATABASE và index RESUMABLE có hạn chế riêng. GO không commit. Lock/log có thể khiến rollback lâu — [ddl.md](ddl.md) mục 2.
 
 Hai engine đều lấy **schema lock** mạnh khi DDL — chặn DML. Production: `CONCURRENTLY` / `ONLINE = ON` / `NOT VALID` + `VALIDATE`.
 
@@ -849,7 +884,7 @@ Retry cả khối từ `SELECT`.
 |---|---|---|
 | ADR (accelerated recovery) | 2019+; **tempdb ADR** = **2025** | — (WAL + VM) |
 | RCSI / SI | Lâu; RCSI phổ biến OLTP | RR ≈ SI từ rất sớm |
-| Optimized locking | **2025** (on-prem off mặc định; cần ADR+RCSI) | — |
+| Optimized locking | **2025** (on-prem off mặc định; cần ADR; LAQ cần thêm RCSI) | — |
 | `WAIT FOR LSN` + MODE/TIMEOUT/NO_THROW | — (`WAITFOR` = sleep) | **19** |
 | SSI | — | 9.1+ |
 | `COMMIT AND CHAIN` | — | 10+ |
@@ -857,3 +892,13 @@ Retry cả khối từ `SELECT`.
 | Deadlock / serialize retry | **1205** / **3960** | **40P01** / **40001** |
 
 Lock mode, `SKIP LOCKED`, deadlock graph, tempdb 1138: [concurrency.md](concurrency.md).
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [T-SQL BEGIN TRANSACTION](https://learn.microsoft.com/en-us/sql/t-sql/language-elements/begin-transaction-transact-sql?view=sql-server-ver17)
+- [PostgreSQL WAIT](https://www.postgresql.org/docs/19/sql-wait.html)
+- [SQL Server optimized locking](https://learn.microsoft.com/en-us/sql/relational-databases/performance/optimized-locking?view=sql-server-ver17)

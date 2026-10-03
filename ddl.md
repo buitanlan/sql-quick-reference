@@ -1,35 +1,43 @@
 # DDL (CREATE / ALTER / DROP)
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19**.  
-> DDL trên SQL Server thường **commit implicit** hoặc khó gói rollback. PostgreSQL DDL **transactional** (rollback được), trừ vài lệnh (`VACUUM`, `CONCURRENTLY`, `REPACK`). Đây là lệch vận hành lớn nhất khi port migration.
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
+> DDL thường dùng có thể rollback trên cả SQL Server và PostgreSQL. Ngoại lệ phụ thuộc từng lệnh; GO chỉ tách batch, không COMMIT. Kiểm tra lock, log, edition và giới hạn transaction của tác vụ bảo trì.
 
 DDL lấy **schema lock** mạnh: chặn DML, xếp hàng sau transaction dài. Production: thao tác metadata-only / `NOT VALID` / `ONLINE` / `CONCURRENTLY`, không `ALTER` rewrite bảng lớn trong giờ cao điểm. Partition `SPLIT`/`MERGE` (PG **19**, **beta**) và `REPACK` không phải lệnh “rẻ mặc định”.
 
-Constraint: [constraints.md](constraints.md). Index: [indexes.md](indexes.md). Khóa AccessExclusive: [concurrency.md](concurrency.md). `GRAPH_TABLE`: [select.md](select.md) §11. Isolation khi DDL trong txn: [transactions.md](transactions.md) §10. Vacuum vs rebuild: [internal.md](internal.md) §11.
+Constraint: [constraints.md](constraints.md). Index: [indexes.md](indexes.md). Khóa AccessExclusive: [concurrency.md](concurrency.md). Trạng thái SQL/PGQ: [select.md](select.md) §11. Isolation khi DDL trong txn: [transactions.md](transactions.md) §10. Vacuum vs rebuild: [internal.md](internal.md) §11.
 
 ---
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
-- [2. Transactional DDL vs implicit commit](#2-transactional-ddl-vs-implicit-commit)
-- [3. Database \& schema](#3-database--schema)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
+- [2. Transactional DDL và các ngoại lệ](#2-transactional-ddl-và-các-ngoại-lệ)
+- [3. Database & schema](#3-database--schema)
 - [4. TABLE](#4-table)
 - [5. ALTER không chặn](#5-alter-không-chặn)
 - [6. Generated: virtual vs persisted](#6-generated-virtual-vs-persisted)
   - [6.1 Extended stats trên VIRTUAL (PG 19)](#61-extended-stats-trên-virtual-pg-19)
 - [7. Partition SPLIT / MERGE](#7-partition-split--merge)
+  - [7.1 PostgreSQL — declarative partitioning](#71-postgresql--declarative-partitioning)
+  - [7.2 SQL Server — function / scheme / SWITCH](#72-sql-server--function--scheme--switch)
 - [8. VIEW, indexed view, matview](#8-view-indexed-view-matview)
-- [9. SEQUENCE \& replication (PG 19)](#9-sequence--replication-pg-19)
+- [9. SEQUENCE & replication (PG 19)](#9-sequence--replication-pg-19)
   - [9.1 ALL SEQUENCES / REFRESH SEQUENCES](#91-all-sequences--refresh-sequences)
 - [10. REPACK vs REBUILD](#10-repack-vs-rebuild)
   - [10.1 REPACK CONCURRENTLY](#101-repack-concurrently)
-- [11. Property graph (PostgreSQL 19)](#11-property-graph-postgresql-19)
+- [11. Property graph — đã rút khỏi PostgreSQL 19](#11-property-graph--đã-rút-khỏi-postgresql-19)
 - [12. IF EXISTS / CASCADE](#12-if-exists--cascade)
 - [13. Worked examples](#13-worked-examples)
-- [14. Best practices \& checklist](#14-best-practices--checklist)
+  - [13.1 Đơn giản — bảng + identity trong txn (PG) vs batch (SS)](#131-đơn-giản--bảng--identity-trong-txn-pg-vs-batch-ss)
+  - [13.2 Trung bình — VIRTUAL + extended stats + index online](#132-trung-bình--virtual--extended-stats--index-online)
+  - [13.3 Thêm partition, đồng bộ sequence và REPACK](#133-thêm-partition-đồng-bộ-sequence-và-repack)
+  - [13.4 Rollback ALTER TABLE trên cả hai engine](#134-rollback-alter-table-trên-cả-hai-engine)
+  - [13.5 VALIDATE vs NOCHECK](#135-validate-vs-nocheck)
+- [14. Best practices & checklist](#14-best-practices--checklist)
 - [15. Bẫy khi review](#15-bẫy-khi-review)
 - [16. Version gates](#16-version-gates)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -41,89 +49,49 @@ Ba câu hỏi trước mỗi `ALTER`:
 
 1. **Rewrite bảng hay metadata?** (đổi kiểu / `STORED` generated vs add nullable).
 2. **Lock gì, giữ bao lâu?** (`ACCESS EXCLUSIVE` vs `SHARE UPDATE EXCLUSIVE` + validate).
-3. **Rollback được không?** (PG txn vs SS implicit commit).
+3. **Rollback được không?** (cả hai có transactional DDL, ngoại lệ từng lệnh).
 
-PostgreSQL 19 **beta** (GA mục tiêu cuối 10/2026): `REPACK`, `MERGE`/`SPLIT PARTITION`, SQL/PGQ, sequence trong logical replication, extended stats trên virtual generated — đối chiếu [release notes 19](https://www.postgresql.org/docs/19/release-19.html). SQL Server 2025: compatibility **170**, `PREVIEW_FEATURES` (vector index, CES, fuzzy) — [internal.md](internal.md) §19.
+PostgreSQL 19 Beta 4: REPACK, sequence trong logical replication và extended stats trên virtual generated còn hỗ trợ; SQL/PGQ và SPLIT/MERGE partition đã bị rút — đối chiếu [release notes 19](https://www.postgresql.org/docs/19/release-19.html). SQL Server 2025: compatibility **170**, `PREVIEW_FEATURES` (vector index, CES, fuzzy) — [internal.md](internal.md) §19.
 
 ---
 
-## 2. Transactional DDL vs implicit commit
+## 2. Transactional DDL và các ngoại lệ
 
-**Hình dung hai cuốn sổ.**
-
-PostgreSQL: schema nằm **trong** transaction. `CREATE TABLE` rồi `ROLLBACK` → bảng biến mất, như chưa viết.
-
-SQL Server: nhiều lệnh DDL **đóng sổ giữa chừng** (commit ngầm phần DML/DDL trước). `BEGIN TRAN` + `CREATE` + lỗi + `ROLLBACK` **không** hứa “schema như lúc mở”. Migration SS phải idempotent (`IF NOT EXISTS`), không dựa một rollback cứu cả script.
-
-Ngoại lệ PG (không nằm trong txn): `CREATE INDEX CONCURRENTLY`, `REPACK`, `VACUUM` — chúng cần thấy commit của người khác; txn đang mở thì “đóng băng” thế giới.
-
-**PostgreSQL:** hầu hết `CREATE`/`ALTER`/`DROP` nằm trong `BEGIN`…`ROLLBACK` → schema hoàn nguyên. Migration một txn: tạo bảng, FK, index thường, seed — fail thì sạch.
+Cả SQL Server và PostgreSQL đều cho rollback nhiều DDL thường dùng, gồm `CREATE TABLE`, `ALTER TABLE` và tạo index thường. SQL Server không tự commit DML trước đó chỉ vì chạy các lệnh này. Khóa schema và lượng log vẫn có thể khiến rollback chậm.
 
 ```sql
+-- SQL Server: GO tách batch, không tự COMMIT transaction.
+BEGIN TRAN;
+CREATE TABLE #ddl_demo (id int PRIMARY KEY);
+INSERT INTO #ddl_demo VALUES (1);
+ALTER TABLE #ddl_demo ADD note nvarchar(100);
+CREATE INDEX ix_ddl_demo ON #ddl_demo (note);
+ROLLBACK TRAN;
+SELECT OBJECT_ID(N'tempdb..#ddl_demo') AS object_after_rollback; -- NULL
+```
+
+```sql
+-- PostgreSQL
 BEGIN;
-CREATE TABLE t (id int PRIMARY KEY);
-INSERT INTO t VALUES (1);
-ALTER TABLE t ADD COLUMN note text;
-ROLLBACK;          -- bảng t không còn
+CREATE TEMP TABLE ddl_demo (id int PRIMARY KEY);
+INSERT INTO ddl_demo VALUES (1);
+ALTER TABLE ddl_demo ADD COLUMN note text;
+CREATE INDEX ix_ddl_demo ON ddl_demo (note);
+ROLLBACK;
+SELECT to_regclass('pg_temp.ddl_demo'); -- NULL
 ```
 
-**Không** trong transaction block (lỗi parse / “cannot run inside a transaction”):
-
-- `VACUUM` / `VACUUM FULL`
-- `CREATE INDEX CONCURRENTLY`, `REINDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`
-- `REPACK` / `REPACK (CONCURRENTLY)` (**19**)
-- `REFRESH MATERIALIZED VIEW CONCURRENTLY`
-- Một số `ALTER TYPE … ADD VALUE` lịch sử (các bản mới nới — vẫn test trong txn)
-- `CREATE DATABASE` / `DROP DATABASE` / `CREATE TABLESPACE`
-
-**SQL Server:** nhiều DDL gây **commit ngầm** các thay đổi DML *trước đó* trong cùng batch/txn, hoặc không hữu ích trong user txn (`CREATE DATABASE`). Không có “một BEGIN bao cả migration rồi ROLLBACK là schema cũ” như PG.
-
-```sql
-BEGIN TRAN;
-INSERT INTO dbo.T VALUES (1);
-CREATE INDEX ix ON dbo.T (Id);   -- có thể commit ngầm INSERT; fail index ≠ hoàn nguyên insert
--- ROLLBACK không đưa về như PG
-COMMIT TRAN;
-```
-
-Hệ quả port Flyway/EF: file PG = một txn khi có thể; file SS = nhiều batch `GO`, chấp nhận điểm không hoàn nguyên. `XACT_ABORT` + DDL giữa DML dài = lock schema khó lường. Đừng giả định “DDL như DML”.
-
-`CREATE INDEX` lớn trên SS không “rollback sạch” như `INSERT`. `CREATE INDEX CONCURRENTLY` (PG) fail giữa chừng để lại index `INVALID` — phải `DROP` rồi tạo lại; **không** nằm trong `BEGIN`.
-
-Cả hai: session khác đang giữ lock trên object → DDL **đợi**. PG: `lock_timeout` / `idle_in_transaction_session_timeout`. SS: `LOCK_TIMEOUT`, kill blocker có chủ đích.
-
-So nhanh:
-
-| | PostgreSQL | SQL Server |
+| Ngoại lệ | SQL Server | PostgreSQL |
 |---|---|---|
-| `CREATE TABLE` trong `BEGIN` + `ROLLBACK` | Bảng biến mất | Thường **không** cùng guarantee; implicit commit tùy lệnh |
-| Index `CONCURRENTLY` / `ONLINE` | Ngoài txn; INVALID nếu fail | `ONLINE = ON` (edition); không “INVALID” cùng tên PG |
-| `REPACK` / `VACUUM FULL` | Ngoài txn | `ALTER INDEX REBUILD` — log/lock khác, không gói user txn như INSERT |
-| Tool migration | Một file ≈ một txn | Tách `GO`; script idempotent từng bước |
+| Database | `CREATE/DROP DATABASE` không trong user transaction | `CREATE/DROP DATABASE` không trong transaction block |
+| Index | `RESUMABLE = ON` không trong explicit transaction; `ONLINE` tự nó không có nghĩa này | `CREATE/DROP INDEX CONCURRENTLY`, `REINDEX CONCURRENTLY` ngoài transaction block |
+| Bảo trì | `TRUNCATE` và rebuild thông thường có thể rollback; xem hạn chế từng lệnh | `VACUUM`, `REPACK` ngoài transaction block |
+| Materialized view | Indexed view có quy tắc riêng | `REFRESH MATERIALIZED VIEW CONCURRENTLY` có thể chạy trong transaction |
+| Batch | `GO` không commit; giữ cùng connection để giữ transaction | `psql` gửi statement theo terminator |
 
-**Ghi chú:** Test rollback migration trên **bản sao** từng engine, không tin tài liệu ORM. `ALTER` metadata-only PG vẫn giữ `ACCESS EXCLUSIVE` ngắn — txn dài khác đang đọc bảng vẫn block. SS: schema lock vs `SCH-M`. Chi tiết isolation DDL: [transactions.md](transactions.md) §10.
+Sau `ALTER TYPE ... ADD VALUE` trong transaction PostgreSQL hiện đại, giá trị enum mới chỉ dùng được sau commit. Đây là hạn chế về sử dụng giá trị mới, khác việc cấm DDL trong transaction.
 
-Các lệnh SS thường gặp trong script “một TRAN” — **không** giả định cùng PG:
-
-| Lệnh (SQL Server) | Ghi chú vận hành |
-|---|---|
-| `CREATE DATABASE` / `DROP DATABASE` | Không gói user txn ứng dụng |
-| `CREATE INDEX` / `ALTER INDEX REBUILD` lớn | Log nhiều; fail ≠ undo DML trước nếu đã implicit commit |
-| `TRUNCATE TABLE` | Không như `DELETE`; quyền `ALTER`; mục [dml.md](dml.md) §7 |
-| `CREATE FULLTEXT INDEX` / một số `ALTER DATABASE` | Điểm không rollback |
-| Batch `GO` | Client cắt batch — `BEGIN TRAN` batch trước đã commit hoặc còn tùy client |
-
-```sql
--- Tai nạn điển hình SS
-BEGIN TRAN;
-UPDATE dbo.Orders SET Status = N'x';     -- ý: thử
-ALTER TABLE dbo.Orders ADD Note nvarchar(100);  -- implicit commit → UPDATE đã bền
--- ROLLBACK không đưa Status về
-```
-
-PostgreSQL cùng ý `BEGIN; UPDATE; ALTER TABLE; ROLLBACK;` → **cả hai** hoàn nguyên (trừ lệnh ngoài txn). Đây là lý do port migration “thử trên prod rồi rollback” từ PG sang SS **mất dữ liệu**.
-
-`CREATE INDEX CONCURRENTLY` PG: hai lần scan, `INVALID` nếu session chết — `DROP INDEX CONCURRENTLY` rồi tạo lại. Không gói chung `ALTER TABLE ADD COLUMN` trong một `BEGIN` với `CONCURRENTLY`.
+Migration cần phân biệt **lệnh không cho mở transaction**, **lệnh rollback được nhưng tốn log/giữ khóa**, và **tool tự commit từng bước**. Dùng `TRY/CATCH` + `XACT_STATE()` trên SQL Server để rollback khi lỗi. Xem [CREATE INDEX](https://learn.microsoft.com/en-us/sql/t-sql/statements/create-index-transact-sql?view=sql-server-ver17), [BEGIN TRANSACTION](https://learn.microsoft.com/en-us/sql/t-sql/language-elements/begin-transaction-transact-sql?view=sql-server-ver17) và [REFRESH MATERIALIZED VIEW](https://www.postgresql.org/docs/19/sql-refreshmaterializedview.html).
 
 ---
 
@@ -289,7 +257,7 @@ PostgreSQL **19**: extended stats trên **virtual generated**. Dump/restore 19 g
 CREATE STATISTICS st_invoice_total (dependencies)
     ON total, customer_id FROM invoice;   -- total là VIRTUAL 19: được
 
-SELECT pg_clear_extended_stats('invoice'::regclass);     -- 19
+SELECT pg_clear_extended_stats('public', 'invoice', 'public', 'st_invoice_total', false); -- 19; object phải tồn tại
 -- pg_restore_extended_stats(): restore từ dump — đối chiếu docs 19
 ```
 
@@ -307,7 +275,7 @@ ANALYZE orders;
 - `ndistinct`: số giá trị phân biệt nhóm.
 - `mcv`: most common values tổ hợp.
 
-Virtual generated trong danh sách `ON` **19**: planner thấy CE cho `total` × `customer_id` mà không cần `STORED`. `pg_clear_extended_stats(regclass)` xóa stats bảng — dùng trước dump lạ / sau đổi generated expression. `pg_restore_extended_stats()`: restore từ dump 19 — đối chiếu signature docs, không bịa tham số.
+Virtual generated trong danh sách `ON` **19**: planner thấy CE cho `total` × `customer_id` mà không cần `STORED`. `pg_clear_extended_stats(schema, table, stats_schema, stats_name, inherited)` xóa dữ liệu của một object extended statistics — dùng trước dump lạ / sau đổi generated expression. `pg_restore_extended_stats()`: restore từ dump 19 — đối chiếu signature docs, không bịa tham số.
 
 SQL Server: `CREATE STATISTICS` / auto stats; 2025 persist trên secondary. Không port tên `dependencies`/`mcv`.
 
@@ -317,7 +285,7 @@ SQL Server: `CREATE STATISTICS` / auto stats; 2025 persist trên secondary. Khô
 
 ## 7. Partition SPLIT / MERGE
 
-### 7.1 PostgreSQL — declarative + PG 19 SPLIT/MERGE
+### 7.1 PostgreSQL — declarative partitioning
 
 ```sql
 CREATE TABLE events (
@@ -327,31 +295,14 @@ CREATE TABLE events (
 ) PARTITION BY RANGE (ts);
 
 CREATE TABLE events_2026_09 PARTITION OF events
-    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+    FOR VALUES FROM ('2026-09-01 00:00:00+00') TO ('2026-10-01 00:00:00+00');
 ```
 
-PK/unique **phải gồm** khóa partition. Default partition hứng giá trị không khớp.
+PK/UNIQUE của bảng partitioned phải chứa mọi cột khóa partition (và khóa partition không được là biểu thức đối với ràng buộc đó). Dùng mốc có timezone rõ ràng với `timestamptz`.
 
-**PostgreSQL 19 (beta)** — tái tổ chức tại chỗ (cú pháp đầy đủ: docs `ALTER TABLE`; đối chiếu trước GA):
+**SPLIT/MERGE partition đã bị rút khỏi PostgreSQL 19 Beta 4**, xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). Để đổi biên partition hiện tại: tạo bảng staging với biên mới, chuyển dữ liệu và dùng `DETACH/ATTACH PARTITION` với kế hoạch khóa/cutover cụ thể. `DETACH PARTITION CONCURRENTLY` có hạn chế riêng, gồm việc không chạy trong transaction block. Đừng xóa partition cũ trước khi kiểm tra số hàng và biên của dữ liệu mới.
 
-```sql
-ALTER TABLE events
-    SPLIT PARTITION events_2026_09 INTO
-        (PARTITION events_2026_09a FOR VALUES FROM ('2026-09-01') TO ('2026-09-16')),
-        (PARTITION events_2026_09b FOR VALUES FROM ('2026-09-16') TO ('2026-10-01'));
-
-ALTER TABLE events
-    MERGE PARTITIONS events_2026_08, events_2026_09
-    INTO events_2026_q3;
-```
-
-Không phải metadata-only mặc định: **khóa mạnh** (thường `ACCESS EXCLUSIVE` lúc cắt/gộp) — không `CONCURRENTLY` trừ khi docs 19 GA nói ngược. Staging: chạy trên bản sao; đo thời gian + blocking.
-
-Trước 19: `SPLIT`/`MERGE` thường là tạo partition mới + `INSERT … SELECT` + `DROP`. `DETACH PARTITION CONCURRENTLY` (14+) để drop dữ liệu cũ ít chặn.
-
-Default partition: `SPLIT` biên cần không để giá trị “lọt” sai — đọc docs, test với hàng sát biên `[ts, ts+1)`. Unique global không partition-key: PG **không** cho.
-
-Hash partition: **không** invent `SPLIT` hash không đọc docs 19 — range/list là đường chính trong ví dụ trên.
+---
 
 ### 7.2 SQL Server — function / scheme / SWITCH
 
@@ -382,7 +333,7 @@ ALTER TABLE dbo.Events SWITCH PARTITION 2 TO dbo.Events_Staging;
 
 `RANGE RIGHT` vs `LEFT`: giá trị biên thuộc partition nào — sai một ngày = dữ liệu “sai ngăn”, `SWITCH` fail.
 
-**Ghi chú:** Đừng copy `ALTER TABLE … SPLIT PARTITION` PG sang T-SQL (SS tách function/scheme). PG 19 SPLIT/MERGE **khóa** — lịch cửa sổ. Unique aligned SS vs PK gồm partition-key PG. `SWITCH` ≈ `DETACH`+gắn staging, không phải `TRUNCATE`.
+**Ghi chú:** Đừng copy `ALTER TABLE … SPLIT PARTITION` PG sang T-SQL (SS tách function/scheme). PG 19 Beta 4 không hỗ trợ SPLIT/MERGE partition. Unique aligned SS vs PK gồm partition-key PG. `SWITCH` ≈ `DETACH`+gắn staging, không phải `TRUNCATE`.
 
 ---
 
@@ -567,51 +518,9 @@ SQL Server gần: `ALTER INDEX … REBUILD WITH (ONLINE = ON)` / rebuild cluster
 
 ---
 
-## 11. Property graph (PostgreSQL 19)
+## 11. Property graph — đã rút khỏi PostgreSQL 19
 
-Metadata SQL/PGQ trên bảng đã có — **không** copy dữ liệu. Query `GRAPH_TABLE`: [select.md](select.md) §11.
-
-```sql
-CREATE PROPERTY GRAPH shop
-    VERTEX TABLES (
-        customers LABEL customer PROPERTIES (id, name),
-        orders    LABEL "order"    PROPERTIES (id, ordered_when, total)
-    )
-    EDGE TABLES (
-        customer_orders
-            SOURCE customers
-            DESTINATION orders
-            LABEL has_placed
-            -- KEY / SOURCE KEY / DESTINATION KEY nếu không suy từ PK/FK
-    );
-```
-
-Cần PK/FK hoặc `KEY` / `SOURCE KEY` / `DESTINATION KEY` tường minh. Label `"order"` quote vì reserved. `DROP PROPERTY GRAPH` không drop bảng.
-
-```sql
--- Khi tên cột không phải PK chuẩn
-CREATE PROPERTY GRAPH shop
-    VERTEX TABLES (
-        customers KEY (id),
-        orders KEY (id)
-    )
-    EDGE TABLES (
-        customer_orders
-            KEY (id)
-            SOURCE KEY (customer_id) REFERENCES customers (id)
-            DESTINATION KEY (order_id) REFERENCES orders (id)
-    );
-```
-
-(Cú pháp `REFERENCES` trong graph DDL: đối chiếu docs 19 — **beta**; đừng bịa mệnh đề không có trong reference.)
-
-Không có `ALTER PROPERTY GRAPH ADD VERTEX` nếu docs 19 chưa ghi — **không invent**. Đổi schema bảng gốc (đổi PK/FK) có thể làm graph metadata lệch: drop graph → sửa bảng → tạo lại, hoặc đọc `ALTER` chính thức khi GA. `DROP PROPERTY GRAPH shop;` giữ `customers` / `orders` / `customer_orders`.
-
-PG 19 **chưa** variable-length path — DDL vẫn cho graph hop cố định. Quyền: `USAGE` trên graph vs `SELECT` bảng gốc — đọc GRANT 19, đừng bịa.
-
-SQL Server: `AS NODE`/`AS EDGE` là mô hình khác, không `CREATE PROPERTY GRAPH`. Đừng port.
-
-**Ghi chú:** **Beta**. Graph không thay index FK. `EXPLAIN` = join. Hybrid search 2025 (vector) ≠ property graph.
+SQL/PGQ, `CREATE PROPERTY GRAPH` và `GRAPH_TABLE` đã bị rút trong Beta 4; không còn là API PostgreSQL 19. Xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). Mô hình hóa đỉnh/cạnh bằng bảng quan hệ, query đường đi cố định bằng JOIN và đường đi nhiều bước bằng [recursive CTE](cte-subqueries.md). SQL Server SQL Graph là hệ cú pháp riêng, không thể thay thế trực tiếp SQL/PGQ.
 
 ---
 
@@ -637,7 +546,7 @@ CREATE OR REPLACE VIEW v_paid AS …;
 
 SQL Server **không** `CREATE TABLE IF NOT EXISTS` (dùng `IF OBJECT_ID … IS NULL`). **Không** `DROP TABLE … CASCADE` kiểu PG (`DROP SCHEMA` SS không cascade như PG — drop object trước).
 
-`CASCADE` PG: view, FK con, sequence `OWNED BY`, matview phụ thuộc, **có thể property graph phụ thuộc** — review như `DELETE` không `WHERE`. `DROP PROPERTY GRAPH` không cascade bảng.
+CASCADE PostgreSQL có thể xóa view, FK, sequence OWNED BY và materialized view phụ thuộc. Review dependency trước khi DROP. PG 19 Beta 4 không có property graph.
 
 `DROP DATABASE` không chạy trong session đang dùng DB đó. `RESTRICT` (PG, mặc định nhiều lệnh) ngược `CASCADE`.
 
@@ -669,7 +578,7 @@ COMMIT;
 ALTER TABLE orders VALIDATE CONSTRAINT orders_customer_fk;
 ```
 
-SQL Server: tách `GO`; FK `WITH CHECK` lúc thấp điểm; **không** gói `CREATE DATABASE` cùng txn app. `CREATE INDEX` giữa `BEGIN TRAN` + DML: coi như điểm không hoàn nguyên.
+SQL Server: tách `GO`; FK `WITH CHECK` lúc thấp điểm; **không** gói `CREATE DATABASE` cùng txn app. CREATE INDEX thường trong BEGIN TRAN rollback được; RESUMABLE là ngoại lệ.
 
 ### 13.2 Trung bình — VIRTUAL + extended stats + index online
 
@@ -693,53 +602,49 @@ CREATE INDEX ix_invoice_total ON dbo.Invoice (Total)
 
 `VIRTUAL` không lưu; seek theo `total` = expression index (PG) hoặc `PERSISTED` (SS). Stats 19 giúp CE, không seek.
 
-### 13.3 Nâng cao — SPLIT tháng + sequence pub + graph + REPACK
+### 13.3 Thêm partition, đồng bộ sequence và REPACK
 
 ```sql
--- PG 19 (beta): đo lock trước khi SPLIT tháng đang ghi
-ALTER TABLE events
-    SPLIT PARTITION events_2026_09 INTO
-        (PARTITION events_2026_09a FOR VALUES FROM ('2026-09-01') TO ('2026-09-16')),
-        (PARTITION events_2026_09b FOR VALUES FROM ('2026-09-16') TO ('2026-10-01'));
-
+-- PostgreSQL: partition mới, mốc UTC rõ ràng
 CREATE TABLE events_2026_10 PARTITION OF events
-    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+    FOR VALUES FROM ('2026-10-01 00:00:00+00') TO ('2026-11-01 00:00:00+00');
 
--- Logical: publication đã ALL SEQUENCES; sequence mới → REFRESH cả hai
+-- PostgreSQL 19 Beta 4: subscription/publication đã cấu hình trước.
 ALTER SUBSCRIPTION sub_all REFRESH PUBLICATION;
 ALTER SUBSCRIPTION sub_all REFRESH SEQUENCES;
 
-CREATE PROPERTY GRAPH shop
-    VERTEX TABLES (customers, orders)
-    EDGE TABLES (
-        customer_orders SOURCE customers DESTINATION orders
-    );
-
--- Bloat heap: ngoài txn, bản sao trước
+-- Bảo trì ngoài transaction block; bảng/index phải tồn tại.
 REPACK (CONCURRENTLY, ANALYZE) orders USING INDEX orders_pkey;
 ```
 
-SQL Server: `NEXT USED` + `SPLIT RANGE` + `SWITCH` staging. Không `CREATE PROPERTY GRAPH`, không `REPACK`, không `REFRESH SEQUENCES`. `ALTER INDEX … REBUILD WITH (ONLINE = ON)`.
+Ba bước thuộc các tác vụ vận hành riêng; không gói tất cả vào một transaction. PostgreSQL 19 không có SPLIT/MERGE partition hoặc property graph. SQL Server dùng partition function/scheme và `ALTER INDEX ... REBUILD`.
 
-Không chạy `REPACK` trong cùng script `BEGIN` với `CREATE TABLE`. Không `SPLIT` giờ cao điểm.
+---
 
-### 13.4 Implicit commit — đừng thử trên SS như PG
+### 13.4 Rollback ALTER TABLE trên cả hai engine
+
+DDL thông thường có thể rollback. Tạo cột rồi dùng cột trong SQL Server nên tách batch để tránh lỗi bind tên cột trước khi DDL chạy:
 
 ```sql
--- PostgreSQL: an toàn thí nghiệm
-BEGIN;
-ALTER TABLE orders ADD COLUMN tmp int;
-UPDATE orders SET tmp = 1;
-ROLLBACK;                    -- cột tmp biến mất, UPDATE hoàn nguyên
-
--- SQL Server: CÙNG ý tưởng — nguy hiểm
+-- SQL Server, cùng một connection trong SSMS/sqlcmd
 BEGIN TRAN;
-ALTER TABLE dbo.Orders ADD tmp int;   -- có thể commit ngầm
+ALTER TABLE dbo.Orders ADD tmp int;
+GO
 UPDATE dbo.Orders SET tmp = 1;
-ROLLBACK TRAN;               -- không đảm bảo như PG
+ROLLBACK TRAN; -- cột tmp và UPDATE đều được hoàn nguyên
 ```
 
-Luôn thử DDL SS trên bản sao; script prod từng bước idempotent (`IF COL_LENGTH` …).
+```sql
+-- PostgreSQL
+BEGIN;
+ALTER TABLE orders ADD COLUMN tmp integer;
+UPDATE orders SET tmp = 1;
+ROLLBACK; -- cột tmp và UPDATE đều được hoàn nguyên
+```
+
+Bảng Orders phải tồn tại và chưa có cột tmp. Không nhầm `GO` với `COMMIT`; chương trình dùng driver cần gửi hai batch qua cùng connection.
+
+---
 
 ### 13.5 VALIDATE vs NOCHECK
 
@@ -758,7 +663,7 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 ## 14. Best practices & checklist
 
 - PG: DDL trong txn trừ `CONCURRENTLY`/`REPACK`/`VACUUM`/`REFRESH CONCURRENTLY`.
-- SS: đừng giả định rollback DDL; batch ngắn; implicit commit.
+- Cả hai: phân biệt DDL rollback được và lệnh cấm transaction; giữ batch/transaction vừa đủ để kiểm soát khóa.
 - Add FK/CHECK: `NOT VALID` + `VALIDATE` (PG); không `NOCHECK` lâu (SS).
 - Generated: `VIRTUAL` khi chỉ đọc; `STORED`/`PERSISTED` khi index/filter nặng; stats 19 trên VIRTUAL.
 - Partition: PK gồm khóa; `SPLIT`/`MERGE` trên bản sao trước; SS `NEXT USED`.
@@ -771,7 +676,7 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 
 ```text
 □ Lock_timeout khi ALTER production
-□ CONCURRENTLY / ONLINE / REPACK ngoài txn; runbook INVALID index
+□ PG CONCURRENTLY/REPACK và SS RESUMABLE ngoài txn; ONLINE thường có thể trong txn
 □ Không rewrite kiểu cột lớn giờ cao điểm
 □ VALIDATE CONSTRAINT sau NOT VALID
 □ SPLIT có filegroup / partition đích; cửa sổ khóa
@@ -784,7 +689,7 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 
 ## 15. Bẫy khi review
 
-- SQL Server DDL giữa txn DML dài (implicit commit).
+- SQL Server DDL trong transaction dài giữ schema lock và log đến COMMIT/ROLLBACK.
 - PG `CREATE INDEX CONCURRENTLY` / `REPACK` / `REFRESH CONCURRENTLY` *trong* `BEGIN`.
 - `ALTER COLUMN TYPE` trên TEXT lớn không ước lượng rewrite.
 - `ADD COLUMN … DEFAULT now()` tưởng metadata-only.
@@ -798,9 +703,9 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 - `VACUUM FULL` thay `REPACK (CONCURRENTLY)` trên OLTP chưa đo exclusive.
 - `CLUSTER` cron = `REPACK CONCURRENTLY` chưa test slot.
 - Sequence replica pre-19 / quên `REFRESH SEQUENCES` (chỉ giá trị) vs `REFRESH PUBLICATION` (object).
-- `CREATE PROPERTY GRAPH` như storage engine riêng / shortest path.
+- Dùng CREATE PROPERTY GRAPH đã bị rút khỏi PG 19 Beta 4.
 - Port `IDENTITY` sang `serial` rồi `TRUNCATE` không `RESTART IDENTITY`.
-- Port `SPLIT PARTITION` PG sang `ALTER PARTITION FUNCTION` không `NEXT USED`.
+- SQL Server SPLIT RANGE thiếu NEXT USED; PG SPLIT PARTITION đã bị rút khỏi 19.
 - Extended stats trên VIRTUAL rồi tin seek không cần expression index.
 - `PREVIEW` vector index trong script DDL bắt buộc.
 
@@ -810,7 +715,7 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
-| DDL transactional | hạn chế; implicit commit | hầu hết; trừ list mục 2 |
+| DDL transactional | DDL thường dùng có; ngoại lệ mục 2 | hầu hết; ngoại lệ mục 2 |
 | `CREATE INDEX ONLINE` | edition / phiên bản | `CONCURRENTLY` (ngoài txn) |
 | Default constant không rewrite | có (bản gần) | **11+** |
 | Generated `VIRTUAL` | computed non-persisted | **18+** `VIRTUAL` |
@@ -825,10 +730,20 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 | `CREATE MATERIALIZED VIEW` | indexed view | lâu |
 | Sequence logical replication | — | **19** `ALL SEQUENCES` / `REFRESH SEQUENCES` |
 | `REPACK` / `REPACK (CONCURRENTLY)` | `ALTER INDEX REBUILD` | **19 beta** |
-| `CREATE PROPERTY GRAPH` | graph `NODE`/`EDGE` (khác) | **19 beta** SQL/PGQ |
+| CREATE PROPERTY GRAPH | NODE/EDGE thuộc SQL Graph riêng | Đã rút khỏi 19 Beta 4 |
 | `CREATE OR ALTER` | proc/view một số object | `CREATE OR REPLACE` |
 | `DROP IF EXISTS` | **2016+** | lâu |
 | Compat 170 / `PREVIEW_FEATURES` | **2025** | — |
 | JIT default off | — | **19** |
 
-DML sau đổi schema (`OVERRIDING`, `TRUNCATE`, bulk, `FOR PORTION OF`): [dml.md](dml.md). Join PK/FK mới: [joins.md](joins.md). `GRAPH_TABLE`: [select.md](select.md) §11. Vacuum/WAL: [internal.md](internal.md).
+DML sau đổi schema (`OVERRIDING`, `TRUNCATE`, bulk và chia khoảng application-time): [dml.md](dml.md). Join PK/FK mới: [joins.md](joins.md). Trạng thái SQL/PGQ: [select.md](select.md) §11. Vacuum/WAL: [internal.md](internal.md).
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [T-SQL CREATE INDEX](https://learn.microsoft.com/en-us/sql/t-sql/statements/create-index-transact-sql?view=sql-server-ver17)
+- [PostgreSQL CREATE TABLE](https://www.postgresql.org/docs/19/sql-createtable.html)
+- [PostgreSQL REPACK](https://www.postgresql.org/docs/19/sql-repack.html)

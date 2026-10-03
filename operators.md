@@ -1,6 +1,6 @@
 # Toán tử (Operators)
 
-> **Baseline:** SQL Server **2025** · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** · PostgreSQL **19 Beta 4**.<br>
 > Precedence không giống C# / C. Khi nghi ngờ — **dùng ngoặc**.
 
 Toán tử SQL gắn với *kiểu* và *three-valued logic*, không với method overload kiểu C#. `=` vừa so sánh vừa (T-SQL) gán trong `SET`; `+` vừa cộng vừa nối chuỗi trên SQL Server; PostgreSQL `^` là lũy thừa, `#` mới là XOR. Optimizer **được** đổi thứ tự `AND`/`OR` — không có short-circuit chuẩn. File này là ngữ nghĩa để review, không phải bảng ghi nhớ một dòng.
@@ -13,35 +13,45 @@ Kiểu toán hạng: [typesystem.md](typesystem.md). NULL / `UNKNOWN`: [dialects
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. Precedence](#2-precedence)
 - [3. Số học](#3-số-học)
-  - [3.1 Chia nguyên \& modulo](#31-chia-nguyên--modulo)
+  - [3.1 Chia nguyên & modulo](#31-chia-nguyên--modulo)
   - [3.2 Lũy thừa vs XOR](#32-lũy-thừa-vs-xor)
   - [3.3 `PRODUCT()`](#33-product)
 - [4. So sánh](#4-so-sánh)
   - [4.1 `BETWEEN`, `IN`](#41-between-in)
   - [4.2 `ALL` / `ANY` / `SOME`](#42-all--any--some)
-- [5. Logic \& three-valued](#5-logic--three-valued)
+- [5. Logic & three-valued](#5-logic--three-valued)
 - [6. Chuỗi](#6-chuỗi)
 - [7. `LIKE` / `SIMILAR` / regex](#7-like--similar--regex)
 - [8. NULL-safe](#8-null-safe)
 - [9. Tập hợp](#9-tập-hợp)
 - [10. JSON](#10-json)
+  - [`JSON_CONTAINS` (SQL Server 2025, **GA**)](#json_contains-sql-server-2025-ga)
 - [11. Array / range / overlap](#11-array--range--overlap)
 - [12. Bit](#12-bit)
-- [13. Vector \& fuzzy](#13-vector--fuzzy)
-- [14. Gán \& compound (T-SQL)](#14-gán--compound-t-sql)
+- [13. Vector & fuzzy](#13-vector--fuzzy)
+  - [Vector](#vector)
+  - [Fuzzy — SQL Server **PREVIEW** (`PREVIEW_FEATURES`)](#fuzzy--sql-server-preview-preview_features)
+- [14. Gán & compound (T-SQL)](#14-gán--compound-t-sql)
 - [15. Overload (PostgreSQL)](#15-overload-postgresql)
 - [16. Hai session — ví dụ làm việc](#16-hai-session--ví-dụ-làm-việc)
-- [17. Best practices \& checklist](#17-best-practices--checklist)
+  - [16.1 `NOT IN` NULL vs ANTI JOIN 19](#161-not-in-null-vs-anti-join-19)
+  - [16.2 `IS DISTINCT FROM NULL` fold](#162-is-distinct-from-null-fold)
+  - [16.3 Regex `LIKE` class port](#163-regex-like-class-port)
+  - [16.4 Fuzzy PREVIEW vs regex GA](#164-fuzzy-preview-vs-regex-ga)
+  - [16.5 `JSON_CONTAINS` vs `@>`](#165-json_contains-vs-)
+  - [16.6 Chia 0 + `AND`](#166-chia-0--and)
+- [17. Best practices & checklist](#17-best-practices--checklist)
 - [18. Bẫy khi review](#18-bẫy-khi-review)
 - [19. Version gates](#19-version-gates)
-- [Phụ lục A. `REGEXP_LIKE` vs infix](#phụ-lục-a-regexp_like--hàm-vs-infix-flags)
-- [Phụ lục B. `JSON_CONTAINS` vs `@>`](#phụ-lục-b-json_contains-vs--vs-json_value)
-- [Phụ lục C. `LIKE ESCAPE`](#phụ-lục-c-like-escape-hai-session)
-- [Phụ lục D. Vector distance](#phụ-lục-d-vector-distance--hàm-vs-operator)
-- [Phụ lục E. `FILTER` / `IGNORE NULLS`](#phụ-lục-e-filter--ignore-nulls--không-phải-toán-tử-đây)
+- [Phụ lục A. `REGEXP_LIKE` — hàm vs infix, flags](#phụ-lục-a-regexp_like--hàm-vs-infix-flags)
+- [Phụ lục B. `JSON_CONTAINS` vs `@>` vs `JSON_VALUE`](#phụ-lục-b-json_contains-vs--vs-json_value)
+- [Phụ lục C. `LIKE ESCAPE` hai session](#phụ-lục-c-like-escape-hai-session)
+- [Phụ lục D. Vector distance — hàm vs operator](#phụ-lục-d-vector-distance--hàm-vs-operator)
+- [Phụ lục E. `FILTER` / `IGNORE NULLS` — không phải toán tử đây](#phụ-lục-e-filter--ignore-nulls--không-phải-toán-tử-đây)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -58,7 +68,7 @@ SELECT '1' + '2';             -- SQL Server: '12' (varchar+varchar)
 -- PostgreSQL: '1' + '2' lỗi (không có text + text); dùng ||
 ```
 
-**Ghi chú:** Regex SQL Server 2025 là **hàm** `REGEXP_LIKE` (GA), không infix `~`. Fuzzy `EDIT_DISTANCE` = **PREVIEW**. `JSON_CONTAINS` = hàm, **PREVIEW** on-prem. PG 19 fold `IS DISTINCT FROM NULL` là optimizer, không toán tử mới.
+**Ghi chú:** Regex SQL Server 2025 là **hàm** `REGEXP_LIKE` (GA), không infix `~`. Fuzzy `EDIT_DISTANCE` vẫn **PREVIEW**. `JSON_CONTAINS` là hàm **GA**. PG 19 fold `IS DISTINCT FROM NULL` là optimizer, không toán tử mới.
 
 ---
 
@@ -121,14 +131,14 @@ SELECT 7 % 2;                 -- 1
 SELECT -7 % 2;                -- -1 (dấu theo dividend, cả hai)
 ```
 
-Chia 0: **lỗi** integer (`Divide by zero` / `division by zero`). Float PG: `Inf` / `NaN`. Đừng dựa vào short-circuit `denom <> 0 AND num/denom` — §5.
+Chia 0: **lỗi** integer (`Divide by zero` / `division by zero`). PostgreSQL cũng báo lỗi chia 0 đối với float; có literal Infinity/NaN không có nghĩa phép chia 0 sẽ tạo chúng. Đừng dựa vào short-circuit `denom <> 0 AND num/denom` — §5.
 
 ```sql
 -- Trước: không an toàn
 WHERE denom <> 0 AND num / denom > 1
 
 -- Sau
-WHERE CASE WHEN denom <> 0 THEN num / denom END > 1
+WHERE num / NULLIF(denom, 0) > 1
 ```
 
 ### 3.2 Lũy thừa vs XOR
@@ -202,7 +212,7 @@ WHERE x = SOME (SELECT v FROM t);        -- ≡ ANY
 
 Empty subquery: `> ALL ()` = TRUE; `> ANY ()` = FALSE (chuẩn). Test khi port.
 
-`GROUP BY ALL` (PG 19) **không** phải `> ALL`. Đó là cú pháp group — [keywords.md](keywords.md), [select.md](select.md).
+ALL trong GROUP BY grouping sets khác > ALL; tính năng suy ra SELECT list đã bị rút khỏi PG 19 — [keywords.md](keywords.md), [select.md](select.md).
 
 ---
 
@@ -248,14 +258,14 @@ PG 19: nhiều `LEFT JOIN` có thể rewrite ANTI; hash join NULL key — plan, 
 ```sql
 -- Nối
 SELECT 'a' + 'b';                        -- SQL Server (NULL + x = NULL khi CONCAT_NULL_YIELDS_NULL ON)
-SELECT 'a' || 'b';                       -- PostgreSQL; SQL Server **2022+**
+SELECT 'a' || 'b';                       -- PostgreSQL; SQL Server **2025**
 SELECT CONCAT('a', NULL, 'b');           -- 'ab' trên cả hai (bỏ/treate NULL như '')
 ```
 
 | Biểu thức | SQL Server (ANSI ON) | PostgreSQL |
 |---|---|---|
 | `'a' + NULL` | `NULL` | lỗi kiểu (không `+` text) |
-| `'a' \|\| NULL` | `NULL` (2022+) | `NULL` |
+| `'a' \|\| NULL` | `NULL` (2025) | `NULL` |
 | `CONCAT('a', NULL)` | `'a'` | `'a'` |
 
 `+` T-SQL: nếu một bên số, **cộng số** (convert chuỗi → số). `'1'+2` = 3; `'a'+2` lỗi.
@@ -404,7 +414,7 @@ SELECT id FROM t;
 SELECT JSON_VALUE(doc, '$.name');        -- scalar (lax: miss → NULL)
 SELECT JSON_QUERY(doc, '$.items');       -- object/array
 SELECT JSON_MODIFY(doc, '$.name', N'Ada');
--- kiểu json 2025: vẫn hàm; JSON INDEX PREVIEW — json.md / typesystem.md
+-- kiểu json 2025: vẫn hàm; JSON INDEX GA — json.md / typesystem.md
 
 -- PostgreSQL jsonb
 SELECT doc -> 'name';                    -- jsonb
@@ -418,9 +428,9 @@ SELECT doc ?| ARRAY['a','b'];
 SELECT doc || '{"x":1}'::jsonb;          -- merge (jsonb)
 ```
 
-### `JSON_CONTAINS` (SQL Server 2025, **PREVIEW** on-prem)
+### `JSON_CONTAINS` (SQL Server 2025, **GA**)
 
-Hàm containment, không operator `@>`. Tối ưu khi có **JSON INDEX** (cũng **PREVIEW**, clustered PK). Wildcard path ANSI — [json.md](json.md).
+Hàm containment, không operator `@>`. Tối ưu khi có **JSON INDEX** (cũng **GA**, clustered PK). Wildcard path ANSI — [json.md](json.md).
 
 ```sql
 -- PREVIEW on-prem — đối chiếu Learn cú pháp path
@@ -431,7 +441,7 @@ WHERE JSON_CONTAINS(Payload, N'open', '$.status');  -- hình thức: docs 2025
 
 Không copy `WHERE doc @> '{"status":"open"}'` sang T-SQL. Không copy `JSON_CONTAINS` sang PG — dùng `@>` / `jsonb_path_ops` GIN.
 
-`JSON_QUERY … WITH ARRAY WRAPPER` (**PREVIEW**): scalar miss vs array — hàm, không infix.
+`JSON_QUERY … WITH ARRAY WRAPPER` (**GA**): scalar miss vs array — hàm, không infix.
 
 **Ghi chú:** `JSON_VALUE` ra object → `NULL` (dùng `JSON_QUERY`). PG `->` giữ jsonb (có thể index); `->>` text. `@>` containment sargable với GIN. SQL Server không có `@>`. `?` PG “key exists” ≠ T-SQL ternary (T-SQL không `? :`).
 
@@ -451,7 +461,7 @@ SELECT int4range(1,5) <@ int4range(0,10);
 SELECT '[2026-01-01,2026-07-01)'::daterange;
 ```
 
-SQL Server: overlap temporal = period system-versioned / `FOR SYSTEM_TIME` — không có `&&` native (trừ spatial `STIntersects`, hoặc so sánh hai mốc). PG 19 `FOR PORTION OF` cắt range — [dml.md](dml.md). **Không** toán tử mới; clause DML.
+SQL Server: overlap temporal = period system-versioned / `FOR SYSTEM_TIME` — không có `&&` native (trừ spatial `STIntersects`, hoặc so sánh hai mốc). PG 19 Beta 4 đã rút FOR PORTION OF; range vẫn có && để kiểm overlap — [dml.md](dml.md).
 
 Array index **1-based**. `tags[0]` → `NULL` không lỗi.
 
@@ -505,7 +515,7 @@ SELECT JARO_WINKLER_DISTANCE(a, b);
 SELECT JARO_WINKLER_SIMILARITY(a, b);
 ```
 
-PostgreSQL: extension `fuzzystrmatch` (`levenshtein`, …) — **không** cùng tên hàm SS. Không GA core 19.
+PostgreSQL: extension `fuzzystrmatch` (`levenshtein`, …), dùng tên hàm khác SQL Server; cần cài extension trong database.
 
 **Ghi chú:** Fuzzy không sargable btree thông thường. Bật `PREVIEW_FEATURES` kéo vector index/CES trên cùng DB — [dialects.md](dialects.md). Regex GA (`REGEXP_*`) ≠ fuzzy PREVIEW.
 
@@ -594,7 +604,7 @@ T2: EDIT_DISTANCE(name, @q) < 2            -- PREVIEW; CU có thể đổi; đ�
 ### 16.5 `JSON_CONTAINS` vs `@>`
 
 ```text
-T1 (SS PREVIEW): JSON_CONTAINS(doc, …) + JSON INDEX
+T1 (SS GA): JSON_CONTAINS(doc, …) + JSON INDEX
 T2 (PG):         doc @> '{"status":"open"}'::jsonb  + GIN
 -- Port path $.a đệ quy SS ≠ jsonb containment. Đo, đừng dịch máy.
 ```
@@ -616,7 +626,7 @@ T2: CASE WHEN denom <> 0 THEN num/denom END > 1
 - Nối chuỗi: `CONCAT` / `||`; không `'1'+@n` T-SQL.
 - NULL-safe: `IS DISTINCT FROM`, không `=` cho khóa nullable. PG 19 fold `… NULL` = `IS NULL`.
 - Regex: `REGEXP_LIKE` (2025 GA) vs `~` / `ILIKE`; `LIKE` class `[ ]` chỉ T-SQL. Pattern `\` nhớ E-string 19.
-- Fuzzy / `JSON_CONTAINS` / `VECTOR_SEARCH`: **PREVIEW**.
+- JSON_CONTAINS GA; fuzzy và VECTOR_SEARCH vẫn PREVIEW.
 - `IGNORE NULLS`: window file, không `WHERE`.
 - Tập hợp: `UNION ALL` mặc định; `EXCEPT ALL` không port sang SQL Server.
 - JSON: PG `->` / `@>` vs SS hàm; đừng giả `@>` trên T-SQL.
@@ -652,13 +662,13 @@ T2: CASE WHEN denom <> 0 THEN num/denom END > 1
 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
-| `\|\|` nối chuỗi | **2022+** | lõi |
+| `\|\|` nối chuỗi | **2025** | lõi |
 | `IS [NOT] DISTINCT FROM` | **2022+** | lõi |
 | Fold `IS DISTINCT FROM NULL` | — | **19** (optimizer) |
 | `NOT IN` → ANTI JOIN (không NULL) | tùy CE | **19** |
 | `REGEXP_LIKE` / `REGEXP_*` | **2025 GA** | `~` `SIMILAR TO` lâu |
 | Fuzzy `EDIT_DISTANCE` / `JARO_WINKLER_*` | **2025 PREVIEW** | `fuzzystrmatch` ext |
-| `JSON_CONTAINS` / JSON INDEX | **2025 PREVIEW** on-prem | `@>` GIN lâu |
+| `JSON_CONTAINS` / JSON INDEX | **GA** | `@>` GIN lâu |
 | `VECTOR_DISTANCE` | **2025 GA** | pgvector `<->` / `<=>` |
 | `VECTOR_SEARCH` | **2025 PREVIEW** | pgvector ANN index |
 | `PRODUCT()` | **2025** | — |
@@ -723,12 +733,12 @@ WHERE JSON_VALUE(Payload, '$.status') = N'open'          -- GA, lax miss → NUL
 | | Sargable khi |
 |---|---|
 | `@>` jsonb | GIN `jsonb_path_ops` / `jsonb_ops` |
-| `JSON_VALUE` = hằng | computed persisted / JSON INDEX **PREVIEW** |
-| `JSON_CONTAINS` | JSON INDEX **PREVIEW**; clustered PK |
+| `JSON_VALUE` = hằng | computed persisted / JSON INDEX **GA** |
+| `JSON_CONTAINS` | JSON INDEX **GA**; clustered PK |
 
 Path `$.a` đệ quy SS (gồm `$.a.b`) **không** cùng `@>` (object chứa key/value ở mức containment). Port máy = sai hàng.
 
-`JSON_QUERY` + `WITH ARRAY WRAPPER` (**PREVIEW**): miss scalar vs bọc array — hàm, không toán tử. Chi tiết: [json.md](json.md).
+`JSON_QUERY` + `WITH ARRAY WRAPPER` (**GA**): miss scalar vs bọc array — hàm, không toán tử. Chi tiết: [json.md](json.md).
 
 ---
 
@@ -788,3 +798,13 @@ SELECT LAG(v) IGNORE NULLS OVER (ORDER BY ts)
 ```
 
 Review trap: thấy `IGNORE NULLS` trong PR toán tử/`WHERE` → chuyển [window-functions.md](window-functions.md). `PRODUCT` 2025 bỏ NULL như `SUM`, không cần (và không có) `IGNORE NULLS` aggregate SS.
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL operators](https://www.postgresql.org/docs/19/sql-syntax-lexical.html#SQL-PRECEDENCE)
+- [T-SQL string concatenation pipes (2025)](https://learn.microsoft.com/en-us/sql/t-sql/language-elements/string-concatenation-pipes-transact-sql?view=sql-server-ver17)
+- [JSON_CONTAINS](https://learn.microsoft.com/en-us/sql/t-sql/functions/json-contains-transact-sql?view=sql-server-ver17)

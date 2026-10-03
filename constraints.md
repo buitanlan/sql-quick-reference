@@ -1,9 +1,9 @@
 # Ràng buộc (Constraints)
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
 > Constraint là invariant **engine** — không phải validation app. Isolation không thay CHECK/FK. `NOCHECK` / `NOT VALID` / deferred / `NOT ENFORCED` đổi *khi nào* kiểm, không xóa rule.
 
-Constraint quyết định hàng nào được commit. PK/UNIQUE (kể cả `NULLS NOT DISTINCT`), FK + hành động xóa/sửa, CHECK (NULL **qua**), `EXCLUDE` / temporal `WITHOUT OVERLAPS` (PostgreSQL), deferred (chỉ PG), `NOCHECK` untrusted (SQL Server) vs `NOT VALID` (PG) — lệch dialect dễ port sai. App-only unique = race. DDL lock: [ddl.md](ddl.md). Isolation lúc commit deferred: [transactions.md](transactions.md). Index đứng sau unique/FK: [indexes.md](indexes.md). Leftover `FOR PORTION OF`: [dml.md](dml.md).
+Constraint quyết định hàng nào được commit. PK/UNIQUE (kể cả `NULLS NOT DISTINCT`), FK + hành động xóa/sửa, CHECK (NULL **qua**), `EXCLUDE` / temporal `WITHOUT OVERLAPS` (PostgreSQL), deferred (chỉ PG), `NOCHECK` untrusted (SQL Server) vs `NOT VALID` (PG) — lệch dialect dễ port sai. App-only unique = race. DDL lock: [ddl.md](ddl.md). Isolation lúc commit deferred: [transactions.md](transactions.md). Index đứng sau unique/FK: [indexes.md](indexes.md). DML tự chia khoảng application-time: [dml.md](dml.md).
 
 PostgreSQL 19 **beta**: FK check nhanh hơn (implementation, không đổi ngữ nghĩa); `ALTER … CONSTRAINT … [NOT] ENFORCED` cho **CHECK** (trước 19: ENFORCED chủ yếu FK). SQL Server: không `EXCLUDE`, không defer FK.
 
@@ -11,35 +11,42 @@ PostgreSQL 19 **beta**: FK check nhanh hơn (implementation, không đổi ngữ
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. PRIMARY KEY](#2-primary-key)
-- [3. UNIQUE \& NULLS NOT DISTINCT](#3-unique--nulls-not-distinct)
+- [3. UNIQUE & NULLS NOT DISTINCT](#3-unique--nulls-not-distinct)
 - [4. FOREIGN KEY: hành động](#4-foreign-key-hành-động)
-- [5. FK phải được index](#5-fk-phải-được-index)
-- [6. CHECK \& NULL pass](#6-check--null-pass)
-  - [6.0 Hình dung: bảo vệ chỉ đuổi khi chắc SAI](#60-hình-dung-bảo-vệ-chỉ-đuổi-khi-chắc-chắn-sai)
-- [7. NOT NULL \& DEFAULT](#7-not-null--default)
+- [5. Index phía con của FOREIGN KEY](#5-index-phía-con-của-foreign-key)
+- [6. CHECK & NULL pass](#6-check--null-pass)
+  - [6.0 Hình dung: bảo vệ chỉ đuổi khi chắc chắn SAI](#60-hình-dung-bảo-vệ-chỉ-đuổi-khi-chắc-chắn-sai)
+- [7. NOT NULL & DEFAULT](#7-not-null--default)
 - [8. EXCLUDE (PostgreSQL)](#8-exclude-postgresql)
-- [9. Temporal WITHOUT OVERLAPS \& leftover](#9-temporal-without-overlaps--leftover)
+- [9. Temporal WITHOUT OVERLAPS](#9-temporal-without-overlaps)
 - [10. Deferred (PostgreSQL)](#10-deferred-postgresql)
-- [11. NOCHECK \& FK untrusted](#11-nocheck--fk-untrusted)
+- [11. NOCHECK & FK untrusted](#11-nocheck--fk-untrusted)
 - [12. Disable / NOT VALID / ENFORCED](#12-disable--not-valid--enforced)
+  - [12.1 CHECK `[NOT] ENFORCED` (PG 19)](#121-check-not-enforced-pg-19)
 - [13. Worked examples](#13-worked-examples)
+  - [13.1 FK + index + NOT VALID](#131-fk--index--not-valid)
+  - [13.2 Unique NULL nghiệp vụ](#132-unique-null-nghiệp-vụ)
+  - [13.3 Phòng họp không chồng](#133-phòng-họp-không-chồng)
+  - [13.4 WITHOUT OVERLAPS kiểm constraint](#134-without-overlaps-kiểm-constraint)
+  - [13.5 Untrusted vs NOT VALID vs NOT ENFORCED](#135-untrusted-vs-not-valid-vs-not-enforced)
   - [13.6 Chuỗi CASCADE](#136-chuỗi-cascade)
   - [13.7 EXCLUDE vs UNIQUE vs WITHOUT OVERLAPS](#137-exclude-vs-unique-vs-without-overlaps)
   - [13.8 Untrusted phá join elimination](#138-untrusted-phá-join-elimination)
   - [13.9 Circular insert](#139-circular-insert)
-- [14. Best practices \& checklist](#14-best-practices--checklist)
+- [14. Best practices & checklist](#14-best-practices--checklist)
 - [15. Bẫy khi review](#15-bẫy-khi-review)
 - [16. Version gates](#16-version-gates)
-- [Phụ lục A. Unique vs PK](#phụ-lục-a-unique-vs-pk-vs-indexed-view--exclude)
+- [Phụ lục A. Unique vs PK vs indexed view / EXCLUDE](#phụ-lục-a-unique-vs-pk-vs-indexed-view--exclude)
 - [Phụ lục B. Trigger không phải constraint](#phụ-lục-b-trigger-không-phải-constraint)
 - [Phụ lục C. Catalog khi review PR](#phụ-lục-c-catalog-khi-review-pr)
-- [Phụ lục D. Leftover 0–2](#phụ-lục-d-leftover-0–2--bảng)
-- [Phụ lục E. NOT ENFORCED vs optimizer](#phụ-lục-e-not-enforced-vs-optimizer)
-- [Phụ lục F. NULLS NOT DISTINCT composite](#phụ-lục-f-nulls-not-distinct--composite)
-- [Phụ lục G. CHECK NULL](#phụ-lục-g-check-null--bảng-chân-trị)
-- [Phụ lục H. Checklist constraint](#phụ-lục-h-checklist-constraint-why)
+- [Phụ lục D. Chia khoảng trong ứng dụng](#phụ-lục-d-chia-khoảng-trong-ứng-dụng)
+- [Phụ lục E. `NOT ENFORCED` vs optimizer](#phụ-lục-e-not-enforced-vs-optimizer)
+- [Phụ lục F. NULLS NOT DISTINCT — composite](#phụ-lục-f-nulls-not-distinct--composite)
+- [Phụ lục G. CHECK NULL — bảng chân trị](#phụ-lục-g-check-null--bảng-chân-trị)
+- [Phụ lục H. Checklist constraint (WHY)](#phụ-lục-h-checklist-constraint-why)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -166,12 +173,12 @@ PostgreSQL **19:** kiểm tra FK **nhanh hơn** (implementation) — không đ�
 
 ---
 
-## 5. FK phải được index
+## 5. Index phía con của FOREIGN KEY
 
 **Không** engine nào tự tạo index trên cột *con* khi `ADD FOREIGN KEY`. Unique/PK phía *cha* đã có index. `DELETE`/`UPDATE` cha phải tìm con → thiếu index = seq scan + lock rộng.
 
 ```sql
--- Bắt buộc sau mỗi FK (tên ví dụ)
+-- Cân nhắc index phục vụ lookup con; không tạo trùng index đã có prefix phù hợp.
 CREATE INDEX ix_orders_customer ON orders (customer_id);
 
 -- SQL Server
@@ -180,7 +187,7 @@ CREATE INDEX IX_Orders_CustomerId ON dbo.Orders (CustomerId);
 
 Index này còn phục vụ `JOIN` / `WHERE customer_id = ?`. Composite FK: index khớp thứ tự cột FK hoặc prefix.
 
-**Ghi chú:** Reviewer thấy FK mới mà không thấy `CREATE INDEX` trên cột con → comment blocking. Lock khi xóa cha: [concurrency.md](concurrency.md). Untrusted FK SS (§11) còn làm optimizer **không** tin FK dù index có.
+**Ghi chú:** Index FK phía con là lựa chọn hiệu năng, không phải điều kiện hợp lệ của constraint. Kiểm index hiện có, kích thước bảng và workload DELETE/UPDATE cha trước khi yêu cầu index mới. Lock khi xóa cha: [concurrency.md](concurrency.md). Untrusted FK SS (§11) còn làm optimizer **không** tin FK dù index có.
 
 ---
 
@@ -282,73 +289,24 @@ Partial `EXCLUDE … WHERE (active)`: chỉ hàng thỏa predicate — giống u
 
 ---
 
-## 9. Temporal WITHOUT OVERLAPS & leftover
+## 9. Temporal WITHOUT OVERLAPS
 
-### 9.0 Hình dung: sửa *một khúc* lịch sử, không sửa cả hàng
-
-Bảng thường: một SKU một hàng — `UPDATE` đổi cả dòng. Bảng application-time: một SKU là **đoạn trên trục thời gian**. `FOR PORTION OF` = “chỉ khúc giữa năm 2026”. Engine **cắt bánh**: khúc giữa lấy giá mới; hai đầu bánh (leftover) là hàng **mới** giữ giá cũ. Không phải “sửa cell rồi xong”.
-
-Vì leftover là `INSERT`, trigger insert chạy, `WITHOUT OVERLAPS` kiểm leftover với hàng *khác*. Race RC: hai session cắt cùng bánh — leftover có thể mất; `SELECT FOR UPDATE` cùng predicate trước. Chi tiết DML: [dml.md](dml.md).
-
-Application-time (SQL:2011): period trên hàng, **không** chồng cho cùng thực thể.
+Application-time mô tả khoảng hiệu lực do ứng dụng quản lý. PostgreSQL 18+ dùng range/multirange trong PK hoặc UNIQUE để cấm khoảng chồng nhau cho cùng thực thể:
 
 ```sql
--- PostgreSQL 18+
 CREATE TABLE product_price (
-    sku      text NOT NULL,
-    price    numeric(12,2) NOT NULL,
+    sku text NOT NULL,
+    price numeric(12,2) NOT NULL,
     valid_at daterange NOT NULL,
     PRIMARY KEY (sku, valid_at WITHOUT OVERLAPS)
 );
 ```
 
-Cùng `sku` không hai khoảng `valid_at` overlap. PG **19** `UPDATE`/`DELETE FOR PORTION OF` cắt range, insert leftover, **tôn trọng** constraint này.
+Với khóa sku kiểu text, cần opclass GiST phù hợp, thường từ `CREATE EXTENSION btree_gist` trước khi tạo bảng. Constraint cấm range rỗng và cấm overlap cho cùng sku. Temporal FK dùng `PERIOD` kiểm khoảng ở bảng con được phủ bởi khoảng ở bảng cha. Xem [CREATE TABLE PostgreSQL](https://www.postgresql.org/docs/19/sql-createtable.html).
 
-### 9.1 Leftover — hình
+`FOR PORTION OF` đã bị rút trong Beta 4, xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/); không có việc engine tự chia range hoặc chèn leftover trong PostgreSQL 19. DML thông thường thay cả hàng; tự chia khoảng cần transaction, khóa và kiểm constraint.
 
-Hàng một khoảng `[2025-01-01, 2027-01-01)`, `price = 80`. Cập nhật portion `[2026-01-01, 2026-07-01)` → `99`:
-
-```text
-Trước:
-  [2025-01-01                    2027-01-01)  price=80
-
-UPDATE FOR PORTION OF valid_at FROM DATE '2026-01-01' TO DATE '2026-07-01'
-SET price = 99
-
-Sau (0–2 leftover với range):
-  [2025-01-01, 2026-01-01)  80     ← leftover trái (INSERT)
-  [2026-01-01, 2026-07-01)  99     ← phần cắt (UPDATE tại chỗ / thay range)
-  [2026-07-01, 2027-01-01)  80     ← leftover phải (INSERT)
-
-Multirange: 0–1 leftover (docs 19). Bound portion = hằng (now() được; không column ref).
-```
-
-Leftover = **INSERT thật** — trigger `INSERT` có thể fire; identity/sequence tăng; `RETURNING` không chỉ một hàng. `WITHOUT OVERLAPS` fail nếu leftover chồng hàng *khác* (ví dụ đã có giá `[2026-07-01, 2028-01-01)`).
-
-Hàm `range_minus_multi` / `multirange_minus_multi` (19) mô phép trừ khoảng — đối chiếu docs, đừng bịa signature trong app.
-
-Cú pháp DML: [dml.md](dml.md) §8. Bound **hằng**. `COPY`/`TRUNCATE` không hiểu portion.
-
-### 9.2 Race READ COMMITTED
-
-Hai txn cắt cùng hàng → leftover/lost portion (documented). **`SELECT FOR UPDATE` cùng predicate + portion trước**. RR/SSI: khóa đó không bắt buộc theo docs nhưng test; abort `40001` rồi retry cả khối.
-
-```sql
-BEGIN;
-SELECT * FROM product_price
-WHERE sku = 'ABC'
-FOR UPDATE;
-
-UPDATE product_price
-FOR PORTION OF valid_at FROM DATE '2026-01-01' TO DATE '2026-07-01'
-SET price = 99
-WHERE sku = 'ABC';
-COMMIT;
-```
-
-SQL Server: `PERIOD FOR SYSTEM_TIME` + `SYSTEM_VERSIONING` = **system-time** (history tự động), không `WITHOUT OVERLAPS`, không `FOR PORTION OF`. Application-time trên SS: cột từ/đến + trigger / indexed view.
-
-**Ghi chú:** **Beta** 19. Đừng map `FOR SYSTEM_TIME` sang `valid_at`. Không dùng cho bitemporal đầy đủ trừ khi tự quản system-time. Không bịa `FOR PORTION OF SYSTEM_TIME`.
+SQL Server `SYSTEM_VERSIONING`/`PERIOD FOR SYSTEM_TIME` ghi lịch sử system-time. Nó không tự cấm overlap của khoảng hiệu lực nghiệp vụ mà ứng dụng khai báo.
 
 ---
 
@@ -505,17 +463,11 @@ EXCLUDE USING gist (room_id WITH =, during WITH &&)
 -- Dùng logic app + UPDLOCK hoặc bảng slot rời
 ```
 
-### 13.4 Leftover vs WITHOUT OVERLAPS
+### 13.4 WITHOUT OVERLAPS kiểm constraint
 
-```text
-Đã có sku ABC:
-  [2026-01-01, 2026-12-31)  price 10
-  [2027-01-01, 2028-01-01)  price 12
+Với bảng product_price ở mục 9, hai khoảng [2026-01-01,2026-07-01) và [2026-07-01,2027-01-01) cùng sku hợp lệ vì biên [) không overlap. Khoảng [2026-06-01,2026-08-01) sẽ bị từ chối. Constraint kiểm kết quả; UPDATE thường không tự chia khoảng. FOR PORTION OF đã bị rút khỏi 19.
 
-UPDATE portion [2026-06-01, 2027-06-01)  -- leftover phải chồng hàng 2027
-  → FAIL WITHOUT OVERLAPS
-Sửa: cắt portion nằm trong một hàng, hoặc xóa/chỉnh hàng kề trước
-```
+---
 
 ### 13.5 Untrusted vs NOT VALID vs NOT ENFORCED
 
@@ -552,7 +504,7 @@ RESTRICT trên orders ← customers: xóa khách fail nếu còn đơn — thư�
 | Period không chồng cùng key | `WITHOUT OVERLAPS` | PG 18+ |
 | Overlap ngày trên SS | trigger / indexed view / app + `UPDLOCK` | SS |
 
-`WITHOUT OVERLAPS` trên PK/UNIQUE dùng rangetype period — leftover `FOR PORTION OF` phải thỏa cùng constraint. `EXCLUDE` trên `tstzrange` không tự cắt leftover — DML thường `UPDATE` cả hàng.
+WITHOUT OVERLAPS trên PK/UNIQUE kiểm range/multirange; mọi đoạn do ứng dụng tạo phải thỏa constraint. `EXCLUDE` trên `tstzrange` không tự cắt leftover — DML thường `UPDATE` cả hàng.
 
 Race RC hai `INSERT` khoảng chồng: GiST/unique lock — một fail unique-like, không “cả hai lọt” nếu constraint engine (khác app check).
 
@@ -597,7 +549,7 @@ COMMIT;
 - Unique + NULL: nói rõ `NULLS NOT DISTINCT` vs filtered.
 - PG: `NOT VALID` + `VALIDATE`; không `NOCHECK` kiểu SS.
 - SS: sau ETL `WITH CHECK CHECK CONSTRAINT`; soi `is_not_trusted`.
-- Temporal: `WITHOUT OVERLAPS` + `FOR UPDATE` trước `FOR PORTION OF` ở RC; leftover = INSERT.
+- Temporal: WITHOUT OVERLAPS kiểm overlap; chia khoảng cần DML ứng dụng trong một transaction.
 - Deferred chỉ khi insert vòng; unique deferred khó vận hành.
 - Đổi PK = dự án riêng (rewrite, FK, downtime).
 - PG 19: `NOT ENFORCED` CHECK nhớ bật lại; `ENFORCED` = scan.
@@ -618,7 +570,7 @@ COMMIT;
 - CHECK subquery “thấy bảng khác” — không portable, thường illegal.
 - `NOT ENFORCED` (PG 19) quên bật lại trước GA prod.
 - App unique check `SELECT` rồi `INSERT` không khóa — [concurrency.md](concurrency.md).
-- `FOR PORTION OF` ở RC không `FOR UPDATE`; leftover chồng hàng kề.
+- Tưởng WITHOUT OVERLAPS tự chia range khi UPDATE; FOR PORTION OF đã bị rút khỏi 19.
 - Trigger INSERT trên leftover làm nghiệp vụ “cập nhật giá” gửi mail hai lần.
 - `btree_gist` inet trên EXCLUDE — upgrade 19 chặn (khác room_id int).
 
@@ -632,7 +584,7 @@ COMMIT;
 | `ON DELETE RESTRICT` | 2019+ rõ | lâu |
 | `EXCLUDE` / GiST | — | lâu |
 | PK `WITHOUT OVERLAPS` | — | **18+** |
-| `FOR PORTION OF` + leftover | — | **19** (**beta**) |
+| FOR PORTION OF + leftover tự động | — | Đã rút khỏi 19 Beta 4 |
 | Deferred FK/UNIQUE | — | lâu |
 | `NOT VALID` + `VALIDATE` | `WITH NOCHECK` khác | lâu |
 | CHECK `[NOT] ENFORCED` | — | **19** (FK ENFORCED trước) |
@@ -685,21 +637,11 @@ WHERE conrelid = 'orders'::regclass;
 
 ---
 
-## Phụ lục D. Leftover 0–2 — bảng
+## Phụ lục D. Chia khoảng trong ứng dụng
 
-Hàng range `[L, R)`, portion `[P, Q)` (P, Q hằng; `L < R`).
+Cho khoảng gốc [L,R) và khoảng cập nhật [P,Q), ứng dụng có thể tạo tối đa ba đoạn: trái giữ giá cũ, phần giao lấy giá mới, phải giữ giá cũ. Chỉ tạo đoạn không rỗng và giữ tất cả thay đổi trong một transaction. PostgreSQL 19 không có FOR PORTION OF; đây là thuật toán ứng dụng, không phải hiệu ứng UPDATE tự động.
 
-| Quan hệ | Leftover |
-|---|---|
-| `[P,Q)` nằm hẳn ngoài `[L,R)` | 0 hàng đổi (predicate không khớp) |
-| `[P,Q)` phủ hết `[L,R)` | 0 leftover; UPDATE/DELETE cả hàng |
-| Cắt giữa (`L < P < Q < R`) | 2 leftover (trái `[L,P)`, phải `[Q,R)`) |
-| Cắt một đầu | 1 leftover |
-| Multirange | 0–1 leftover (docs 19) |
-
-Trigger: mỗi leftover = `INSERT`. `IDENTITY` lỗ. `WITHOUT OVERLAPS` fail nếu leftover chồng hàng kề — không phải “engine sai”, là dữ liệu period đã khít.
-
-Race RC không `FOR UPDATE`: session A cắt, session B cắt khác portion cùng hàng → leftover mất/chồng (documented). Retry cả txn.
+Constraint WITHOUT OVERLAPS kiểm kết quả nhưng không thực hiện phép chia. Khi xóa hàng gốc rồi chèn đoạn mới, cần xét các FK đang tham chiếu hàng đó, trigger, khóa đồng thời và các cột identity/default.
 
 ---
 
@@ -752,15 +694,13 @@ PG 19 `NOT ENFORCED` trên CHECK: hàng mới cũng lọt — không dùng để
 
 SS CHECK UDF không deterministic: tránh. PG `now()` trong CHECK = bất ngờ theo thời điểm ghi.
 
-Leftover `FOR PORTION OF` = INSERT: đếm trigger, identity, `WITHOUT OVERLAPS` hàng kề. Untrusted SS: `WITH CHECK CHECK CONSTRAINT` sau ETL — `is_not_trusted` vào alert. `NOT VALID` ≠ `NOT ENFORCED` ≠ `NOCHECK`.
+Chia khoảng bằng ứng dụng: xét trigger, identity và WITHOUT OVERLAPS trên mọi đoạn mới. Untrusted SS: `WITH CHECK CHECK CONSTRAINT` sau ETL — `is_not_trusted` vào alert. `NOT VALID` ≠ `NOT ENFORCED` ≠ `NOCHECK`.
 
-EXCLUDE gist `(room_id WITH =, during WITH &&)` + `btree_gist` cho int — **không** inet/cidr lúc nâng 19. FK luôn index cột con. Deferred chỉ vòng insert; unique deferred khó debug. CHECK 19 ENFORCED scan khi bật lại.
+EXCLUDE gist `(room_id WITH =, during WITH &&)` + `btree_gist` cho int; kiểm incompatibility inet/cidr khi nâng 19. Index cột con FK theo workload, tránh trùng index có cùng prefix. Deferred giúp kiểm constraint ở cuối transaction; CHECK 19 ENFORCED cần kiểm dữ liệu khi bật lại.
 
 MATCH SIMPLE: một cột FK NULL = không đòi cha. `MATCH FULL` (PG): một NULL + một non-null = lỗi. SS không MATCH FULL. Circular insert: PG `DEFERRABLE`; SS thứ tự / NULL rồi UPDATE / (tránh) `NOCHECK` quên `WITH CHECK`.
 
 Leftover range: cắt giữa → 2 INSERT; phủ hết → 0 leftover; race RC → `FOR UPDATE`. Catalog SS `is_not_trusted`; PG `convalidated`. CHECK `[NOT] ENFORCED` **19**.
-
----
 
 ---
 
@@ -769,9 +709,18 @@ Leftover range: cắt giữa → 2 INSERT; phủ hết → 0 leftover; race RC �
 1. **ETL SS: `WITH CHECK CHECK CONSTRAINT`** — quên = untrusted, mất join elimination.
 2. **PG: `NOT VALID` rồi `VALIDATE`** — hàng mới sạch; khác `NOT ENFORCED`.
 3. **CHECK 19 `ENFORCED` = scan** — bật lại trên bảng bẩn sẽ fail.
-4. **`FOR PORTION OF` + `FOR UPDATE` ở RC** — leftover INSERT; `WITHOUT OVERLAPS`.
+4. **Chia range trong ứng dụng** — một transaction, khóa và WITHOUT OVERLAPS; 19 không có FOR PORTION OF.
 5. **`NULLS NOT DISTINCT` không = filtered unique SS**.
 6. **EXCLUDE gist int+range OK; inet/cidr `btree_gist` chặn 19**.
 7. **Mỗi FK một index cột con**.
 8. **Không `ON DELETE CASCADE` trên `customers` trừ khi nghiệp vụ xóa cây**.
 
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL constraints / WITHOUT OVERLAPS](https://www.postgresql.org/docs/19/sql-createtable.html)
+- [T-SQL constraint trust](https://learn.microsoft.com/en-us/sql/relational-databases/tables/disable-foreign-key-constraints-with-insert-and-update-statements?view=sql-server-ver17)

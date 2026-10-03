@@ -1,6 +1,6 @@
 # JOIN
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
 > Join là thao tác đại số: tích Descartes có lọc. Optimizer được đổi `INNER` thành semi/anti, đẩy predicate, reorder — **miễn kết quả logic giữ nguyên**. Plan khác nhau không có nghĩa câu sai.
 
 Join quyết định *hàng nào tồn tại* và *hàng nào bị nhân*. Lỗi hay gặp không phải sai `INNER`/`LEFT` trên giấy, mà: (1) predicate outer đặt nhầm `WHERE`, (2) `NOT IN` với `NULL`, (3) fan-out 1-n ⋈ 1-n, (4) `NATURAL JOIN` đổi silently khi thêm cột. Hai engine cùng tên join; thuật toán và mẹo optimizer **không** portable — PostgreSQL 19 (**beta**) thêm rewrite anti/semi, aggregate-trước-join, Memoize; SQL Server 2025 thêm CE/DOP/OPPO feedback.
@@ -11,29 +11,39 @@ Khóa khi join rồi cập nhật: [concurrency.md](concurrency.md). `UPDATE …
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. Phân loại](#2-phân-loại)
 - [3. INNER](#3-inner)
 - [4. OUTER](#4-outer)
 - [5. CROSS](#5-cross)
 - [6. Predicate: ON vs WHERE](#6-predicate-on-vs-where)
-  - [6.0 Hình dung: OUTER giữ người trái](#60-hình-dung-outer-là-giữ-người-bên-trái-dù-phải-trống)
-- [7. Semi / anti \& bẫy NOT IN NULL](#7-semi--anti--bẫy-not-in-null)
-  - [7.1 NOT IN + NULL](#71-not-in--null--bẫy-đầy-đủ)
+  - [6.0 Hình dung: OUTER là “giữ người bên trái, dù phải trống”](#60-hình-dung-outer-là-giữ-người-bên-trái-dù-phải-trống)
+- [7. Semi / anti & bẫy NOT IN NULL](#7-semi--anti--bẫy-not-in-null)
+  - [7.1 `NOT IN` + NULL — bẫy đầy đủ](#71-not-in--null--bẫy-đầy-đủ)
   - [7.2 PG 19: ANTI JOIN rewrite](#72-pg-19-anti-join-rewrite)
 - [8. APPLY vs LATERAL](#8-apply-vs-lateral)
 - [9. Join algorithm](#9-join-algorithm)
-- [10. Optimizer: PG 19 \& SQL Server 2025](#10-optimizer-pg-19--sql-server-2025)
+- [10. Optimizer: PG 19 & SQL Server 2025](#10-optimizer-pg-19--sql-server-2025)
   - [10.1 PostgreSQL 19](#101-postgresql-19)
-  - [10.2 Memoize \& aggregate trước join](#102-memoize--aggregate-trước-join)
-  - [10.3 pg\_plan\_advice](#103-pg_plan_advice)
+  - [10.2 Memoize & aggregate trước join](#102-memoize--aggregate-trước-join)
+  - [10.3 pg_plan_advice](#103-pg_plan_advice)
   - [10.4 SQL Server: CE, OPPO/PSPO, DOP](#104-sql-server-ce-oppopspo-dop)
 - [11. Fan-out](#11-fan-out)
-- [12. NATURAL JOIN \& USING](#12-natural-join--using)
+- [12. NATURAL JOIN & USING](#12-natural-join--using)
+  - [12.1 Schema evolution — worked trap](#121-schema-evolution--worked-trap)
 - [13. Worked examples](#13-worked-examples)
-- [14. Best practices \& checklist](#14-best-practices--checklist)
+  - [13.1 Đơn giản — đơn kèm tên khách](#131-đơn-giản--đơn-kèm-tên-khách)
+  - [13.2 Trung bình — khách VN và đơn paid, giữ khách không đơn](#132-trung-bình--khách-vn-và-đơn-paid-giữ-khách-không-đơn)
+  - [13.3 Nâng cao — top-N per group + anti + không fan-out](#133-nâng-cao--top-n-per-group--anti--không-fan-out)
+  - [13.4 Fan-out hai nhánh — số liệu trước/sau](#134-fan-out-hai-nhánh--số-liệu-trướcsau)
+  - [13.5 NATURAL — thêm cột phá kết quả](#135-natural--thêm-cột-phá-kết-quả)
+  - [13.6 LEFT + IS NULL vs NOT EXISTS (19 có thể cùng ANTI)](#136-left--is-null-vs-not-exists-19-có-thể-cùng-anti)
+  - [13.7 Optional parameter + join (SS OPPO)](#137-optional-parameter--join-ss-oppo)
+  - [13.8 Hash NULL key — INNER không khớp NULL](#138-hash-null-key--inner-không-khớp-null)
+- [14. Best practices & checklist](#14-best-practices--checklist)
 - [15. Bẫy khi review](#15-bẫy-khi-review)
 - [16. Version gates](#16-version-gates)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -48,7 +58,7 @@ Nguyên tắc:
 - **Semi/anti** khi chỉ cần tồn tại/không tồn tại — đừng `DISTINCT` sau `INNER JOIN` con.
 - **Thuật toán** (loop/hash/merge) là việc optimizer; hint chỉ khi đã hết thống kê và đo.
 
-`GRAPH_TABLE` (PG 19) cũng chỉ là join sau rewrite — [select.md](select.md) §11.
+SQL/PGQ đã bị rút khỏi PG 19 Beta 4; dùng JOIN/recursive CTE — [select.md](select.md) mục 11.
 
 ---
 
@@ -95,7 +105,7 @@ USING (id, tenant_id)     -- gộp cột trùng trong SELECT *
 
 Kiểu lệch (`int` ⋈ `bigint`, `varchar` ⋈ `nvarchar`) → implicit convert, mất index. Sửa schema hoặc convert **phía tham số/nguồn nhỏ**.
 
-SQL Server: FK **trusted** (`is_not_trusted = 0`) cho *join elimination* — optimizer bỏ join nếu chỉ lấy cột phía cha đã bảo đảm. `NOCHECK` / disable FK → mất elimination, plan nặng hơn, *và* dữ liệu mồ côi. `WITH CHECK CHECK CONSTRAINT` sau ETL. PostgreSQL không cùng “trusted” catalog; `NOT VALID` vẫn kiểm hàng mới, planner không giả mọi hàng cũ hợp lệ cho elimination kiểu SS. [constraints.md](constraints.md), [ddl.md](ddl.md) §5.
+SQL Server: FK **trusted** (`is_not_trusted = 0`) cho *join elimination* — optimizer có thể bỏ join khi chỉ cần cột phía con và FK trusted chứng minh mỗi hàng con có đúng một hàng cha; không thể bỏ cha nếu cần cột cha không suy ra được. `NOCHECK` / disable FK → mất elimination, plan nặng hơn, *và* dữ liệu mồ côi. `WITH CHECK CHECK CONSTRAINT` sau ETL. PostgreSQL không cùng “trusted” catalog; `NOT VALID` vẫn kiểm hàng mới, planner không giả mọi hàng cũ hợp lệ cho elimination kiểu SS. [constraints.md](constraints.md), [ddl.md](ddl.md) §5.
 
 **Ghi chú:** `FROM a, b WHERE a.id = b.id` cũ tương đương `INNER` nếu `WHERE` đủ. Thiếu điều kiện = `CROSS`. SQL Server `INNER JOIN` **bắt buộc** `ON`/`USING`; thiếu → lỗi parse, không im lặng thành cross. T-SQL **không** có `USING` — mục 12.
 
@@ -514,7 +524,7 @@ SQL Server tương đương gần: Query Store force plan / `USE PLAN` — khác
 
 `SET enable_hashjoin = off` vẫn dao debug, không phải advice.
 
-Load contrib trên cụm lab trước prod: đối chiếu `CREATE EXTENSION` tên module trong docs 19 (`pg_plan_advice` / `pg_stash_advice`) — **không** nhét GUC `enable_*` vào connection string app. Advice theo query id: query đổi literal/`search_path` có thể khác id. Hết hạn advice sau `ANALYZE` lớn / đổi stats — review định kỳ, không “ghim mãi”.
+Load contrib trên cụm lab trước prod: đối chiếu `CREATE EXTENSION` tên module trong docs 19 (`pg_plan_advice` / `pg_stash_advice`) — **không** nhét GUC `enable_*` vào connection string app. Advice theo query id: đổi giá trị literal thường giữ id; đổi cấu trúc hoặc object được resolve qua search_path có thể đổi id. Hết hạn advice sau `ANALYZE` lớn / đổi stats — review định kỳ, không “ghim mãi”.
 
 ### 10.4 SQL Server: CE, OPPO/PSPO, DOP
 
@@ -591,7 +601,7 @@ GROUP BY o.id;
 
 Ba nhánh (items, payments, refunds): ba subquery gộp, không một join phẳng.
 
-ORM “include” hai collection rồi `Sum()` phía SQL = cùng bệnh. Graph `GRAPH_TABLE` nhiều hop 1-n cùng lúc = cùng fan-out sau rewrite.
+ORM “include” hai collection rồi `Sum()` phía SQL = cùng bệnh. Query bảng cạnh quan hệ có nhiều nhánh 1-n cũng gặp fan-out này.
 
 Fan-out *ba* nhánh — đếm hàng join trước khi `SUM`:
 
@@ -845,7 +855,7 @@ PG 19 hash “NULL key tốt hơn” không ghép hai NULL. Muốn “cả hai N
 - `CROSS APPLY` khi cần `OUTER APPLY` (mất hàng trái).
 - `NATURAL JOIN` trong view cũ; thêm cột cùng tên.
 - Port `USING` sang SQL Server.
-- `GRAPH_TABLE` không index FK.
+- Dùng GRAPH_TABLE đã bị rút khỏi PostgreSQL 19 Beta 4.
 - `SET enable_hashjoin = off` lên connection pool.
 - Compat 170 không đo plan cache (OPPO tăng số plan).
 - `UPDATE` join fan-out trên PostgreSQL — [dml.md](dml.md), không phải “JOIN SELECT”.
@@ -868,7 +878,17 @@ PG 19 hash “NULL key tốt hơn” không ghép hai NULL. Muốn “cả hai N
 | CE expression / OPPO / PSPO / DOP feedback | **2025** | generic/custom |
 | `pg_plan_advice` / `pg_stash_advice` | Query Store force | **19** contrib |
 | `GENERATE_SERIES` | 2022+ | lâu |
-| SQL/PGQ join rewrite | không PGQ | **19 beta** |
+| SQL/PGQ | SQL Graph riêng | Đã rút khỏi 19 Beta 4 |
 | JIT default off | — | **19** |
 
 Logical processing `FROM`/`ON`/`WHERE`: [select.md](select.md) §3. Isolation khi join rồi ghi: [transactions.md](transactions.md). IQP trên `SELECT`: [select.md](select.md) §14.
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL SELECT / FROM / JOIN](https://www.postgresql.org/docs/19/sql-select.html)
+- [PostgreSQL 19 optimizer changes](https://www.postgresql.org/docs/19/release-19.html)
+- [SQL Server intelligent query processing](https://learn.microsoft.com/en-us/sql/sql-server/what-s-new-in-sql-server-2025?view=sql-server-ver17)

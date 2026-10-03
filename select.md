@@ -1,9 +1,9 @@
 # SELECT
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
 > Thứ tự **viết** ≠ thứ tự **thực thi**. Logical processing quyết định alias nào tồn tại, `WHERE` vs `HAVING`, và window tính lúc nào — đây là nguồn bug hay gặp khi port và khi debug “sao `WHERE y` lỗi”.
 
-`SELECT` không phải “lấy cột rồi lọc”. Engine dựng một bảng ảo qua từng bước: nguồn → lọc hàng → gộp → lọc nhóm → chiếu cột / window → sắp → cắt. Hai dialect cùng ISO ở bề mặt (`FETCH`, `GROUPING SETS`) nhưng lệch ở `TOP`/`LIMIT`, `DISTINCT ON`, so sánh tuple, và SQL/PGQ (`GRAPH_TABLE`, PostgreSQL **19**, **beta** đến GA). Đừng copy câu từ một engine rồi cho rằng plan và ngữ nghĩa giống nhau.
+`SELECT` không phải “lấy cột rồi lọc”. Engine dựng một bảng ảo qua từng bước: nguồn → lọc hàng → gộp → lọc nhóm → chiếu cột / window → sắp → cắt. Hai dialect cùng ISO ở bề mặt (`FETCH`, `GROUPING SETS`) nhưng lệch ở `TOP`/`LIMIT`, `DISTINCT ON`, so sánh tuple và thứ tự NULL. Đừng copy câu từ một engine rồi cho rằng plan và ngữ nghĩa giống nhau.
 
 Sargable, phân trang, khóa hàng: [indexes.md](indexes.md), [joins.md](joins.md), [concurrency.md](concurrency.md). CTE / subquery: [cte-subqueries.md](cte-subqueries.md). Window: [window-functions.md](window-functions.md). Optimizer/IQP ảnh hưởng **plan** `SELECT` (không đổi logical processing): mục 14 và [internal.md](internal.md) §13.
 
@@ -11,42 +11,44 @@ Sargable, phân trang, khóa hàng: [indexes.md](indexes.md), [joins.md](joins.m
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. Hình dạng câu lệnh](#2-hình-dạng-câu-lệnh)
 - [3. Logical processing](#3-logical-processing)
   - [3.0 Hình dung: bếp, không phải đọc kịch bản](#30-hình-dung-bếp-không-phải-đọc-kịch-bản)
   - [3.1 Thứ tự logic](#31-thứ-tự-logic)
   - [3.2 Alias, HAVING, window](#32-alias-having-window)
   - [3.3 DISTINCT so với LIMIT](#33-distinct-so-với-limit)
-- [4. FROM \& table source](#4-from--table-source)
-- [5. WHERE \& sargable](#5-where--sargable)
+- [4. FROM & table source](#4-from--table-source)
+- [5. WHERE & sargable](#5-where--sargable)
 - [6. GROUP BY, HAVING, CUBE](#6-group-by-having-cube)
   - [6.1 Functional dependency](#61-functional-dependency)
   - [6.2 GROUPING SETS / CUBE / ROLLUP](#62-grouping-sets--cube--rollup)
-  - [6.3 GROUP BY ALL (PostgreSQL 19)](#63-group-by-all-postgresql-19)
+  - [6.3 GROUP BY ALL — hai nghĩa cần phân biệt](#63-group-by-all--hai-nghĩa-cần-phân-biệt)
 - [7. SELECT list](#7-select-list)
 - [8. ORDER BY, FETCH vs TOP vs LIMIT](#8-order-by-fetch-vs-top-vs-limit)
   - [8.1 WITH TIES và PERCENT](#81-with-ties-và-percent)
   - [8.2 OFFSET sâu](#82-offset-sâu)
 - [9. Keyset pagination](#9-keyset-pagination)
-- [10. DISTINCT \& DISTINCT ON vs ROW\_NUMBER](#10-distinct--distinct-on-vs-row_number)
-- [11. GRAPH\_TABLE (PostgreSQL 19)](#11-graph_table-postgresql-19)
-  - [11.1 Metadata, không storage riêng](#111-metadata-không-storage-riêng)
-  - [11.2 MATCH một hop và nhiều hop cố định](#112-match-một-hop-và-nhiều-hop-cố-định)
-  - [11.3 Rewrite thành join — EXPLAIN](#113-rewrite-thành-join--explain)
-  - [11.4 Giới hạn 19 (chưa có)](#114-giới-hạn-19-chưa-có)
-  - [11.5 SQL Server MATCH ≠ SQL/PGQ](#115-sql-server-match--sqlpgq)
+- [10. DISTINCT & DISTINCT ON vs ROW_NUMBER](#10-distinct--distinct-on-vs-row_number)
+- [11. Property graph — dùng JOIN hoặc recursive CTE](#11-property-graph--dùng-join-hoặc-recursive-cte)
 - [12. TABLESAMPLE](#12-tablesample)
 - [13. FOR UPDATE — con trỏ khóa](#13-for-update--con-trỏ-khóa)
-- [14. Plan SELECT: IQP 2025 \& PG 19](#14-plan-select-iqp-2025--pg-19)
+- [14. Plan SELECT: IQP 2025 & PG 19](#14-plan-select-iqp-2025--pg-19)
   - [14.1 DOP feedback](#141-dop-feedback)
   - [14.2 CE feedback trên biểu thức](#142-ce-feedback-trên-biểu-thức)
   - [14.3 OPPO / PSPO — tham số tùy chọn](#143-oppo--pspo--tham-số-tùy-chọn)
   - [14.4 Query Store secondary](#144-query-store-secondary)
 - [15. Worked examples](#15-worked-examples)
-- [16. Best practices \& checklist](#16-best-practices--checklist)
+  - [15.1 Đơn giản — doanh thu khách đã thanh toán](#151-đơn-giản--doanh-thu-khách-đã-thanh-toán)
+  - [15.2 Trung bình — một đơn mới nhất mỗi khách](#152-trung-bình--một-đơn-mới-nhất-mỗi-khách)
+  - [15.3 Nâng cao — keyset + CUBE + không fan-out](#153-nâng-cao--keyset--cube--không-fan-out)
+  - [15.4 Quan hệ một bước và lọc kết quả](#154-quan-hệ-một-bước-và-lọc-kết-quả)
+  - [15.5 TABLESAMPLE rồi cắt — hiểu lệch](#155-tablesample-rồi-cắt--hiểu-lệch)
+  - [15.6 Tham số tùy chọn (SS) — ý OPPO](#156-tham-số-tùy-chọn-ss--ý-oppo)
+- [16. Best practices & checklist](#16-best-practices--checklist)
 - [17. Bẫy khi review](#17-bẫy-khi-review)
 - [18. Version gates](#18-version-gates)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -60,7 +62,7 @@ Ba nguyên tắc khi viết và review:
 - **NULL:** `WHERE` loại `UNKNOWN`. So sánh, `IN`, `DISTINCT` đều theo three-valued logic — [dialects.md](dialects.md), [operators.md](operators.md).
 - **Seek vs scan:** predicate sargable + index phù hợp mới cho keyset / nested loop. Bọc cột trong hàm = “đúng kết quả, sai plan”.
 
-PostgreSQL 19 còn **beta** (GA mục tiêu cuối 10/2026): `GRAPH_TABLE`, `GROUP BY ALL`, và vài rewrite `GROUP BY` có thể chỉnh trước GA — đối chiếu [release notes 19](https://www.postgresql.org/docs/19/release-19.html). SQL Server 2025: IQP (DOP feedback **ON mặc định**, CE expression, OPPO) đổi **plan** `SELECT` khi compat **170**, không đổi thứ tự logic mục 3.
+PostgreSQL 19 đang Beta 4: SQL/PGQ đã bị rút, tính năng GROUP BY ALL suy ra SELECT list cũng đã bị rút từ Beta 3; các rewrite optimizer còn lại có thể chỉnh trước GA — đối chiếu [release notes 19](https://www.postgresql.org/docs/19/release-19.html). SQL Server 2025: IQP (DOP feedback **ON mặc định**, CE expression, OPPO) đổi **plan** `SELECT` khi compat **170**, không đổi thứ tự logic mục 3.
 
 ---
 
@@ -73,7 +75,7 @@ FROM table_source
 WHERE predicate
 GROUP BY ...
 HAVING predicate
-WINDOW w AS ( ... )                          -- PostgreSQL / SQL:2011; SQL Server: inline OVER
+WINDOW w AS ( ... )                          -- PostgreSQL; SQL Server 2022+, compat >= 160
 ORDER BY ...
 OFFSET n ROWS FETCH NEXT m ROWS ONLY;
 ```
@@ -90,7 +92,7 @@ OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY;
 SELECT * FROM orders ORDER BY total DESC, id DESC LIMIT 10 OFFSET 0;
 ```
 
-**Ghi chú:** `WINDOW` đặt tên frame dùng lại trong `SELECT` — PostgreSQL. SQL Server viết `OVER (...)` tại mỗi hàm. Chi tiết frame: [window-functions.md](window-functions.md). `GRAPH_TABLE (...)` đứng chỗ table source trong `FROM`, không phải hàm trong select list.
+**Ghi chú:** WINDOW đặt tên spec dùng lại trong SELECT trên PostgreSQL và SQL Server 2022+ (compat >= 160). Chi tiết frame: [window-functions.md](window-functions.md).
 
 ---
 
@@ -139,7 +141,7 @@ ORDER BY total DESC;   -- 7. alias total đã có sau bước 6
 
 Thứ tự **logic** (rút gọn, cả hai engine):
 
-1. `FROM` / `JOIN` / `APPLY` / `LATERAL` / `GRAPH_TABLE` (tích, lọc `ON`)
+1. `FROM` / `JOIN` / `APPLY` / `LATERAL` (tích, lọc `ON`)
 2. `WHERE`
 3. `GROUP BY`
 4. `HAVING`
@@ -153,7 +155,7 @@ Hệ quả bắt buộc:
 - `WHERE` **không** thấy alias của `SELECT`.
 - `HAVING` thấy aggregate; `WHERE` không — lọc hàng *trước* gộp thì `WHERE`, lọc *nhóm* thì `HAVING`.
 - Window tính **sau** `GROUP BY`/`HAVING`, **trước** `DISTINCT` ngoài cùng.
-- `ORDER BY` được dùng alias `SELECT` (cả hai). `GROUP BY` thì không (trừ lặp lại biểu thức, hoặc `GROUP BY ALL` trên PG 19 — mục 6.3).
+- ORDER BY dùng alias SELECT trên cả hai. PostgreSQL cũng cho GROUP BY bằng alias đơn lẻ hoặc ordinal; nếu tên trùng cột nguồn, GROUP BY ưu tiên cột nguồn. T-SQL GROUP BY không dùng alias cùng tầng SELECT. Alias không được dùng trong WHERE/HAVING.
 
 ```sql
 SELECT year_num AS y
@@ -224,7 +226,7 @@ SELECT *
 FROM (VALUES (1, 'a'), (2, 'b')) AS v(id, name);
 ```
 
-`APPLY` / `LATERAL` — table source phụ thuộc hàng trái: [joins.md](joins.md) §8. `GRAPH_TABLE` là table source (mục 11), không phải hàm vô hướng. `TABLESAMPLE` gắn *một* table source (mục 12), không gắn lên kết quả join.
+`APPLY` / `LATERAL` — table source phụ thuộc hàng trái: [joins.md](joins.md) §8. SQL/PGQ đã bị rút khỏi 19 (mục 11). `TABLESAMPLE` gắn *một* table source (mục 12), không gắn lên kết quả join.
 
 Nhiều nguồn không `JOIN` tường minh (`FROM a, b WHERE …`) = tích Descartes rồi lọc — dễ quên `WHERE` thành cross join. Viết `INNER JOIN … ON`.
 
@@ -334,31 +336,17 @@ GROUP BY ROLLUP (country);
 
 **Ghi chú:** `COUNT(*)` đếm hàng nhóm; `COUNT(col)` bỏ `NULL`. `SUM` trên tập rỗng không có nhóm → 0 hàng, không phải `0` — khác `COALESCE((SELECT SUM…), 0)` scalar. Join 1-n trước `GROUP BY` nhân hàng — fan-out: [joins.md](joins.md) §11. PG 19 có thể **aggregate trước join** khi rewrite có lợi — cùng kết quả logic, plan khác; không miễn khai fan-out trong SQL viết tay.
 
-### 6.3 GROUP BY ALL (PostgreSQL 19)
+### 6.3 GROUP BY ALL — hai nghĩa cần phân biệt
 
-PostgreSQL **19** (**beta**): `GROUP BY ALL` = mọi cột non-aggregate / non-window trên `SELECT` list. Không có trên SQL Server 2025.
+Tính năng suy ra mọi biểu thức không aggregate trong SELECT list đã bị rút khỏi PostgreSQL 19 từ Beta 3, xem [thông báo Beta 3](https://www.postgresql.org/about/news/postgresql-186-1711-1615-1519-1424-and-19-beta-3-released-3365/). Viết danh sách nhóm rõ ràng:
 
 ```sql
-SELECT customer_id, status, COUNT(*) AS n, SUM(total) AS revenue
+SELECT customer_id, status, count(*) AS order_count
 FROM orders
-GROUP BY ALL;
--- ≡ GROUP BY customer_id, status
+GROUP BY customer_id, status;
 ```
 
-Tiện khi list dài, **nguy hiểm** khi ai đó thêm cột vào `SELECT`: grouping đổi **im lặng**, cardinality báo cáo đổi, index/hash agg khác.
-
-```sql
--- Review: thêm o.created_at vào list = nhóm theo ngày, không còn theo khách+status
-SELECT customer_id, status, o.created_at, COUNT(*)
-FROM orders AS o
-GROUP BY ALL;
-```
-
-Không kết hợp mơ hồ với `GROUPING SETS`/`CUBE` như “ALL cộng ROLLUP” — viết `GROUP BY ALL` **hoặc** `GROUPING SETS` tường minh. Window trong list không vào grouping (cùng quy tắc cột aggregate).
-
-SQL Server tương đương: liệt kê cột, hoặc gộp bằng CTE rồi `GROUP BY` tường minh. Port `GROUP BY ALL` sang T-SQL = viết lại list.
-
-**Ghi chú:** Đổi `SELECT` = đổi `GROUP BY`. PR thêm cột “cho UI” vào query `GROUP BY ALL` là đổi ngữ nghĩa. Functional dependency PK vẫn áp khi `GROUP BY ALL` suy ra đủ khóa — đừng dựa vào đó khi port sang SS.
+PostgreSQL vẫn nhận `GROUP BY ALL grouping_element` với nghĩa giữ grouping set trùng (`ALL` là mặc định), đối lập với `GROUP BY DISTINCT grouping_element`. Nó không tự lấy cột từ SELECT. T-SQL có cú pháp `GROUP BY ALL` legacy với nghĩa khác và đã deprecated; tránh dùng khi port. Xem [SELECT PostgreSQL](https://www.postgresql.org/docs/19/sql-select.html).
 
 ---
 
@@ -526,146 +514,18 @@ WHERE rn = 1;
 
 ---
 
-## 11. GRAPH_TABLE (PostgreSQL 19)
+## 11. Property graph — dùng JOIN hoặc recursive CTE
 
-**Hình dung.** Không có “database đồ thị” riêng. Bạn vẫn có bảng `customers`, `orders`, `customer_orders`. `CREATE PROPERTY GRAPH` chỉ **dán nhãn**: bảng nào là đỉnh, bảng nào là cạnh. `MATCH (c)-[e]->(o)` là cách viết join cho dễ đọc; planner **dịch lại thành JOIN**. `EXPLAIN` thấy Hash/Nested Loop, không thấy node graph. Thiếu index FK thì vẫn chậm như join thường.
-
-Path độ dài thay đổi `{1,4}` / shortest path **chưa có** ở PG 19 — viết vài hop cố định hoặc recursive CTE ([cte-subqueries.md](cte-subqueries.md)). SQL Server `AS NODE`/`AS EDGE` là sản phẩm khác, không phải SQL/PGQ.
-
-SQL/PGQ: property graph là **metadata** trên bảng quan hệ (vertex/edge), không phải storage riêng. `GRAPH_TABLE` trả về bảng, đứng trong `FROM` như table function. Planner **rewrite thành join thường** — `EXPLAIN` không có executor graph riêng. Index PK/FK vẫn bắt buộc. DDL tạo graph: [ddl.md](ddl.md) §11.
-
-PostgreSQL 19 **beta**: đối chiếu release notes trước production.
-
-### 11.1 Metadata, không storage riêng
-
-Bảng vertex/edge **đã có**. `CREATE PROPERTY GRAPH` gắn label, hướng cạnh, khóa. `DROP PROPERTY GRAPH` **không** drop bảng.
+`GRAPH_TABLE`/SQL/PGQ đã bị rút khỏi PostgreSQL 19 trong Beta 4, xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). Dùng JOIN cho quan hệ một bước:
 
 ```sql
-CREATE PROPERTY GRAPH shop
-    VERTEX TABLES (
-        customers LABEL customer PROPERTIES (id, name),
-        orders    LABEL "order"    PROPERTIES (id, ordered_when, total)
-    )
-    EDGE TABLES (
-        customer_orders
-            SOURCE customers
-            DESTINATION orders
-            LABEL has_placed
-    );
-```
-
-Cần PK/FK hoặc `KEY` / `SOURCE KEY` / `DESTINATION KEY` tường minh khi tên cột không suy ra được. Label `"order"` **quote** vì reserved. Quyền: `USAGE` trên graph vs `SELECT` trên bảng gốc — đọc GRANT docs 19, đừng bịa grant riêng.
-
-Không có cột ẩn “graph id”. Không có file/AM graph. Cạnh = hàng bảng edge.
-
-### 11.2 MATCH một hop và nhiều hop cố định
-
-```sql
-SELECT customer_name, order_id
-FROM GRAPH_TABLE (
-    shop
-    MATCH (c IS customers)
-          -[IS customer_orders]->
-          (o IS orders WHERE o.ordered_when = CURRENT_DATE)
-    COLUMNS (c.name AS customer_name, o.id AS order_id)
-) AS g;
-```
-
-`WHERE` **trong** pattern (vertex/edge) lọc trước khi chiếu `COLUMNS`. `WHERE` **ngoài** `GRAPH_TABLE` lọc result set như derived table:
-
-```sql
-SELECT g.customer_name, g.order_id, g.total
-FROM GRAPH_TABLE (
-    shop
-    MATCH (c IS customers)-[IS customer_orders]->(o IS orders)
-    COLUMNS (c.name AS customer_name, o.id AS order_id, o.total)
-) AS g
-WHERE g.total > 100;
-```
-
-Hai hop cố định (khách → đơn → item) — **được** vì độ dài path hằng:
-
-```sql
-SELECT customer_name, sku
-FROM GRAPH_TABLE (
-    shop
-    MATCH (c IS customers)
-          -[IS customer_orders]->
-          (o IS orders)
-          -[IS order_has_item]->
-          (i IS items)
-    COLUMNS (c.name AS customer_name, i.sku)
-) AS g;
-```
-
-(Giả sử graph đã khai báo edge `order_has_item` và vertex `items` — [ddl.md](ddl.md).)
-
-`GRAPH_TABLE` join tiếp bảng thường:
-
-```sql
-SELECT g.customer_name, r.region
-FROM GRAPH_TABLE (
-    shop
-    MATCH (c IS customers)-[IS customer_orders]->(o IS orders)
-    COLUMNS (c.id AS customer_id, c.name AS customer_name)
-) AS g
-JOIN regions AS r ON r.customer_id = g.customer_id;
-```
-
-### 11.3 Rewrite thành join — EXPLAIN
-
-Pattern một hop `(c)-[e]->(o)` tương đương *ý*:
-
-```sql
-SELECT c.name AS customer_name, o.id AS order_id
+SELECT c.id AS customer_id, o.id AS order_id, o.total
 FROM customers AS c
-JOIN customer_orders AS e ON e.customer_id = c.id   -- SOURCE KEY
-JOIN orders AS o ON o.id = e.order_id               -- DESTINATION KEY
-WHERE o.ordered_when = CURRENT_DATE;
+JOIN orders AS o ON o.customer_id = c.id
+WHERE o.total > 100;
 ```
 
-`EXPLAIN` / `EXPLAIN (ANALYZE, BUFFERS)` hiện `Nested Loop` / `Hash Join` / `Seq Scan` — **không** node “Graph”. Thiếu index FK = nested loop nặng **như** join thủ công. Selective graph không miễn thống kê cũ.
-
-Không có lock mode riêng cho graph. `FOR UPDATE` trên `SELECT` bọc `GRAPH_TABLE`: khóa bảng gốc trong rewrite — đọc docs 19 hiện tại; thu hẹp `WHERE` như join thường. [concurrency.md](concurrency.md).
-
-### 11.4 Giới hạn 19 (chưa có)
-
-**Chưa có trên PG 19:**
-
-| Kỳ vọng SQL/PGQ đầy đủ | 19 |
-|---|---|
-| Path biến độ dài `{1,4}` / `+` / `*` | **không** |
-| Shortest / cheapest path | **không** |
-| Path variable đầy đủ (giữ nguyên path object) | **không** |
-| Quantified path + filter trên path | **không** |
-
-Path cố định (hai-ba hop) hoặc **recursive CTE** — [cte-subqueries.md](cte-subqueries.md). Đừng viết cú pháp SQL/PGQ đầy đủ rồi mong 19 chạy.
-
-Tương đương “mọi đơn trong 1–3 hop” = CTE đệ quy trên bảng edge, không `MATCH …{1,3}`.
-
-```sql
--- Recursive CTE trên cạnh — portable ý, không phải PGQ
-WITH RECURSIVE walk AS (
-    SELECT customer_id, order_id, 1 AS hop
-    FROM customer_orders
-    UNION ALL
-    SELECT w.customer_id, e.order_id, w.hop + 1
-    FROM walk AS w
-    JOIN customer_orders AS e ON e.customer_id = w.order_id  -- minh họa; schema thật khác
-    WHERE w.hop < 3
-)
-SELECT * FROM walk;
-```
-
-(Cạnh thật phải khớp schema; đây là *hướng* thay `{1,3}`, không phải API graph.)
-
-### 11.5 SQL Server MATCH ≠ SQL/PGQ
-
-SQL Server **không** có `GRAPH_TABLE` / `CREATE PROPERTY GRAPH`. Graph cũ (`AS NODE` / `AS EDGE`, `MATCH (a)-(e)->(b)`) vẫn tồn tại nhưng **không** phải hướng chính 2025 (vector / relational) và **không** cùng chuẩn SQL/PGQ. Đừng port PGQ sang T-SQL `MATCH` và ngược lại.
-
-Hybrid search 2025 = vector + full-text, không phải property graph.
-
-**Ghi chú:** `GRAPH_TABLE` vẫn là `SELECT` — aggregation, `JOIN`, `WHERE` ngoài được. Beta: cú pháp `PROPERTIES` / `LABEL` có thể chỉnh trước GA. Không invent `SHORTEST` / `CHEAPEST` / `PATH`. Selective + thiếu index = chậm như join.
+Với bảng cạnh tổng quát, dùng [WITH RECURSIVE](cte-subqueries.md) cùng giới hạn độ sâu/phát hiện cycle. SQL Server SQL Graph (NODE/EDGE/MATCH) có semantics và DDL riêng.
 
 ---
 
@@ -829,7 +689,7 @@ Predicate khoảng trên `created_at` (sargable). `HAVING` sau gộp. `FETCH` c�
 
 `DISTINCT ON (customer_id) … ORDER BY customer_id, created_at DESC, id DESC` (PostgreSQL) hoặc CTE `ROW_NUMBER()` portable — cú pháp đủ ở mục 10. Index `(customer_id, created_at DESC, id DESC)` cho `LATERAL`/`APPLY` `LIMIT 1`/`TOP (1)` khi chỉ cần vài khách, không sort cả bảng.
 
-`GROUP BY ALL` cùng ý *không* lấy “đơn mới nhất”: chỉ nhóm, không chọn hàng đại diện.
+GROUP BY không chọn một hàng đại diện mới nhất; dùng DISTINCT ON hoặc ROW_NUMBER với ORDER BY xác định.
 
 ### 15.3 Nâng cao — keyset + CUBE + không fan-out
 
@@ -854,23 +714,19 @@ SELECT * FROM page;
 
 SQL Server: thay so sánh tuple bằng `OR` prefix (mục 9); `GROUPING_ID(country, city)` thay `GROUPING(country, city)` nếu muốn một số nguyên.
 
-### 15.4 GRAPH_TABLE một hop + lọc ngoài (PG 19, beta)
+### 15.4 Quan hệ một bước và lọc kết quả
 
 ```sql
-SELECT g.customer_name
-FROM GRAPH_TABLE (
-    shop
-    MATCH (c IS customers)
-          -[IS customer_orders]->
-          (o IS orders WHERE o.status = 'paid')
-    COLUMNS (c.name AS customer_name, o.total)
-) AS g
-WHERE g.total > 500
-ORDER BY g.customer_name
-FETCH FIRST 50 ROWS ONLY;
+SELECT c.id AS customer_id, o.id AS order_id
+FROM customers AS c
+JOIN orders AS o ON o.customer_id = c.id
+WHERE o.total >= 100
+ORDER BY c.id, o.id;
 ```
 
-`EXPLAIN` phải ra join + filter, không node graph. Thiếu index `customer_orders(customer_id)` / PK `orders` = loop nặng. SQL Server: viết `INNER JOIN` tương đương, không `GRAPH_TABLE`.
+Dùng index theo predicate/join khi phù hợp. Một khách có nhiều đơn tạo nhiều hàng; gộp theo đúng grain trước khi JOIN các collection khác. PostgreSQL 19 Beta 4 không có GRAPH_TABLE.
+
+---
 
 ### 15.5 TABLESAMPLE rồi cắt — hiểu lệch
 
@@ -909,7 +765,7 @@ Vẫn cần index `(CreatedAt, Id)` INCLUDE `Status` (hoặc ngược tùy selec
 - `WHERE` lọc hàng, `HAVING` lọc nhóm, CTE lọc window.
 - Phân trang sâu: keyset, không `OFFSET` lớn.
 - `DISTINCT ON` chỉ nội bộ PG; public API dùng `ROW_NUMBER` / `LATERAL`.
-- `GROUP BY` PK (PG) không copy sang SQL Server. `GROUP BY ALL` (PG 19): review như đổi grouping.
+- `GROUP BY` PK (PG) không copy sang SQL Server. GROUP BY ALL suy ra SELECT list không có trong PG 19 Beta 4.
 - `SELECT *` không vào production query / view bền.
 - Graph PG 19: path cố định + index FK; chưa variable-length; `EXPLAIN` = join.
 - `TABLESAMPLE`: probe, không metric tài chính; `WHERE` sau sample ≠ mẫu theo predicate.
@@ -924,8 +780,8 @@ Vẫn cần index `(CreatedAt, Id)` INCLUDE `Status` (hoặc ngược tùy selec
 □ CUBE/ROLLUP: GROUPING() phân NULL thật
 □ OFFSET sâu đã bị từ chối
 □ DISTINCT ON có prefix ORDER BY
-□ GROUP BY ALL: list SELECT khóa grouping
-□ GRAPH_TABLE: beta, không {1,4}, EXPLAIN=join
+□ GROUP BY liệt kê cột rõ ràng; alias và functional dependency theo dialect
+□ PostgreSQL 19 Beta 4: dùng JOIN/recursive CTE, không GRAPH_TABLE
 □ TABLESAMPLE không dùng cho số tiền
 □ FOR UPDATE có WHERE hẹp
 □ Query Store trước đổi compat 170
@@ -941,13 +797,13 @@ Vẫn cần index `(CreatedAt, Id)` INCLUDE `Status` (hoặc ngược tùy selec
 - `IN (SELECT nullable)` / `IN (NULL)`.
 - Scalar subquery >1 hàng trên dữ liệu thật (test 1 hàng thì “pass”).
 - `GROUP BY` thiếu cột trên SQL Server “sửa” bằng subquery không tương đương.
-- `GROUP BY ALL` rồi thêm cột UI — đổi nhóm im lặng.
+- Dùng GROUP BY ALL suy ra SELECT list đã bị rút khỏi PG 19.
 - Keyset thiếu `id` → trùng timestamp bỏ/lặp hàng.
 - So sánh tuple copy sang T-SQL.
 - `FETCH … WITH TIES` trên khóa không độc nhất → trang phình.
 - `OFFSET` lớn coi như seek.
 - `TABLESAMPLE` rồi tin là random unbiased / đúng n hàng.
-- `GRAPH_TABLE` + kỳ vọng shortest path / `{1,4}` trên PG 19.
+- Dùng GRAPH_TABLE đã bị rút khỏi PG 19 Beta 4.
 - Port PGQ sang T-SQL `MATCH` (SQL Graph cũ).
 - `FOR UPDATE` trên join lớn không `OF table`.
 - Tin IQP sửa sargable / `NOT IN NULL`.
@@ -965,13 +821,13 @@ Vẫn cần index `(CreatedAt, Id)` INCLUDE `Status` (hoặc ngược tùy selec
 | `TOP … PERCENT` | có | không |
 | `GROUPING SETS`/`CUBE`/`ROLLUP` | lâu | lâu |
 | Functional dependency `GROUP BY` PK | không | lâu |
-| `GROUP BY ALL` | không | **19 beta** |
+| GROUP BY ALL suy ra SELECT list | legacy T-SQL có nghĩa khác | Đã rút từ Beta 3; grouping-set ALL vẫn có |
 | `GROUP BY` + subquery target (cải thiện) | — | **19** |
 | `DISTINCT ON` | không | lâu |
 | Tuple `(a,b) < (x,y)` | không | lâu |
 | `TABLESAMPLE` | SYSTEM + `REPEATABLE` + `ROWS`/`PERCENT` | `SYSTEM`/`BERNOULLI` |
 | `FOR UPDATE` / `SKIP LOCKED` | hint `UPDLOCK`/`READPAST` | `FOR UPDATE` + `SKIP LOCKED` |
-| SQL/PGQ `GRAPH_TABLE` | không | **19** (**beta** đến GA) |
+| SQL/PGQ GRAPH_TABLE | SQL Graph riêng | Đã rút khỏi 19 Beta 4 |
 | Path `{n,m}` / shortest | — | **chưa** (19) |
 | DOP feedback mặc định | **2025** (compat 170) | — |
 | CE feedback expression | **2025** | — |
@@ -982,3 +838,12 @@ Vẫn cần index `(CreatedAt, Id)` INCLUDE `Status` (hoặc ngược tùy selec
 | JIT default off (analytical `SELECT`) | — | **19** |
 
 Join, semi/anti, `LATERAL`: [joins.md](joins.md). Isolation khi `SELECT` lặp: [transactions.md](transactions.md). DDL graph / generated: [ddl.md](ddl.md). Optimizer engine: [internal.md](internal.md).
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL SELECT](https://www.postgresql.org/docs/19/sql-select.html)
+- [T-SQL WINDOW and compatibility level](https://learn.microsoft.com/en-us/sql/t-sql/queries/select-window-transact-sql?view=sql-server-ver17)

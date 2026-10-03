@@ -1,9 +1,9 @@
 # Chỉ mục (Indexes)
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
 > Index không “làm query nhanh”: nó đổi **access path**. Sai thứ tự cột, covering thiếu, hoặc index trên heap vs clustered khác nhau hai dialect — đây là nguồn plan regression khi port.
 
-Index là cấu trúc phụ: seek/scan hẹp, uniqueness, join, covering. Mỗi index = chi phí ghi + dung lượng + maintenance. Hai engine cùng B-tree ở bề mặt nhưng lệch clustered/heap, `INCLUDE`, filtered/partial, columnstore (SQL Server), GIN/GiST/BRIN (PostgreSQL). `CREATE INDEX` không online/concurrent = schema lock ghi. JSON/vector index 2025 gắn **PREVIEW** trên on-prem SQL Server — đừng giả định GA (Azure một số JSON đã GA).
+Index là cấu trúc phụ: seek/scan hẹp, uniqueness, join, covering. Mỗi index = chi phí ghi + dung lượng + maintenance. Hai engine cùng B-tree ở bề mặt nhưng lệch clustered/heap, `INCLUDE`, filtered/partial, columnstore (SQL Server), GIN/GiST/BRIN (PostgreSQL). `CREATE INDEX` không online/concurrent = schema lock ghi. JSON INDEX 2025 đã GA; vector index vẫn PREVIEW. Kiểm yêu cầu của từng loại index.
 
 Sargable, join, khóa hàng: [select.md](select.md), [joins.md](joins.md), [concurrency.md](concurrency.md). Constraint unique/PK: [constraints.md](constraints.md). JSON path: [json.md](json.md). `REPACK` DDL: [ddl.md](ddl.md). Planner/stats kiến trúc: [internal.md](internal.md).
 
@@ -11,34 +11,48 @@ Sargable, join, khóa hàng: [select.md](select.md), [joins.md](joins.md), [conc
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. B-tree: thứ tự cột](#2-b-tree-thứ-tự-cột)
+  - [2.0 Hình dung: danh bạ, không phải “cột nào cũng được”](#20-hình-dung-danh-bạ-không-phải-cột-nào-cũng-được)
+  - [2.1 Equality trước, range sau](#21-equality-trước-range-sau)
+  - [2.2 Prefix & chồng index](#22-prefix--chồng-index)
 - [3. Clustered vs heap vs CLUSTER / REPACK](#3-clustered-vs-heap-vs-cluster--repack)
 - [4. Unique, covering, INCLUDE](#4-unique-covering-include)
 - [5. Filtered / partial](#5-filtered--partial)
 - [6. Expression / computed](#6-expression--computed)
 - [7. Columnstore 2025 (ordered NCCI)](#7-columnstore-2025-ordered-ncci)
 - [8. GIN / GiST / BRIN / HASH](#8-gin--gist--brin--hash)
-- [9. JSON INDEX \& vector (PREVIEW)](#9-json-index--vector-preview)
+- [9. JSON INDEX (GA) & vector (PREVIEW)](#9-json-index-ga--vector-preview)
+  - [9.1 JSON INDEX — on-prem GA](#91-json-index--on-prem-ga)
+  - [9.2 Vector index — PREVIEW_FEATURES](#92-vector-index--preview_features)
 - [10. Maintenance: REPACK vs REBUILD](#10-maintenance-repack-vs-rebuild)
-- [11. Statistics, secondary, pg\_plan\_advice](#11-statistics-secondary-pg_plan_advice)
-- [12. btree\_gist inet/cidr — chặn upgrade](#12-btree_gist-inetcidr--chặn-upgrade)
+- [11. Statistics, secondary, pg_plan_advice](#11-statistics-secondary-pg_plan_advice)
+  - [11.1 Persisted statistics trên readable secondary (2025)](#111-persisted-statistics-trên-readable-secondary-2025)
+  - [11.2 `pg_plan_advice` / `pg_stash_advice` (19, contrib)](#112-pg_plan_advice--pg_stash_advice-19-contrib)
+- [12. btree_gist inet/cidr — chặn upgrade](#12-btree_gist-inetcidr--chặn-upgrade)
 - [13. Worked examples](#13-worked-examples)
-  - [13.6 pg\_plan\_advice](#136-pg_plan_advice--vòng-đời)
+  - [13.1 OLTP — seek khách + covering](#131-oltp--seek-khách--covering)
+  - [13.2 Partial unique “email active”](#132-partial-unique-email-active)
+  - [13.3 JSON path vs GIN vs JSON INDEX](#133-json-path-vs-gin-vs-json-index)
+  - [13.4 Ordered NCCI range ngày](#134-ordered-ncci-range-ngày)
+  - [13.5 REPACK vs REBUILD](#135-repack-vs-rebuild)
+  - [13.6 `pg_plan_advice` — vòng đời](#136-pg_plan_advice--vòng-đời)
   - [13.7 Missing / duplicate index](#137-missing--duplicate-index)
   - [13.8 Delta store NCCI](#138-delta-store-ncci)
-  - [13.9 CREATE INDEX CONCURRENTLY fail](#139-create-index-concurrently-fail)
-- [14. Best practices \& checklist](#14-best-practices--checklist)
+  - [13.9 `CREATE INDEX CONCURRENTLY` fail](#139-create-index-concurrently-fail)
+- [14. Best practices & checklist](#14-best-practices--checklist)
 - [15. Bẫy khi review](#15-bẫy-khi-review)
 - [16. Version gates](#16-version-gates)
-- [Phụ lục A. Sargable](#phụ-lục-a-sargable--nhắc-nhanh)
-- [Phụ lục B. Heap forwarding \& fillfactor](#phụ-lục-b-heap-forwarding--fillfactor)
+- [Phụ lục A. Sargable — nhắc nhanh](#phụ-lục-a-sargable--nhắc-nhanh)
+- [Phụ lục B. Heap forwarding & fillfactor](#phụ-lục-b-heap-forwarding--fillfactor)
 - [Phụ lục C. Unused index](#phụ-lục-c-unused-index)
-- [Phụ lục D. Vector index PREVIEW](#phụ-lục-d-vector-index-preview-vs-pgvector)
-- [Phụ lục E. REPACK concurrent](#phụ-lục-e-repack-concurrent--slot)
-- [Phụ lục F. Persisted stats secondary](#phụ-lục-f-persisted-stats-secondary--vận-hành)
-- [Phụ lục G. Online build](#phụ-lục-g-online-build--khóa-từng-pha)
-- [Phụ lục H. Checklist nâng index](#phụ-lục-h-checklist-nâng-index-why)
+- [Phụ lục D. Vector index PREVIEW vs pgvector](#phụ-lục-d-vector-index-preview-vs-pgvector)
+- [Phụ lục E. REPACK concurrent — slot](#phụ-lục-e-repack-concurrent--slot)
+- [Phụ lục F. Persisted stats secondary — vận hành](#phụ-lục-f-persisted-stats-secondary--vận-hành)
+  - [Histogram lệch](#histogram-lệch)
+- [Phụ lục G. Online build — khóa từng pha](#phụ-lục-g-online-build--khóa-từng-pha)
+- [Phụ lục H. Checklist nâng index (WHY)](#phụ-lục-h-checklist-nâng-index-why)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -52,7 +66,7 @@ Ba câu hỏi trước mỗi `CREATE INDEX`:
 2. **Ghi bao nhiêu?** OLTP nóng: ít index, hẹp. Analytics: columnstore / BRIN / covering rộng.
 3. **Online được không?** Production: `ONLINE = ON` / `CONCURRENTLY` / `REPACK (CONCURRENTLY)` — không chặn ghi cả bảng.
 
-PostgreSQL 19 **beta**: `REPACK`, parallel autovacuum, scoring, `pg_plan_advice`. SQL Server 2025: ordered NCCI **GA**; JSON index / vector index = **PREVIEW** trên on-prem.
+PostgreSQL 19 **beta**: `REPACK`, parallel autovacuum, scoring, `pg_plan_advice`. SQL Server 2025: ordered NCCI **GA**; JSON index GA; vector index vẫn PREVIEW.
 
 ```text
 Access path (rút gọn)
@@ -291,20 +305,20 @@ Extension C 19: `IndexAmRoutines` **static**; hook `get_relation_info_hook` → 
 
 ---
 
-## 9. JSON INDEX & vector (PREVIEW)
+## 9. JSON INDEX (GA) & vector (PREVIEW)
 
-### 9.1 JSON INDEX — on-prem PREVIEW
+### 9.1 JSON INDEX — on-prem GA
 
 ```sql
--- SQL Server 2025 — JSON INDEX: PREVIEW (on-prem). Cần clustered PK. Cột kiểu json.
+-- SQL Server 2025 — JSON INDEX: GA (on-prem). Cần clustered PK. Cột kiểu json.
 CREATE JSON INDEX jix ON dbo.Doc (Payload);                    -- mặc định path $
 CREATE JSON INDEX jix_paths ON dbo.Doc (Payload)
     FOR ('$.user.id', '$.status');                             -- path không chồng
 ```
 
-Bảng phải có **clustered primary key**; không trên heap-only, indexed view, memory-optimized, computed json. Path `FOR` recursive từ node đó; `$.a` và `$.a.b` **lỗi** overlap (`$.user` gồm `$.user.id`). Tối ưu `JSON_VALUE` / `JSON_PATH_EXISTS` / `JSON_CONTAINS` (**PREVIEW** on-prem). Azure SQL / MI (policy 2025): kiểu `json` + nhiều hàm JSON **GA** trong khi on-prem còn preview — đừng copy runbook cloud.
+Bảng phải có **clustered primary key**; không trên heap-only, indexed view, memory-optimized, computed json. Path `FOR` recursive từ node đó; `$.a` và `$.a.b` **lỗi** overlap (`$.user` gồm `$.user.id`). Tối ưu `JSON_VALUE` / `JSON_PATH_EXISTS` / `JSON_CONTAINS` (**GA**). JSON INDEX đã GA trong SQL Server 2025; kiểm build/CU và update policy khi triển khai trên Azure SQL/MI.
 
-Computed + btree trên `JSON_VALUE` vẫn valid trên `nvarchar` — không cần PREVIEW, không cần clustered PK *của JSON INDEX*. Chi tiết [json.md](json.md).
+Computed + btree trên `JSON_VALUE` vẫn valid trên `nvarchar`; cách này không cần kiểu `json` native hoặc clustered PK theo yêu cầu của JSON INDEX. Chi tiết [json.md](json.md).
 
 ### 9.2 Vector index — PREVIEW_FEATURES
 
@@ -395,7 +409,8 @@ DBCC SHOW_STATISTICS (N'dbo.Orders', ix_orders_customer);
 ANALYZE orders;
 CREATE STATISTICS st_orders (dependencies) ON customer_id, status FROM orders;
 -- PG 19
-SELECT pg_clear_extended_stats();           -- xóa extended stats
+SELECT pg_clear_extended_stats('public', 'orders', 'public', 'st_orders', false);
+-- Xóa dữ liệu thống kê của object st_orders, không DROP object; ANALYZE để thu thập lại.
 -- pg_restore_extended_stats khi restore dump 19
 ```
 
@@ -531,7 +546,7 @@ SET pg_plan_advice.advice = '…';   -- session; chuỗi từ EXPLAIN hoặc t�
 -- EXPLAIN không PLAN_ADVICE vẫn hiện advice đã áp (trừ always_explain_supplied_advice = false)
 ```
 
-`pg_stash_advice`: `pg_set_stashed_advice(stash, query_id, advice)`; `SET pg_stash_advice.stash_name`. Query id đổi khi literal/constant — ORM ad-hoc phá stash. `compute_query_id` on. Persist `pg_stash_advice.tsv` khi `pg_stash_advice.persist` (start-only).
+`pg_stash_advice`: `pg_set_stashed_advice(stash, query_id, advice)`; `SET pg_stash_advice.stash_name`. Query id thường chuẩn hóa giá trị literal; đổi cấu trúc query, object được resolve hoặc major version có thể đổi id. `compute_query_id` on. Persist `pg_stash_advice.tsv` khi `pg_stash_advice.persist` (start-only).
 
 Không thay Query Store SS. Không copy chuỗi advice sang T-SQL.
 
@@ -560,7 +575,7 @@ CCI (clustered columnstore) không có B-tree clustered cùng lúc. Heap + NCCI 
 
 ### 13.9 `CREATE INDEX CONCURRENTLY` fail
 
-PG: index `INVALID` — query không dùng, ghi vẫn bảo trì. `DROP INDEX CONCURRENTLY` rồi tạo lại. Không `REINDEX` index invalid như tưởng xong. SS `ONLINE` fail: thường không để lại index “nửa”; kiểm job.
+PG: index `INVALID` — query không dùng, ghi vẫn bảo trì. `DROP INDEX CONCURRENTLY` rồi tạo lại. Có thể REINDEX INDEX (kể cả CONCURRENTLY khi phù hợp) để phục hồi, hoặc DROP INDEX CONCURRENTLY rồi tạo lại; kiểm indisvalid sau đó. SS `ONLINE` fail: thường không để lại index “nửa”; kiểm job.
 
 Hai pha CIC: (1) build, (2) validate — txn dài mở trước pha 2 chặn hoàn tất. Cùng họ `idle in transaction` với vacuum.
 
@@ -570,12 +585,12 @@ Hai pha CIC: (1) build, (2) validate — txn dài mở trước pha 2 chặn ho�
 
 - Equality cột lọc luôn có, rồi range/`ORDER BY`, rồi INCLUDE covering.
 - Clustered SS hẹp, tăng dần. PG: đừng kỳ vọng heap sorted; `REPACK` khi correlation/BRIN cần.
-- FK **phải** index — [constraints.md](constraints.md).
+- Cân nhắc index phía con FK theo workload và index hiện có — [constraints.md](constraints.md).
 - Production: `ONLINE` / `CONCURRENTLY`; không `CREATE INDEX` chặn ghi giờ cao điểm. SKU `ONLINE`.
 - Ít index trên bảng ghi nóng; periodic unused-index review.
 - Columnstore cho scan analytics; B-tree cho point/OLTP. Ordered NCCI 2025 khi range date.
 - Stats: `UPDATE STATISTICS` / `ANALYZE` sau bulk. Secondary 2025: đo persisted stats + QS I/O.
-- JSON/vector index on-prem: **PREVIEW** — lab, không schema prod mặc định. Azure JSON có thể GA — đo từng môi trường.
+- JSON INDEX GA: clustered PK và path không chồng. Vector index còn PREVIEW: kiểm CU và kế hoạch thử nghiệm.
 - PG 19 `btree_gist` inet/cidr: gỡ trước upgrade.
 - `pg_plan_advice`: contrib, ghim có chủ đích — không hint rải app.
 
@@ -594,11 +609,11 @@ Hai pha CIC: (1) build, (2) validate — txn dài mở trước pha 2 chặn ho�
 - `VACUUM FULL` đêm thay vì `VACUUM` / `REPACK (CONCURRENTLY)` đã test.
 - JSON INDEX path chồng (`$.a`, `$.a.b`); JSON INDEX trên heap.
 - Vector index prod khi mới `PREVIEW_FEATURES` (kéo CES/fuzzy).
-- `JSON_OBJECTAGG` / JSON INDEX prod on-prem như đã GA Azure.
+- Dùng JSON INDEX mà chưa kiểm clustered PK, kiểu cột json và path chồng nhau.
 - Rebuild 30% frag trên bảng 200 page.
 - Giữ `btree_gist` inet đến cutover 19.
 - Standard Developer test `ONLINE` rồi prod Standard.
-- Stash advice quên `compute_query_id` / query id đổi vì literal.
+- Stash advice quên compute_query_id / query id đổi do cấu trúc, object hoặc major version.
 
 ---
 
@@ -609,7 +624,7 @@ Hai pha CIC: (1) build, (2) validate — txn dài mở trước pha 2 chặn ho�
 | Covering `INCLUDE` | lâu | 11+ btree |
 | Partial / filtered | lâu | lâu |
 | Ordered NCCI + CS online | **2025 GA** | — |
-| JSON INDEX / `JSON_CONTAINS` | **2025 PREVIEW** on-prem; Azure JSON GA hơn | GIN `jsonb` |
+| JSON INDEX / `JSON_CONTAINS` | **2025 GA** | GIN `jsonb` |
 | Kiểu `vector` + distance | **2025 GA** | pgvector ext |
 | `CREATE VECTOR INDEX` / `VECTOR_SEARCH` | **2025 PREVIEW** | hnsw/ivfflat |
 | Persisted stats secondary | **2025** | — (physical = file primary) |
@@ -746,7 +761,7 @@ Txn dài (idle in transaction) chặn pha cuối cả hai máy
 
 `CREATE INDEX` chặn ghi (PG `SHARE`) trên bảng live = incident. Review PR: bắt `CONCURRENTLY`/`ONLINE`.
 
-btree_gist inet: gỡ **trước** `pg_upgrade` — không phải job REPACK đêm cutover. Ordered NCCI: `ORDER (CreatedAt)` cho range; point PK vẫn B-tree. JSON INDEX PREVIEW: clustered PK, path không chồng, on-prem ≠ Azure GA.
+btree_gist inet: gỡ **trước** `pg_upgrade` — không phải job REPACK đêm cutover. Ordered NCCI: `ORDER (CreatedAt)` cho range; point PK vẫn B-tree. JSON INDEX GA: clustered PK, cột json và path không chồng; kiểm build và nền tảng khi triển khai.
 
 `pg_plan_advice` / `pg_stash_advice` = contrib 19, query id + `EXPLAIN (PLAN_ADVICE)`. Không hint T-SQL. Stash DSM; `compute_query_id`. Vector ANN DiskANN PREVIEW; pgvector hnsw/ivfflat GA extension — không copy `<->`.
 
@@ -754,18 +769,28 @@ Fillfactor UUID clustered không chữa split. Covering INCLUDE vẫn ghi khi c�
 
 Missing index DMV SS gợi ý — cân nhắc ghi trước khi CREATE. Duplicate `(a)` và `(a,b)`: đo seeks. `CREATE INDEX CONCURRENTLY` fail → `INVALID`, DROP CONCURRENTLY rồi tạo lại. Ordered NCCI delta store: segment elimination trên group nén.
 
-Persisted stats secondary 2025 = I/O ghi replica + Query Store secondary ON mặc định. `btree_gist` inet/cidr: `pg_upgrade` **chặn**. JSON INDEX / `CREATE VECTOR INDEX` = PREVIEW on-prem. `REPACK` 19 ≠ `REBUILD` ≠ `REORGANIZE` ≠ `VACUUM`.
+Persisted stats secondary 2025 = I/O ghi replica + Query Store secondary ON mặc định. `btree_gist` inet/cidr: `pg_upgrade` **chặn**. JSON INDEX GA; CREATE VECTOR INDEX vẫn PREVIEW. `REPACK` 19 ≠ `REBUILD` ≠ `REORGANIZE` ≠ `VACUUM`.
 
 ---
 
 ## Phụ lục H. Checklist nâng index (WHY)
 
 1. **Gỡ `btree_gist` inet/cidr trước `pg_upgrade`** — upgrade **chặn**, không warning.
-2. **JSON/vector INDEX chỉ lab on-prem** — PREVIEW; Azure JSON có thể GA lệch.
+2. **JSON INDEX GA, vector INDEX PREVIEW** — kiểm điều kiện riêng và CU.
 3. **Ordered NCCI cho range ngày** — không thay B-tree PK; đo delta store.
 4. **REPACK (CONCURRENTLY) đo slot/WAL** — không thay VACUUM thường.
 5. **Persisted stats secondary** — I/O ghi replica + QS ON mặc định.
 6. **`pg_plan_advice` contrib** — ghim có chủ đích, không hint rải app.
-7. **ONLINE / CONCURRENTLY** — SKU EE; CIC INVALID phải DROP.
+7. **ONLINE / CONCURRENTLY** — SKU EE; CIC INVALID cần REINDEX hoặc DROP/tạo lại.
 8. **FK backing index** — không drop dù `idx_scan = 0` trên replica.
 
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL CREATE INDEX / CONCURRENTLY](https://www.postgresql.org/docs/19/sql-createindex.html)
+- [T-SQL CREATE JSON INDEX](https://learn.microsoft.com/en-us/sql/t-sql/statements/create-json-index-transact-sql?view=sql-server-ver17)
+- [PostgreSQL statistics administration](https://www.postgresql.org/docs/19/functions-admin.html)

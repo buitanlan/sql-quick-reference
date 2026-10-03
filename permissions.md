@@ -1,6 +1,6 @@
 # Quyền (Permissions)
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
 > File này là **ủy quyền** (ai được làm gì sau khi đã vào được). Xác thực (mật khẩu, Entra, `pg_hba`, TLS) chỉ nhắc khi nó đổi principal. Routine `SECURITY DEFINER` / `EXECUTE AS`: [routines.md](routines.md) §11. Kiến trúc login/TDE: [internal.md](internal.md) §18.
 
 `GRANT SELECT` trên hai engine **không** cùng mô hình principal. SQL Server tách **login** (cửa instance) và **user** (cửa database), có `DENY` thắng `GRANT`. PostgreSQL chỉ có **role**; “user” là role có `LOGIN`. Không có `DENY`: muốn cấm thì `REVOKE`, hoặc đừng cho vào role đang giữ quyền. Copy script `DENY` sang `psql` là lỗi cú pháp, không phải “cấm được”.
@@ -9,24 +9,39 @@
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
   - [1.1 Hình dung: danh tính vs chìa khóa](#11-hình-dung-danh-tính-vs-chìa-khóa)
 - [2. Principal](#2-principal)
+  - [2.1 SQL Server: login, user, role](#21-sql-server-login-user-role)
+  - [2.2 PostgreSQL: một catalog role](#22-postgresql-một-catalog-role)
 - [3. `GRANT` / `REVOKE` / `DENY`](#3-grant--revoke--deny)
 - [4. `PUBLIC` và quyền mặc định](#4-public-và-quyền-mặc-định)
 - [5. Schema: `USAGE` vs `ON SCHEMA`](#5-schema-usage-vs-on-schema)
 - [6. Ownership, view, chaining](#6-ownership-view-chaining)
+  - [6.1 View](#61-view)
+  - [6.2 Procedure như hàng rào (SQL Server)](#62-procedure-như-hàng-rào-sql-server)
 - [7. Routine: `EXECUTE` và definer](#7-routine-execute-và-definer)
 - [8. Row-level security](#8-row-level-security)
+  - [8.1 Hình dung](#81-hình-dung)
+  - [8.2 PostgreSQL](#82-postgresql)
+  - [8.3 SQL Server](#83-sql-server)
 - [9. Cột, sequence, large object](#9-cột-sequence-large-object)
 - [10. Role dựng sẵn](#10-role-dựng-sẵn)
+  - [10.1 Đừng đưa app vào role “tất cả”](#101-đừng-đưa-app-vào-role-tất-cả)
+  - [10.2 SQL Server 2025 — role thay Purview policy](#102-sql-server-2025--role-thay-purview-policy)
+  - [10.3 PostgreSQL 19](#103-postgresql-19)
 - [11. Mạo danh](#11-mạo-danh)
 - [12. App role tối thiểu](#12-app-role-tối-thiểu)
-- [13. SQL Server 2025 \& PostgreSQL 19](#13-sql-server-2025--postgresql-19)
+- [13. SQL Server 2025 & PostgreSQL 19](#13-sql-server-2025--postgresql-19)
 - [14. Worked examples](#14-worked-examples)
-- [15. Best practices \& checklist](#15-best-practices--checklist)
+  - [14.1 Tách migrator và app (PostgreSQL)](#141-tách-migrator-và-app-postgresql)
+  - [14.2 Cùng ý (SQL Server)](#142-cùng-ý-sql-server)
+  - [14.3 Vì sao `DENY` không port](#143-vì-sao-deny-không-port)
+  - [14.4 View che cột lương](#144-view-che-cột-lương)
+- [15. Best practices & checklist](#15-best-practices--checklist)
 - [16. Bẫy khi review](#16-bẫy-khi-review)
 - [17. Version gates](#17-version-gates)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -264,7 +279,7 @@ Trigger chạy trong quyền của người gây DML (kiểm tra quyền trigger
 
 ## 8. Row-level security
 
-RLS lọc **hàng**, không thay `GRANT`. User không có `SELECT` thì RLS không chạy. User có `SELECT` thì chỉ thấy hàng policy cho qua.
+RLS lọc **hàng**, không thay `GRANT`. PostgreSQL RLS không áp cho TRUNCATE hoặc REFERENCES; không cấp TRUNCATE cho app chỉ vì đã có tenant policy. User không có `SELECT` thì RLS không chạy. User có `SELECT` thì chỉ thấy hàng policy cho qua.
 
 ### 8.1 Hình dung
 
@@ -281,7 +296,10 @@ CREATE POLICY orders_tenant ON app.orders
     WITH CHECK (tenant_id = current_setting('app.tenant')::int);
 
 -- Mỗi request, sau khi login app_read:
-SELECT set_config('app.tenant', '42', true);   -- true = chỉ transaction hiện tại
+BEGIN;
+SELECT set_config('app.tenant', '42', true); -- true = transaction hiện tại
+SELECT * FROM app.orders;
+COMMIT; -- gọi set_config trong autocommit riêng sẽ hết hiệu lực trước SELECT sau
 ```
 
 | Ai | RLS |
@@ -307,16 +325,19 @@ GO
 
 CREATE SECURITY POLICY dbo.pol_orders
 ADD FILTER PREDICATE dbo.fn_tenant(TenantId) ON dbo.Orders,
-ADD BLOCK PREDICATE dbo.fn_tenant(TenantId) ON dbo.Orders
+ADD BLOCK PREDICATE dbo.fn_tenant(TenantId) ON dbo.Orders AFTER INSERT,
+ADD BLOCK PREDICATE dbo.fn_tenant(TenantId) ON dbo.Orders AFTER UPDATE
 WITH (STATE = ON);
 GO
 
 EXEC sys.sp_set_session_context @key = N'tenant', @value = 42;
 ```
 
-`FILTER` = hàng thấy khi `SELECT`. `BLOCK` = chặn `INSERT`/`UPDATE`/`DELETE` ra ngoài tenant. Thiếu `BLOCK`: user sửa được hàng họ không thấy (kéo sang tenant khác) nếu biết khóa.
+FILTER giới hạn hàng nhìn thấy khi SELECT/UPDATE/DELETE. BLOCK AFTER INSERT/UPDATE kiểm giá trị mới, ngăn ghi/chuyển sang tenant khác; BEFORE UPDATE/DELETE kiểm hàng trước thay đổi. Thiếu BLOCK có thể cho phép UPDATE một hàng đang thấy thành tenant khác.
 
 **Khác PostgreSQL:** `dbo` / `db_owner` **không** tự bỏ qua RLS. Muốn admin thấy hết thì predicate trả `1` cho role đó, hoặc `STATE = OFF` lúc bảo trì. Đừng giả định “owner như PG”.
+
+PostgreSQL app cũng tự đổi được custom GUC app.tenant nếu được chạy SQL tùy ý; context phải do tầng ứng dụng tin cậy đặt và app role không có quyền quản policy.
 
 Predicate nên `SCHEMABINDING`, inline, không gọi UDF nặng. Policy là nơi rò tenant nếu `SESSION_CONTEXT` do **client** tự set mà không có login trung gian tin cậy. App tự gửi tenant = user đổi được. Đặt context trong proc `EXECUTE AS` hoặc middleware một đường, không tin connection string của từng tenant dùng chung user.
 
@@ -328,7 +349,7 @@ Predicate nên `SCHEMABINDING`, inline, không gọi UDF nặng. Policy là nơi
 -- Chỉ đọc vài cột (cả hai)
 GRANT SELECT (id, status) ON orders TO app_read;
 
--- PostgreSQL: nextval cần USAGE trên sequence (identity nằm trên sequence ẩn)
+-- PostgreSQL: nextval tường minh/default serial cần quyền sequence; INSERT vào identity không cần GRANT riêng trên sequence nội bộ
 GRANT USAGE ON SEQUENCE orders_id_seq TO app_write;
 
 -- SQL Server: INSERT vào IDENTITY không cần quyền riêng trên sequence;
@@ -422,7 +443,7 @@ RLS + một login app: mọi tenant dùng chung `app_write`, policy theo session
 - `GRANT` / `REVOKE … GRANTED BY role` — ACL ghi nhận người cấp không phải lúc nào cũng là current user (role member có quyền).
 - Cảnh báo mật khẩu sắp hết hạn: `password_expiration_warning_threshold` (mặc định bảy ngày).
 - `pg_read_all_data` / `pg_write_all_data` + large object.
-- Property graph: cần quyền trên **bảng** dưới và quyền dùng graph. `GRANT` bảng không tự suy ra `GRAPH_TABLE` nếu thiếu quyền graph — đối chiếu docs 19 `GRANT`, đừng bịa tên privilege. Beta đến GA.
+- SQL/PGQ đã bị rút khỏi PostgreSQL 19 Beta 4; không có privilege property graph để cấp trong baseline này.
 - `SECURITY DEFINER` + `search_path`: không đổi luật 19; vẫn bắt buộc khóa path.
 
 ---
@@ -512,7 +533,7 @@ GRANT SELECT ON app.employees_public TO app_read;   -- view không có cột sal
 - `SECURITY DEFINER` không `SET search_path` — [routines.md](routines.md).
 - Dynamic SQL trong proc owner: chaining đứt, hoặc `EXECUTE AS OWNER` + nối chuỗi = leo quyền.
 - Pool không `REVERT` / `RESET ROLE`.
-- Graph `GRANT` bảng rồi gọi `GRAPH_TABLE` — thiếu quyền graph (19).
+- Dùng GRAPH_TABLE đã bị rút khỏi PostgreSQL 19 Beta 4.
 
 ---
 
@@ -531,3 +552,13 @@ GRANT SELECT ON app.employees_public TO app_read;   -- view không có cột sal
 | Cảnh báo hết hạn mật khẩu | Policy Windows / Linux 2025 | **19** `password_expiration_warning_threshold` |
 
 Từ khóa `GRANT` ngắn: [keywords.md](keywords.md) §18. Definer và `search_path`: [routines.md](routines.md) §11.
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL row security](https://www.postgresql.org/docs/19/ddl-rowsecurity.html)
+- [SQL Server row-level security](https://learn.microsoft.com/en-us/sql/relational-databases/security/row-level-security?view=sql-server-ver17)
+- [PostgreSQL INSERT privilege requirements](https://www.postgresql.org/docs/19/sql-insert.html)

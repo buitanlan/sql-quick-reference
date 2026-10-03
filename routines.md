@@ -1,6 +1,6 @@
 # Routine (procedure, function, trigger)
 
-> **Baseline:** SQL Server **2025** (T-SQL) · PostgreSQL **19** (SQL / PL/pgSQL).  
+> **Baseline:** SQL Server **2025** (T-SQL) · PostgreSQL **19 Beta 4** (SQL / PL/pgSQL).<br>
 > Routine là mã *trong engine*: biên dịch, quyền, transaction, search_path. Không phải API HTTP mặc định — trừ khi bạn cố ý gọi REST (§9) hoặc model ngoài (§10).
 
 Procedure và function **không** đổi tên được khi port. T-SQL function cấm side-effect mạnh; PL/pgSQL `VOLATILE` function ghi bảng được nhưng khó test. Trigger hai dialect đều **set-based** (SS `inserted`/`deleted` nhiều hàng; PG `FOR EACH ROW` vẫn phải nghĩ burst). Dynamic SQL sai quoting = injection. File này là hợp đồng review, không phải gen CRUD.
@@ -11,7 +11,7 @@ Hàm built-in: [functions.md](functions.md). Txn trong routine: [transactions.md
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. Procedure vs function](#2-procedure-vs-function)
 - [3. T-SQL vs PL/pgSQL](#3-t-sql-vs-plpgsql)
 - [4. Stored procedure](#4-stored-procedure)
@@ -19,18 +19,18 @@ Hàm built-in: [functions.md](functions.md). Txn trong routine: [transactions.md
   - [5.1 Scalar](#51-scalar)
   - [5.2 Inline TVF vs MSTVF](#52-inline-tvf-vs-mstvf)
 - [6. Trigger set-based](#6-trigger-set-based)
-- [7. Dynamic SQL \& quoting](#7-dynamic-sql--quoting)
+- [7. Dynamic SQL & quoting](#7-dynamic-sql--quoting)
 - [8. Optimized `sp_executesql` (compilation storm)](#8-optimized-sp_executesql-compilation-storm)
 - [9. `sp_invoke_external_rest_endpoint`](#9-sp_invoke_external_rest_endpoint)
 - [10. `CREATE EXTERNAL MODEL`](#10-create-external-model)
-- [11. Quyền: `SECURITY DEFINER` \& `search_path`](#11-quyền-security-definer--search_path)
+- [11. Quyền: `SECURITY DEFINER` & `search_path`](#11-quyền-security-definer--search_path)
 - [12. Worked examples](#12-worked-examples)
-- [13. Lỗi: `TRY`/`CATCH` vs `EXCEPTION`](#13-lỗi-trycatch-vs-exception)
 - [14. `EXEC(@sql)` vs `sp_executesql` vs `PREPARE`](#14-execsql-vs-sp_executesql-vs-prepare)
-- [15. Best practices \& checklist](#15-best-practices--checklist)
+- [15. Best practices & checklist](#15-best-practices--checklist)
 - [16. Bẫy khi review](#16-bẫy-khi-review)
 - [17. Version gates](#17-version-gates)
 - [Phụ lục A. `INSTEAD OF` vs `BEFORE`](#phụ-lục-a-instead-of-vs-before)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -105,7 +105,7 @@ $$;
 | `GO` | Tách batch client | Không có |
 | `CREATE OR ALTER` | Proc/func/trigger (tùy object) | `CREATE OR REPLACE` |
 
-`SELECT @n = col FROM t` khi nhiều hàng: `@n` = **hàng cuối** scan, không lỗi. PG `SELECT col INTO n` nhiều hàng → lỗi `too many rows` (`INTO STRICT` / `UNIQUE`).
+`SELECT @n = col FROM t` khi nhiều hàng trên SQL Server lấy hàng cuối được xử lý (không có ORDER BY thì không xác định); 0 hàng giữ giá trị cũ. PL/pgSQL `SELECT ... INTO` thường lấy hàng đầu, 0 hàng gán NULL; `INTO STRICT` mới yêu cầu đúng một hàng và ném NO_DATA_FOUND/TOO_MANY_ROWS. [PL/pgSQL statements](https://www.postgresql.org/docs/19/plpgsql-statements.html).
 
 **Ghi chú:** Port `BEGIN` T-SQL (khối lệnh) sang PG `BEGIN` (txn hoặc block PL) — [transactions.md](transactions.md) §2.
 
@@ -258,7 +258,7 @@ AS $$
 $$;
 ```
 
-`LANGUAGE plpgsql` + `RETURN QUERY` ≈ bức tường MSTVF (không inline). `FROM orders_of(c.id)` khi `c` là alias trái: cần `LATERAL` — [joins.md](joins.md).
+`LANGUAGE plpgsql` + `RETURN QUERY` ≈ bức tường MSTVF (không inline). `FROM orders_of(c.id)` khi `c` là alias trái: table function có LATERAL ngầm; có thể viết tường minh để dễ đọc — [joins.md](joins.md).
 
 **Ghi chú:** Review `RETURNS @t TABLE` + `WHILE` = cờ đỏ. Viết lại inline / CTE. Scalar UDF trong `WHERE` trên SS 2016- = RBAR; đo `SET STATISTICS TIME` / Query Store. Đừng “MSTVF cho dễ debug” trên hot path.
 
@@ -775,3 +775,12 @@ END;
 PostgreSQL `BEFORE ROW`: sửa `NEW.col`, `RETURN NEW`. `INSTEAD OF` chỉ trên **view** (PG 9.1+), không trên table. `BEFORE STATEMENT` không có `NEW`.
 
 Sâu: SS nested trigger 32; `TRIGGER_NESTLEVEL()`. PG `pg_trigger_depth()`. Cả hai: trigger sửa cùng bảng + recursive ON = vòng. Audit tách bảng, không `UPDATE` lại hàng đang `inserted`.
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PL/pgSQL INTO / STRICT / EXECUTE](https://www.postgresql.org/docs/19/plpgsql-statements.html)
+- [T-SQL sp_executesql](https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-executesql-transact-sql?view=sql-server-ver17)

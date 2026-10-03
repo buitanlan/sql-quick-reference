@@ -1,6 +1,6 @@
 # Literal
 
-> **Baseline:** SQL Server **2025** · PostgreSQL **19**.
+> **Baseline:** SQL Server **2025** · PostgreSQL **19 Beta 4**.
 
 Literal là giá trị viết trong câu lệnh — parser gắn *kiểu* (hoặc *unknown*) trước khi so với cột. Sai literal không phải lỗi cú pháp: `'2026-09-13'` có thể là `varchar`, `date`, hoặc `datetime` tùy engine, `DATEFORMAT`, và ngữ cảnh. PostgreSQL cố tình để chuỗi untyped (`unknown`) đến khi neo; SQL Server chọn `varchar`/`nvarchar` ngay theo prefix `N` và collation. Hiểu lớp này trước khi debug “sao parameter không khớp” / “sao ngày đảo tháng”.
 
@@ -10,36 +10,44 @@ Kiểu sau khi neo: [typesystem.md](typesystem.md). Escape identifier (không ph
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. Số](#2-số)
-  - [2.1 Integer \& kiểu suy ra](#21-integer--kiểu-suy-ra)
-  - [2.2 Hex \& binary số](#22-hex--binary-số)
+  - [2.1 Integer & kiểu suy ra](#21-integer--kiểu-suy-ra)
+  - [2.2 Hex & binary số](#22-hex--binary-số)
   - [2.3 Float / scientific](#23-float--scientific)
 - [3. Chuỗi](#3-chuỗi)
   - [3.1 Nháy đơn](#31-nháy-đơn)
   - [3.2 Prefix `N` (SQL Server)](#32-prefix-n-sql-server)
-  - [3.3 Backslash \& `E'…'` (PostgreSQL)](#33-backslash--e-postgresql)
-- [4. Unicode \& escape](#4-unicode--escape)
+  - [3.3 Backslash & `E'…'` (PostgreSQL)](#33-backslash--e-postgresql)
+- [4. Unicode & escape](#4-unicode--escape)
 - [5. Binary / bit / BASE64](#5-binary--bit--base64)
+  - [BASE64 — không phải token literal](#base64--không-phải-token-literal)
 - [6. Ngày giờ](#6-ngày-giờ)
   - [6.1 Typed literal vs chuỗi](#61-typed-literal-vs-chuỗi)
   - [6.2 `DATEFORMAT` / language](#62-dateformat--language)
   - [6.3 `interval` (PostgreSQL)](#63-interval-postgresql)
 - [7. Boolean, NULL](#7-boolean-null)
 - [8. Array, row, JSON](#8-array-row-json)
+  - [`json_array()` rỗng — PG 19 breaking](#json_array-rỗng--pg-19-breaking)
 - [9. Dollar-quoting (PostgreSQL)](#9-dollar-quoting-postgresql)
 - [10. Typed literal, unknown, parameter](#10-typed-literal-unknown-parameter)
 - [11. ODBC escape (SQL Server)](#11-odbc-escape-sql-server)
 - [12. Dump PG 19 — `standard_conforming_strings`](#12-dump-pg-19--standard_conforming_strings)
 - [13. Hai session — ví dụ làm việc](#13-hai-session--ví-dụ-làm-việc)
-- [14. Best practices \& checklist](#14-best-practices--checklist)
+  - [13.1 `DATEFORMAT` đảo ngày](#131-dateformat-đảo-ngày)
+  - [13.2 Thiếu `N` vs UTF-8 PG](#132-thiếu-n-vs-utf-8-pg)
+  - [13.3 E-string vs conforming](#133-e-string-vs-conforming)
+  - [13.4 `json_array()` API client](#134-json_array-api-client)
+  - [13.5 BASE64 nhầm hex](#135-base64-nhầm-hex)
+- [14. Best practices & checklist](#14-best-practices--checklist)
 - [15. Bẫy khi review](#15-bẫy-khi-review)
 - [16. Version gates](#16-version-gates)
-- [Phụ lục A. `UNISTR` doubling](#phụ-lục-a-unistr--doubling--trong-t-sql)
+- [Phụ lục A. UNISTR và các lớp escape](#phụ-lục-a-unistr-và-các-lớp-escape)
 - [Phụ lục B. COPY / bcp vs SQL literal](#phụ-lục-b-copy--bcp-vs-sql-literal)
 - [Phụ lục C. Regex pattern như literal](#phụ-lục-c-regex-pattern-như-literal)
-- [Phụ lục D. Mix literal và parameter](#phụ-lục-d-mix-literal-và-parameter--estimate)
-- [Phụ lục E. `json_array()` vs `JSON_ARRAY`](#phụ-lục-e-json_array-vs-json_array-vs-json_agg)
+- [Phụ lục D. Mix literal và parameter — estimate](#phụ-lục-d-mix-literal-và-parameter--estimate)
+- [Phụ lục E. `json_array()` vs `JSON_ARRAY` vs `json_agg`](#phụ-lục-e-json_array-vs-json_array-vs-json_agg)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -47,12 +55,12 @@ Kiểu sau khi neo: [typesystem.md](typesystem.md). Escape identifier (không ph
 
 Literal **không** phải constant kiểu C# `const`: giá trị biết lúc parse, nhưng kiểu có thể phụ thuộc session (`DATEFORMAT`, collation, `standard_conforming_strings`). Parameter (`@id`, `$1`) *không* phải literal — client gắn kiểu riêng; mix literal và parameter trong một biểu thức dễ ra plan/estimate lệch.
 
-Không có digit separator `1_000` (C#). Không có suffix `L`/`M`/`D`. Độ lớn / dấu chấm / scientific notation quyết định kiểu.
+SQL Server không có digit separator; PostgreSQL 16+ hỗ trợ `1_000` và literal integer 0x/0o/0b. Không có suffix `L`/`M`/`D`. Độ lớn / dấu chấm / scientific notation quyết định kiểu.
 
 ```sql
 42              -- integer (cả hai, với điều kiện độ lớn — §2)
 3.14            -- numeric / decimal, không phải float
-1.2e-3          -- float (SQL Server) / double precision (PostgreSQL)
+1.2e-3          -- float (SQL Server) / numeric (PostgreSQL, trước ép kiểu theo context)
 'O''Brien'      -- chuỗi; nháy đơn nhân đôi
 NULL            -- untyped; lấy kiểu từ ngữ cảnh
 ```
@@ -74,7 +82,7 @@ SELECT SQL_VARIANT_PROPERTY(-2147483648, 'BaseType');  -- int
 -- PostgreSQL: untyped numeric literal chọn theo ngữ cảnh; đứng một mình:
 SELECT pg_typeof(1);       -- integer
 SELECT pg_typeof(1.0);     -- numeric
-SELECT pg_typeof(1e0);     -- double precision
+SELECT pg_typeof(1e0);     -- numeric
 ```
 
 Trước / sau — overflow im lặng vs lỗi:
@@ -93,7 +101,7 @@ SELECT 2147483648;                         -- integer? không — bigint (vừa 
 SELECT 9223372036854775808;                -- numeric (lớn hơn int8)
 ```
 
-**Ghi chú:** Không viết `1_000`. Dấu `+`/`-` unary gắn với token. `(2147483648)` vẫn numeric trên SQL Server. Chia `1/2` = 0 (integer) — [operators.md](operators.md). `PRODUCT(2)` không phải literal; aggregate — [typesystem.md](typesystem.md).
+**Ghi chú:** `1_000` hợp lệ trên PostgreSQL 16+, không hợp lệ T-SQL. Dấu `+`/`-` unary gắn với token. `(2147483648)` vẫn numeric trên SQL Server. Chia `1/2` = 0 (integer) — [operators.md](operators.md). `PRODUCT(2)` không phải literal; aggregate — [typesystem.md](typesystem.md).
 
 ### 2.2 Hex & binary số
 
@@ -103,16 +111,17 @@ SELECT 0xFF;                               -- 0xFF (1 byte)
 SELECT CAST(0xFF AS int);                  -- 255
 -- SELECT 0xFFFFFFFFFF AS int              -- overflow/cắt tùy CAST
 
--- PostgreSQL: 0x không phải integer hex trong SQL lõi (khác JavaScript)
--- Integer hex: dùng CAST / bit string, không 0xFF kiểu T-SQL
-SELECT x'FF'::bytea;                       -- một dạng
-SELECT '\xFF'::bytea;
-SELECT CAST('FF' AS bytea);                -- encode khác — đừng nhầm hex ASCII
+-- PostgreSQL 16+: 0xFF là INTEGER 255, khác T-SQL binary.
+SELECT 0xFF, 0o377, 0b11111111;            -- 255, 255, 255
+SELECT X'FF';                              -- bit string 11111111
+SELECT '\xFF'::bytea;                     -- một byte 0xFF
+SELECT decode('FF', 'hex');                 -- cũng một byte
+SELECT CAST('FF' AS bytea);                 -- hai byte ASCII 0x4646
 ```
 
 SQL Server `0x` rỗng = `varbinary` empty. Dùng cho so sánh binary / blob, không làm cờ số trừ khi `CAST`.
 
-Không có literal `0b1010` kiểu C. PG `B'1010'` là **bit string**, không phải integer cho đến `::int`.
+PostgreSQL 16+ có `0b1010` = integer 10; `B'1010'` là bit string, cần cast để thành integer. T-SQL không có literal 0b/0o hoặc separator underscore.
 
 ### 2.3 Float / scientific
 
@@ -124,7 +133,7 @@ SELECT 1.;                                 -- numeric 1.0 (có dấu chấm → 
 
 SQL Server: `1e0` → `float` (cụ thể `float(53)`). `1.0` → `numeric`. Trộn `1 + 1e0` promote float — mất chính xác tiền tệ.
 
-PostgreSQL: `1e0` → `double precision`. `1.0` → `numeric`. `'NaN'::numeric` / `'Infinity'::float8` là **chuỗi typed**, không phải token số — [typesystem.md](typesystem.md).
+PostgreSQL: `1e0` → `numeric` (trước khi context ép kiểu). `1.0` → `numeric`. `'NaN'::numeric` / `'Infinity'::float8` là **chuỗi typed**, không phải token số — [typesystem.md](typesystem.md).
 
 Vector literal phía client thường JSON array text rồi cast — `'[0.1, 0.2]'` là chuỗi, không token `vector`. — [typesystem.md](typesystem.md) §10.
 
@@ -150,7 +159,7 @@ Nháy kép `"…"` **không** phải chuỗi khi quoting identifier bật:
 -- PostgreSQL: "Orders" luôn identifier
 ```
 
-Không có string interpolation. Nối: `+` (SQL Server), `||` (PG; SQL Server **2022+**), `CONCAT` — [operators.md](operators.md).
+Không có string interpolation. Nối: `+` (SQL Server), `||` (PG; SQL Server **2025**), `CONCAT` — [operators.md](operators.md).
 
 Newline **thật** trong literal (xuống dòng trong file SQL) hợp lệ cả hai — khác `'\n'` hai ký tự trên PG 19 `'…'` thường.
 
@@ -206,8 +215,8 @@ T2 (PG 19):              SELECT 'a\nb';    -- a, \, n, b
 ## 4. Unicode & escape
 
 ```sql
--- SQL Server 2025: UNISTR — \hhhh hoặc \\ + code point (docs: dấu \ + hex)
-SELECT UNISTR(N'\\0041\\0042');            -- N'AB' — kiểm tra escape doubling trong chuỗi T-SQL
+-- SQL Server 2025: một backslash cho escape UNISTR
+SELECT UNISTR(N'\0041\0042');               -- N'AB'
 SELECT NCHAR(0x0041);                      -- N'A'
 SELECT NCHAR(0x1F600);                     -- emoji; cột nvarchar cần collation SC để lưu đúng 1 “ký tự”
 
@@ -223,10 +232,10 @@ SELECT U&'!0041' UESCAPE '!';              -- đổi escape character
 - Surrogate: `NCHAR` một unit 16-bit không đủ emoji nếu bạn tính `LEN` trên collation không SC — [typesystem.md](typesystem.md).
 - `U&` chỉ PostgreSQL. Đừng nhầm với `U&` XML.
 - Trong JSON literal, `\u0041` là escape JSON, không phải SQL `UNISTR` — parse hai lớp.
-- `UNISTR` xử lý chuỗi **đã** là nvarchar. Escape `\\0041` trong T-SQL: mỗi `\` nhân đôi vì `\` không phải escape SQL Server — docs Learn: pattern `UNISTR(N'\xxxx')` vs doubling trong chuỗi nguồn. Test một code point trước khi copy bảng mapping.
-- `E'\u0041'` **không** phải Unicode escape PG (`U&` mới là `\0041`). `E'\x41'` là byte hex Latin-1/UTF-8 tùy encoding.
+- T-SQL giữ nguyên backslash; UNISTR nhận một backslash cho escape codepoint. Chỉ nhân đôi nháy đơn khi tạo literal SQL. Nếu SQL được nhúng trong JSON/JavaScript, áp escape của ngôn ngữ ngoài riêng.
+- PostgreSQL `E'\u0041'` và `E'\U00000041'` đều cho 'A'; `U&'\0041'` là cú pháp Unicode escape khác. E-string xử lý escape độc lập với standard_conforming_strings.
 
-Không có `UNISTR` trên PostgreSQL. Port: `U&'\0041'` hoặc `chr(65)` / `E'\u0041'` **sai** (u không phải escape POSIX trong E-string chuẩn).
+Không có UNISTR trên PostgreSQL. Dùng `U&'\0041'`, `chr(65)` hoặc `E'\u0041'`.
 
 ---
 
@@ -337,7 +346,7 @@ SELECT TIMESTAMP '2026-09-13 00:00' + INTERVAL '3 hours';
 
 SQL Server không có literal interval. `DATEADD(day, 2, @d)` / `DATEDIFF`. Không viết `INTERVAL` trong T-SQL rồi mong parse. `DATEADD` **2025** nhận `bigint` cho `number` — literal `86400` vẫn `int` nếu vừa; nhân `CAST(… AS bigint)` khi khoảng lớn — [typesystem.md](typesystem.md).
 
-`FOR PORTION OF … FROM DATE '…' TO DATE '…'` dùng **typed date literal** (hằng, không column ref) — [dml.md](dml.md), [keywords.md](keywords.md). Bound `now()` được; literal sai format = lỗi statement.
+Dùng typed literal như DATE '2026-01-01' trên PostgreSQL để tránh lệ thuộc DateStyle; T-SQL dùng DATEFROMPARTS/CONVERT có style rõ ràng. FOR PORTION OF đã bị rút khỏi PG 19.
 
 ---
 
@@ -392,7 +401,7 @@ SELECT '{"a":1}'::json;
 
 Array text `'{a,b}'` vs `ARRAY['a','b']`: chuỗi có dấu phẩy / ngoặc phải escape. Ưu tiên constructor `ARRAY[…]`.
 
-SQL Server 2025: JSON **không** có literal typed riêng — chuỗi rồi `CAST(… AS json)` hoặc constructor. Kiểu `json` native on-prem **PREVIEW** — [typesystem.md](typesystem.md).
+SQL Server 2025: JSON **không** có literal typed riêng — chuỗi rồi `CAST(… AS json)` hoặc constructor. Kiểu `json` native on-prem **GA** — [typesystem.md](typesystem.md).
 
 ```sql
 SELECT CAST(N'{"a":1}' AS json);
@@ -411,7 +420,8 @@ SELECT json_array();                       -- 19: []
 Khi constructor/aggregate **0 hàng**:
 
 ```text
-T1 (PG ≤18): SELECT json_array(v) FROM t WHERE false;   -- thường NULL
+T1 (PG ≤18): SELECT json_array(SELECT v FROM t WHERE false); -- NULL
+-- SELECT json_array(v) FROM t WHERE false thì trả 0 HÀNG ở mọi phiên bản.
 T2 (PG 19):  cùng câu                                   -- []
 ```
 
@@ -610,7 +620,7 @@ T2: INSERT blob VALUES ('SGVsbG8=');             -- nếu cột varbinary: conve
 - `SELECT 7/2` “chứng minh” float vì literal viết `7.0` ở chỗ khác.
 - Dump 18 `standard_conforming_strings=off` restore 19.
 - `SET escape_string_warning` trên 19.
-- `UNISTR` thiếu doubling `\` / thiếu `N`.
+- UNISTR nhân đôi backslash ở sai lớp / dùng varchar không có UTF-8 collation.
 - `BASE64 '…'` như typed literal (không tồn tại).
 - `json_array()` 0 hàng: `IS NULL` sau nâng 19.
 - `U&'\0041'` copy sang T-SQL; `UNISTR` copy sang PG.
@@ -629,7 +639,7 @@ T2: INSERT blob VALUES ('SGVsbG8=');             -- nếu cột varbinary: conve
 | `standard_conforming_strings=off` | — | **19: không restore** |
 | `escape_string_warning` | — | **19: gỡ** |
 | `JSON_OBJECT` / `JSON_ARRAY` | 2022+ / **2025** agg | `json(b)_build_*` lâu |
-| `CAST(… AS json)` native | **2025 PREVIEW** on-prem | `::json` / `::jsonb` lâu |
+| `CAST(… AS json)` native | **GA** | `::json` / `::jsonb` lâu |
 | `json_array()` 0 hàng → `[]` | — | **19 breaking** |
 | `BASE64_ENCODE` / `BASE64_DECODE` | **2025** | `encode`/`decode`; **19** `base64url`/`base32hex` |
 | Dollar-quoting | — | lõi |
@@ -637,33 +647,24 @@ T2: INSERT blob VALUES ('SGVsbG8=');             -- nếu cột varbinary: conve
 | `INTERVAL '…'` | — | lõi |
 | `CURRENT_DATE` (hàm, không literal) | **2025** | lõi |
 | `0x` binary literal | lõi | dùng `bytea` `\x` |
-| `\|\|` nối (không phải literal) | **2022+** | lõi |
+| `\|\|` nối (không phải literal) | **2025** | lõi |
 
 Comment / batch / `GO`: [dialects.md](dialects.md). Keyword `TRUE`/`USER`: [keywords.md](keywords.md). Kiểu sau neo: [typesystem.md](typesystem.md).
 
 ---
 
-## Phụ lục A. `UNISTR` — doubling `\` trong T-SQL
+## Phụ lục A. UNISTR và các lớp escape
 
-`UNISTR` đọc escape **trong chuỗi đã parse**. T-SQL `'…'` **không** coi `\` là escape, nên một backslash trong nguồn là một ký tự tới hàm.
+T-SQL giữ nguyên backslash, rồi UNISTR xử lý escape trong chuỗi nhận được:
 
 ```sql
--- SQL Server 2025 — đo trên instance; docs Learn: \hhhh
-SELECT UNISTR(N'\0041');                 -- thường N'A' nếu parser đưa \0041 vào hàm
-SELECT UNISTR(N'\\0041');                -- nếu nguồn đã nhân đôi: một \ tới UNISTR → \0041
-SELECT UNISTR(N'\+01F600');              -- > BMP: đối chiếu Learn (hình thức \+ / surrogate)
+SELECT UNISTR(N'\0041');        -- A
+SELECT UNISTR(N'\\0041');       -- chuỗi literal \0041 (backslash đã escape ở cấp UNISTR)
+SELECT UNISTR(N'\+01F600');     -- emoji
+EXEC sys.sp_executesql N'SELECT UNISTR(N''\0041'');'; -- A
 ```
 
-Hai lớp:
-
-1. Parser T-SQL: `N'\\' ` → một `\`.
-2. `UNISTR`: `\0041` → U+0041.
-
-Dynamic SQL: `N'UNISTR(N''\0041'')'` — nháy nhân đôi **và** `\` — dễ lệch. Parameter `nvarchar` chứa sẵn `\0041` rồi `UNISTR(@p)` sạch hơn.
-
-PostgreSQL tương đương: `U&'\0041'` (parser SQL, một lớp) hoặc `chr(65)`. Không `UNISTR`. `E'\u0041'` **không** phải Unicode escape chuẩn PG.
-
-**Ghi chú:** Collation không SC: emoji từ `UNISTR` lưu hai unit UTF-16 — `LEN` = 2. Cột `varchar` + `UNISTR` → code page nuốt trước khi unescape nếu thiếu `N`.
+Chỉ nháy đơn được nhân đôi ở cấp literal T-SQL. PostgreSQL có U& và E-string hỗ trợ Unicode escape. Xem [UNISTR](https://learn.microsoft.com/en-us/sql/t-sql/functions/unistr-transact-sql?view=sql-server-ver17) và [PostgreSQL lexical structure](https://www.postgresql.org/docs/19/sql-syntax-lexical.html).
 
 ---
 
@@ -719,7 +720,7 @@ Test một hàng thật, không review pattern “trông POSIX”. Chi tiết to
 
 ```sql
 -- SQL Server: literal 1 vs @id int
-SELECT * FROM dbo.Orders WHERE Id = 1;          -- density 1
+SELECT * FROM dbo.Orders WHERE Id = 1;          -- optimizer biết giá trị literal khi compile
 SELECT * FROM dbo.Orders WHERE Id = @id;        -- sniff / OPPO 2025 — [internal.md](internal.md)
 
 -- PostgreSQL
@@ -737,19 +738,35 @@ Literal `IN (1,2,3)` khác `= ANY(@arr)`. PG `= ANY(ARRAY[1,2,3])` — `ARRAY[�
 
 | Biểu thức | Engine | 0 phần tử / 0 hàng |
 |---|---|---|
-| `json_array()` constructor SQL/JSON | PG **19** | `[]` (trước: `NULL`) |
+| `json_array(SELECT ...)` với subquery rỗng | PG **19** | `[]` (trước: `NULL`); constructor không đối số luôn `[]` |
 | `json_agg(x)` / `jsonb_agg` | PG | `NULL` (aggregate SQL) |
-| `JSON_ARRAY(1,2)` list | SS 2022+ | list rỗng: đo Learn |
-| `JSON_ARRAYAGG(x)` | SS **2025** (on-prem **PREVIEW**) | thường `NULL` như aggregate |
-| `CAST('[]' AS json)` | SS **PREVIEW** / PG `::json` | array rỗng typed |
+| `JSON_ARRAY()` không đối số | SS 2022+ | `[]` |
+| `JSON_ARRAYAGG(NULL)` | SS **2025 GA** | `[]` với ABSENT ON NULL mặc định; đây là một hàng NULL |
+| `CAST('[]' AS json)` | SS **GA** / PG `::json` | array rỗng typed |
 
 Client OpenAPI: `nullable: true` trên field array ≠ `[]`. Nâng PG 19: đổi contract. Không “sửa” bằng `COALESCE(json_array(), 'null'::json)` trừ khi nghiệp vụ muốn JSON null.
 
 Hai session — API versioning:
 
 ```text
-T1 (PG 18 app): empty json_array() → NULL → JSON null / omit field
+T1 (PG 18 app): json_array(subquery rỗng) → NULL → JSON null / omit field
 T2 (PG 19 app): [] → field hiện array rỗng — client cũ `if (x == null)` bỏ qua validation `minItems`
 ```
 
-`JSON_ARRAYAGG` SS **PREVIEW** on-prem 0 hàng: đừng copy `[]` từ PG 19 vào giả định T-SQL. Neo `COALESCE(JSON_ARRAYAGG(…), JSON_ARRAY())` chỉ khi đã đo hàm tồn tại và preview chấp nhận.
+Phân biệt aggregate không có hàng đầu vào với một hàng NULL bị ABSENT ON NULL bỏ qua; ví dụ sau dùng để kiểm contract trên build thực tế. Nếu API cần mảng rỗng khi aggregate trả NULL, dùng COALESCE(JSON_ARRAYAGG(...), JSON_ARRAY()); với RETURNING json, giữ cùng kiểu json cho cả hai nhánh.
+
+```sql
+-- SQL Server 2025: hai trường hợp khác nhau, không GROUP BY.
+SELECT JSON_ARRAYAGG(v) AS no_input_rows
+FROM (VALUES (1)) AS t(v) WHERE 1 = 0;
+SELECT JSON_ARRAYAGG(NULL) AS one_null_row; -- [] theo ABSENT ON NULL mặc định
+```
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL lexical structure](https://www.postgresql.org/docs/19/sql-syntax-lexical.html)
+- [UNISTR](https://learn.microsoft.com/en-us/sql/t-sql/functions/unistr-transact-sql?view=sql-server-ver17)

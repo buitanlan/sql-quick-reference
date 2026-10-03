@@ -1,35 +1,44 @@
 # DML (INSERT / UPDATE / DELETE / MERGE)
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
 > DML đổi dữ liệu trong **transaction**. Cùng cú pháp `UPDATE … FROM` trên hai engine **không** cùng ngữ nghĩa khi một hàng khớp nhiều nguồn — đây là nguồn corruption im lặng trên PostgreSQL.
 
 `INSERT`/`UPDATE`/`DELETE`/`MERGE` là đơn vị atomic *theo statement* trong autocommit, hoặc một phần txn tường minh. SQL Server mặc định lỗi một statement **không** abort cả txn (`XACT_ABORT OFF`); PostgreSQL lỗi → abort txn trừ savepoint. Isolation, `FOR UPDATE`, leftover temporal: [transactions.md](transactions.md), [concurrency.md](concurrency.md). Trigger: [routines.md](routines.md). Constraint lúc ghi: [constraints.md](constraints.md).
 
-PostgreSQL 19 **beta**: `ON CONFLICT DO SELECT`, `FOR PORTION OF`, SIMD `COPY` (`ON_ERROR SET_NULL`, `FORCE_ARRAY`, cấm system column). SQL Server Change Event Streaming = **PREVIEW** — khác `TRUNCATE`/CDC.
+PostgreSQL 19 **beta**: `ON CONFLICT DO SELECT`, SIMD `COPY` (`ON_ERROR SET_NULL`, `FORCE_ARRAY`, cấm system column). SQL Server Change Event Streaming = **PREVIEW** — khác `TRUNCATE`/CDC.
 
 ---
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. INSERT, identity, OVERRIDING](#2-insert-identity-overriding)
-- [3. UPDATE \& fan-out PostgreSQL](#3-update--fan-out-postgresql)
+  - [2.1 SQL Server IDENTITY](#21-sql-server-identity)
+  - [2.2 PostgreSQL IDENTITY & OVERRIDING](#22-postgresql-identity--overriding)
+- [3. UPDATE & fan-out PostgreSQL](#3-update--fan-out-postgresql)
 - [4. DELETE theo lô](#4-delete-theo-lô)
 - [5. MERGE vs upsert](#5-merge-vs-upsert)
-  - [5.1 MERGE](#51-merge-cả-hai)
+  - [5.1 MERGE (cả hai)](#51-merge-cả-hai)
   - [5.2 ON CONFLICT DO UPDATE / NOTHING](#52-on-conflict-do-update--nothing)
-  - [5.3 ON CONFLICT DO SELECT (PG 19)](#53-on-conflict-do-select-postgresql-19-beta)
+  - [5.3 ON CONFLICT DO SELECT (PostgreSQL **19**, beta)](#53-on-conflict-do-select-postgresql-19-beta)
   - [5.4 MERGE vs upsert — khi nào](#54-merge-vs-upsert--khi-nào)
 - [6. OUTPUT / RETURNING](#6-output--returning)
 - [7. TRUNCATE vs CES PREVIEW](#7-truncate-vs-ces-preview)
-- [8. FOR PORTION OF (PostgreSQL 19)](#8-for-portion-of-postgresql-19)
-  - [8.1 Leftover](#81-leftover)
-  - [8.2 Race READ COMMITTED](#82-race-read-committed)
+  - [7.1 CES PREVIEW (SQL Server 2025)](#71-ces-preview-sql-server-2025)
+- [8. Application-time — FOR PORTION OF đã bị rút](#8-application-time--for-portion-of-đã-bị-rút)
 - [9. COPY / BULK](#9-copy--bulk)
+  - [9.1 PostgreSQL 19 — COPY](#91-postgresql-19--copy)
+  - [9.2 SQL Server BULK](#92-sql-server-bulk)
 - [10. Worked examples](#10-worked-examples)
-- [11. Best practices \& checklist](#11-best-practices--checklist)
+  - [10.1 Đơn giản — insert + lấy id](#101-đơn-giản--insert--lấy-id)
+  - [10.2 Trung bình — upsert counter vs get-or-create](#102-trung-bình--upsert-counter-vs-get-or-create)
+  - [10.3 Xóa theo lô và giữ khóa trong transaction](#103-xóa-theo-lô-và-giữ-khóa-trong-transaction)
+  - [10.4 COPY 19 — header, SET_NULL, không system col](#104-copy-19--header-set_null-không-system-col)
+  - [10.5 MERGE xóa source-only vs upsert](#105-merge-xóa-source-only-vs-upsert)
+- [11. Best practices & checklist](#11-best-practices--checklist)
 - [12. Bẫy khi review](#12-bẫy-khi-review)
 - [13. Version gates](#13-version-gates)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -43,7 +52,7 @@ Ba chỗ lệch dialect:
 - **Join khi ghi:** SQL Server `UPDATE t SET … FROM t JOIN …`; PostgreSQL `UPDATE t SET … FROM … WHERE` — fan-out **không xác định** nếu nhiều hàng nguồn.
 - **Upsert:** `MERGE` (cả hai) vs `ON CONFLICT` (PostgreSQL, thường đơn giản hơn). `RETURNING OLD/NEW` (PG 18+) ≠ `OUTPUT inserted/deleted`. `DO SELECT` (**19**) = get-or-create không ghi đè.
 
-Temporal application-time (`FOR PORTION OF`) **không** phải system-versioned SQL Server. Bulk không đi qua cùng trigger/log như từng hàng — đọc mục 7–9 trước khi “tối ưu”. CES **PREVIEW** stream DML, không thay `TRUNCATE` semantics.
+Temporal application-time khác system-versioned SQL Server; FOR PORTION OF đã bị rút khỏi PostgreSQL 19. Bulk không đi qua cùng trigger/log như từng hàng — đọc mục 7–9 trước khi “tối ưu”. CES **PREVIEW** stream DML, không thay `TRUNCATE` semantics.
 
 ---
 
@@ -305,6 +314,8 @@ RETURNING *;
 
 Điền “get-or-create” / idempotency: lần 1 insert `'x'`; lần 2 cùng `id` trả hàng cũ, **giữ** `val` cũ (không overwrite thành `'x'` nếu khác). `DO UPDATE SET val = EXCLUDED.val` thì ghi đè.
 
+DO SELECT cần RETURNING/conflict target và quyền SELECT; thêm FOR UPDATE/SHARE còn cần UPDATE ít nhất một cột.
+
 `FOR UPDATE` trên `DO SELECT`: khóa hàng tồn tại cho read-modify-write tiếp trong txn. Không khóa nếu không ghi `FOR UPDATE` — session khác vẫn update được ngay sau `RETURNING`.
 
 Không có trên SQL Server — gần:
@@ -321,7 +332,7 @@ OUTPUT inserted.*;
 
 No-op `UPDATE` vẫn là update (trigger, CES, version) — **không** tương đương `DO SELECT` (không ghi). `HOLDLOCK` + `SELECT` rồi `INSERT` = hai statement, race trừ isolation/khóa đúng.
 
-**Ghi chú:** **Beta** 19. Unique violation vẫn cần index unique. Race: `DO SELECT FOR UPDATE` vs `DO UPDATE` khác nghiệp vụ. Không bịa `DO SELECT WHERE`. Partial unique: cùng luật conflict target như `DO UPDATE`.
+**Ghi chú:** **Beta** 19. Unique violation vẫn cần index unique. Race: `DO SELECT FOR UPDATE` vs `DO UPDATE` khác nghiệp vụ. `DO SELECT WHERE condition` được hỗ trợ; nếu condition không TRUE thì không trả hàng conflict. RETURNING và conflict target là bắt buộc. Partial unique: cùng luật conflict target như `DO UPDATE`.
 
 ### 5.4 MERGE vs upsert — khi nào
 
@@ -332,16 +343,16 @@ No-op `UPDATE` vẫn là update (trigger, CES, version) — **không** tương �
 | Bỏ qua trùng | `DO NOTHING` | `MERGE` không nhánh matched / `IGNORE` không có |
 | Matched update *khác* + xóa source-only | `MERGE` + `NOT MATCHED BY SOURCE` | `MERGE` |
 | Nhiều nguồn → một target | `MERGE` **lỗi**; `ON CONFLICT` một insert row | `MERGE` **8672** |
-| Fan-out `UPDATE FROM` | im lặng sai | im lặng last-write; `MERGE` lỗi |
+| Fan-out `UPDATE FROM` | chọn một hàng nguồn không xác định | chọn một hàng nguồn không xác định; `MERGE` update trùng báo lỗi |
 
-`ON CONFLICT` = *insert-first*, va unique index. `MERGE` = *join* source⊖target, rồi nhánh. Source thiếu unique trên khóa `ON` → `MERGE` fail; `INSERT … ON CONFLICT` từng hàng source (nhiều hàng source cùng khóa = nhiều lần conflict, kết quả theo thứ tự **không** như `MERGE` atomic một target).
+`ON CONFLICT` giải quyết xung đột unique khi INSERT; MERGE phân nhánh từ join source/target. Một statement ON CONFLICT DO UPDATE không được tác động cùng hàng target nhiều lần; source trùng arbiter key có thể gây cardinality violation, giống yêu cầu chuẩn hóa source của MERGE.
 
 ```sql
 -- PG: hai hàng VALUES cùng id — không phải MERGE cardinality
 INSERT INTO t (id, val)
 VALUES (1, 'a'), (1, 'b')
 ON CONFLICT (id) DO UPDATE SET val = EXCLUDED.val;
--- Thường: một insert, một update (hoặc hai update) — thứ tự/ visib. phức tạp; đừng dựa
+-- ERROR SQLSTATE 21000: ON CONFLICT DO UPDATE cannot affect row a second time
 ```
 
 Chuẩn hóa source **một hàng / khóa** trước mọi upsert.
@@ -433,7 +444,7 @@ TRUNCATE TABLE a, b;                      -- PostgreSQL nhiều bảng (FK vòng
 
 | | SQL Server | PostgreSQL |
 |---|---|---|
-| Trong txn user | Hạn chế / lock mạnh; đừng giả định rollback như DML | Rollback được (MVCC catalog) |
+| Trong txn user | Rollback được trên SQL Server Database Engine; giữ Sch-M | Rollback được; giữ ACCESS EXCLUSIVE, không MVCC-safe với snapshot cũ |
 | Trigger `DELETE` | Không fire | Không fire `DELETE`; có trigger `TRUNCATE` |
 | Identity / sequence | Reset identity | `RESTART IDENTITY` / `CONTINUE IDENTITY` |
 | FK tới bảng | Thường **cấm** TRUNCATE | `CASCADE` hoặc truncate cả nhóm |
@@ -465,89 +476,22 @@ PostgreSQL logical decoding / subscription: `TRUNCATE` là message riêng (`publ
 
 ---
 
-## 8. FOR PORTION OF (PostgreSQL 19)
+## 8. Application-time — FOR PORTION OF đã bị rút
 
-Application-time period: PG **18** `WITHOUT OVERLAPS` trên rangetype / constraint. PG **19** thêm DML `FOR PORTION OF`: cắt khoảng, **không** update/xóa cả hàng nếu hàng dài hơn portion. **Beta**.
+PostgreSQL 19 Beta 4 đã rút temporal UPDATE/DELETE `FOR PORTION OF`, xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). `WITHOUT OVERLAPS` và temporal foreign key từ PostgreSQL 18 vẫn là constraint hợp lệ; chúng không tự chia một hàng thành nhiều đoạn khi UPDATE thông thường.
+
+Để thay giá trong một phần của khoảng thời gian, ứng dụng cần thực hiện trong một transaction: khóa các hàng phù hợp, tính giao/phần dư bằng range hoặc multirange, xóa/thay hàng gốc và chèn các đoạn kết quả. Mỗi đoạn phải thỏa constraint, trigger và quyền INSERT/UPDATE/DELETE. Đọc [constraints.md](constraints.md) mục 9 để phân biệt system-time và application-time.
+
+Trường hợp đơn giản thay **toàn bộ** khoảng:
 
 ```sql
-UPDATE products
-FOR PORTION OF valid_at FROM DATE '2026-01-01' TO DATE '2026-07-01'
+UPDATE product_price
 SET price = 99
-WHERE sku = 'ABC';
-
-DELETE FROM products
-FOR PORTION OF valid_at FROM DATE '2028-01-01' TO DATE '2029-01-01'
-WHERE sku = 'ABC';
-
--- Multirange: bắt buộc dạng ngoặc
-DELETE FROM products
-FOR PORTION OF valid_at ('[2028-01-01,)'::datemultirange)
-WHERE sku = 'ABC';
-```
-
-Bound **hằng** (`now()` được; **không** column ref). Hàm hỗ trợ: `range_minus_multi` / `multirange_minus_multi` (engine dùng khi cắt). Constraint temporal: [constraints.md](constraints.md).
-
-SQL Server temporal `SYSTEM_VERSIONING` / `FOR SYSTEM_TIME` là **system-time** (history tự động), **không** có `FOR PORTION OF`. Sửa lịch sử application-time trên SS: tự quản period + không `WITHOUT OVERLAPS` native — constraint/`TRIGGER`.
-
-### 8.1 Leftover
-
-Hàng một range `[2025-01-01, 2027-01-01)` + `UPDATE FOR PORTION OF` `[2026-01-01, 2026-07-01)`:
-
-1. Phần giao portion được **update** (`price = 99`), bound thu hẹp còn `[2026-01-01, 2026-07-01)`.
-2. Engine **insert leftover** (mảnh không đụng, giá **cũ**):
-   - leftover trái `[2025-01-01, 2026-01-01)`
-   - leftover phải `[2026-07-01, 2027-01-01)`
-
-Range: **0–2** leftover. Multirange: **0–1** leftover (cắt lỗ trong multi). Leftover = `INSERT` thật: trigger `INSERT` / `IDENTITY` / CES-logical **có thể** fire — kiểm tra, đừng giả định “chỉ UPDATE”.
-
-`WITHOUT OVERLAPS`: leftover **không được chồng** hàng khác cùng khóa. Fail constraint nếu đã có hàng chiếm `[2025, 2026)`. Đo trước khi cắt.
-
-`COPY` / `TRUNCATE` **không** hiểu portion — load/rỗng cả hàng.
-
-Không bịa `FOR PORTION OF SYSTEM_TIME`. Không bitemporal đầy đủ trừ khi tự quản system-time.
-
-### 8.2 Race READ COMMITTED
-
-Session khác đổi bound giữa lúc đọc và cắt leftover → leftover **mất** hoặc chồng — documented hazard ở RC.
-
-Timeline:
-
-1. Session A đọc hàng `[2025, 2027)`, price 80; bắt đầu cắt portion `[2026, 2026-07)`.
-2. Session B (RC) commmit đổi bound / xóa / cắt khác trên cùng `sku`.
-3. A insert leftover theo bound **cũ** → lỗ khoảng, chồng, hoặc mất mảnh B vừa ghi.
-
-Nên:
-
-```sql
-BEGIN;
-SELECT * FROM products
 WHERE sku = 'ABC'
-FOR UPDATE;
-
-UPDATE products
-FOR PORTION OF valid_at FROM DATE '2026-01-01' TO DATE '2026-07-01'
-SET price = 99
-WHERE sku = 'ABC';
-COMMIT;
+  AND valid_at = daterange(DATE '2026-01-01', DATE '2026-07-01', '[)');
 ```
 
-`FOR UPDATE` **cùng predicate** (và khóa mọi hàng `sku` liên quan period) trước portion. Isolation `REPEATABLE READ` / `SERIALIZABLE`: khóa đó không bắt buộc theo docs 19 nhưng **test**; retry `40001` — [transactions.md](transactions.md).
-
-Hai txn cắt portion **chồng lấn** trên cùng hàng: không `FOR UPDATE` = leftover race. Đừng song song worker theo `sku` mà không khóa.
-
-Trigger / identity / stream khi cắt:
-
-| Sự kiện | `UPDATE` thường | `UPDATE FOR PORTION OF` (19) |
-|---|---|---|
-| Trigger `UPDATE` | 1 | 1 trên mảnh giao (engine cắt) |
-| Trigger `INSERT` | 0 | **0–2** leftover range |
-| `RETURNING` | 1 hàng | hàng sau cắt — leftover có thể không nằm `RETURNING` cùng lúc như “mọi mảnh”; đo bản beta |
-| Identity/sequence | không | leftover **INSERT** có thể lấy identity mới nếu bảng có |
-| CES / logical | 1 update | update + insert leftover (logical); CES SS **không** có portion |
-
-`DELETE FOR PORTION OF` tương tự: xóa khoảng giao, leftover giữ phần ngoài — cũng INSERT mảnh còn lại, không phải “cập nhật bound im lặng” nếu engine tách hàng.
-
-**Ghi chú:** **Beta** 19. Leftover tăng số hàng — `COUNT(*)` “một SKU một hàng” vỡ. Application-time ≠ system-versioned SS. `DELETE FOR PORTION OF` cũng leftover (giữ mảnh ngoài khoảng xóa). Không song song hai worker cùng `sku` ở RC.
+Câu trên không tự cắt khoảng dài hơn. Đừng thay một snippet FOR PORTION OF bằng UPDATE thường rồi coi kết quả tương đương.
 
 ---
 
@@ -577,7 +521,7 @@ COPY orders FROM '/tmp/orders.csv' WITH (FORMAT csv, HEADER true, FREEZE);  -- �
 |---|---|---|
 | SIMD text/CSV `COPY FROM` | Nhanh hơn parse | Không đổi ngữ nghĩa CSV |
 | Skip **nhiều** dòng header | File có preamble | Đếm đúng số dòng skip |
-| `ON_ERROR SET_NULL` | Input **invalid** → `NULL` (không abort) | Nuốt dữ liệu bẩn — **cấm** load tài chính |
+| `ON_ERROR SET_NULL` | Lỗi chuyển kiểu trường → NULL; constraint vẫn có thể làm abort | Nuốt dữ liệu bẩn — **cấm** load tài chính |
 | `COPY TO` JSON | Export JSON | ≠ `json_agg` (không `GROUP BY`) |
 | `FORCE_ARRAY` | `COPY TO` JSON array wrap | Đối chiếu docs 19; đừng bịa tên option khác |
 | `COPY TO` partitioned table | Dump trực tiếp bảng cha | Logical sync cũng lợi |
@@ -594,7 +538,7 @@ COPY orders FROM '/tmp/o.csv' WITH (FORMAT csv)
 WHERE ctid IS NOT NULL;          -- lỗi: system column
 ```
 
-Không invent `COPY BINARY` option không đọc docs. `ON_ERROR` khác `IGNORE` từng engine — chỉ dùng tên đã document (`SET_NULL`). Encoding/NUL: vẫn abort nếu không SET_NULL.
+Không invent `COPY BINARY` option không đọc docs. `ON_ERROR` khác `IGNORE` từng engine — chỉ dùng tên đã document (`SET_NULL`). SET_NULL chỉ xử lý lỗi input conversion; NOT NULL/CHECK/FK, cấu trúc CSV và lỗi I/O vẫn có thể làm COPY thất bại.
 
 ### 9.2 SQL Server BULK
 
@@ -672,50 +616,28 @@ OUTPUT inserted.n;
 
 Bọc isolation / khóa nếu `n` là invariant (không âm, trần). Atomic `UPDATE … SET n = n + 1 WHERE n < trần` đôi khi đủ, không cần `MERGE`. `DO SELECT` **không** tăng `n`.
 
-### 10.3 Nâng cao — lô xóa + portion + leftover an toàn
+### 10.3 Xóa theo lô và giữ khóa trong transaction
 
 ```sql
--- PG 19: khóa, cắt giá theo lịch, xóa log cũ theo lô
+-- PostgreSQL: dùng primary key ổn định để liên kết batch.
 BEGIN;
-
-SELECT 1 FROM products WHERE sku = 'ABC' FOR UPDATE;
-
-UPDATE products
-FOR PORTION OF valid_at FROM DATE '2026-01-01' TO DATE '2026-07-01'
-SET price = 99
-WHERE sku = 'ABC';
--- leftover: INSERT mảnh 2025–2026 và 2026-07–… giá cũ; trigger INSERT có thể chạy
-
 WITH batch AS (
-    SELECT ctid FROM user_logs
+    SELECT id FROM user_logs
     WHERE created_at < DATE '2025-01-01'
-    ORDER BY created_at
-    FOR UPDATE SKIP LOCKED
+    ORDER BY created_at, id
     LIMIT 5000
+    FOR UPDATE SKIP LOCKED
 )
-DELETE FROM user_logs u
-USING batch b
-WHERE u.ctid = b.ctid
+DELETE FROM user_logs AS u
+USING batch AS b
+WHERE u.id = b.id
 RETURNING u.id;
-
 COMMIT;
 ```
 
-SQL Server tương đương portion: **không có** — cập nhật bảng period tự quản + history. Xóa lô: `DELETE TOP (5000) …` trong vòng lặp, `UPDLOCK`/`READPAST` trên queue. Truncate log: **không** nếu bảng đang CES **PREVIEW** mà pipeline đếm từng `DELETE`.
+Commit từng batch để giới hạn lock/WAL. SKIP LOCKED có thể bỏ sót hàng đang khóa; cần lượt xử lý sau. T-SQL dùng CTE TOP + DELETE hoặc UPDATE OUTPUT với hint phù hợp RCSI. FOR PORTION OF đã bị rút khỏi PostgreSQL 19 Beta 4; việc chia khoảng application-time là tác vụ riêng ở mục 8.
 
-Leftover trước/sau (một hàng range):
-
-```text
-Trước:  sku=ABC  valid_at=[2025-01-01, 2027-01-01)  price=80
-UPDATE FOR PORTION OF [2026-01-01, 2026-07-01) SET price=99
-
-Sau (3 hàng, cùng sku, WITHOUT OVERLAPS):
-  [2025-01-01, 2026-01-01)  80     -- leftover INSERT
-  [2026-01-01, 2026-07-01)  99     -- portion đã UPDATE
-  [2026-07-01, 2027-01-01)  80     -- leftover INSERT
-```
-
-Hai session RC **không** `FOR UPDATE`: B cắt `[2026-06-01, 2026-12-01)` trong lúc A cắt `[2026-01-01, 2026-07-01)` → leftover A/B chồng hoặc lỗ — constraint fail hoặc mất giá. Khóa `sku` trước (mục 8.2).
+---
 
 ### 10.4 COPY 19 — header, SET_NULL, không system col
 
@@ -780,7 +702,7 @@ WHEN NOT MATCHED BY SOURCE THEN
 □ OUTPUT/RETURNING cột cần, không SELECT lại
 □ TRUNCATE vs DELETE đã chọn có chủ đích
 □ CES PREVIEW: không giả định TRUNCATE
-□ FOR PORTION: khóa hoặc RR/SSI; leftover constraint
+□ Chia range trong ứng dụng: một transaction, khóa và constraint cho mọi đoạn
 □ COPY: không system col WHERE; SET_NULL có chủ đích
 □ COPY/BULK quyền file + encoding
 ```
@@ -803,8 +725,8 @@ WHEN NOT MATCHED BY SOURCE THEN
 - `TRUNCATE` trên bảng bị FK (SS) / quên `CASCADE` (PG).
 - `TRUNCATE` trên bảng CES/logical rồi tin stream đủ từng hàng.
 - CES **PREVIEW** như CDC đầy đủ / production.
-- `FOR PORTION OF` ở RC không khóa — leftover race.
-- Port system-versioned SS sang `FOR PORTION OF` (khác mô hình).
+- Dùng FOR PORTION OF đã bị rút khỏi PG 19 Beta 4.
+- Coi DML application-time là cơ chế system-versioned tự lưu lịch sử như SQL Server.
 - `COPY FROM … WHERE ctid = …` trên PG 19 (system column cấm).
 - `ON_ERROR SET_NULL` load số tiền.
 - Trigger BEFORE đổi hàng vs `RETURNING`; leftover fire INSERT trigger.
@@ -822,7 +744,7 @@ WHEN NOT MATCHED BY SOURCE THEN
 | `OUTPUT` | lâu | dùng `RETURNING` |
 | `RETURNING WITH (OLD, NEW)` | không | **18+** |
 | `OVERRIDING SYSTEM/USER VALUE` | không (`IDENTITY_INSERT`) | identity chuẩn |
-| `FOR PORTION OF` | không | **19 beta** |
+| FOR PORTION OF | không | Đã rút khỏi 19 Beta 4 |
 | Application-time `WITHOUT OVERLAPS` | không | **18+** |
 | System-versioned temporal | có | extension / tự quản |
 | `COPY` SIMD text/CSV | — | **19** |
@@ -834,3 +756,13 @@ WHEN NOT MATCHED BY SOURCE THEN
 | Fabric mirroring | **2025 GA** (≠ CES) | — |
 
 DDL quanh bảng đang ghi (`REPACK`, index): [ddl.md](ddl.md). Isolation leftover: [transactions.md](transactions.md) §8. Fan-out join: [joins.md](joins.md) §11.
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL INSERT / ON CONFLICT](https://www.postgresql.org/docs/19/sql-insert.html)
+- [PostgreSQL COPY](https://www.postgresql.org/docs/19/sql-copy.html)
+- [T-SQL TRUNCATE](https://learn.microsoft.com/en-us/sql/t-sql/statements/truncate-table-transact-sql?view=sql-server-ver17)

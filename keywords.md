@@ -1,17 +1,17 @@
 # Từ khóa (Keywords)
 
-> **Baseline:** SQL Server **2025** · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** · PostgreSQL **19 Beta 4**.<br>
 > Reserved word ≠ keyword. Unquoted identifier trùng reserved → lỗi parse. Danh sách **không** giống nhau giữa hai engine.
 
 Từ khóa SQL là tín hiệu cho parser, không phải API gọi được. File này **không** liệt kê hết reserved word (xem catalog / Learn). Mỗi nhóm quan trọng: mục đích → ví dụ hai dialect → ghi chú / version. Identifier hay đụng: §20. Quy ước quote: [dialects.md](dialects.md).
 
-PostgreSQL 19 **beta** (GA mục tiêu cuối 10/2026): `GRAPH_TABLE`, `REPACK`, `WAIT FOR`, `FOR PORTION OF`, `ON CONFLICT DO SELECT`, `GROUP BY ALL`, `IGNORE NULLS` window — đối chiếu release notes trước production. SQL Server 2025: `VECTOR`, `CURRENT_DATE`, `JSON_OBJECTAGG` — một phần **PREVIEW**.
+PostgreSQL 19 Beta 4 còn REPACK, WAIT FOR, ON CONFLICT DO SELECT và window IGNORE NULLS. SQL/PGQ, FOR PORTION OF và SPLIT/MERGE partition đã bị rút; GROUP BY ALL suy ra SELECT list đã rút từ Beta 3. SQL Server 2025: vector/CURRENT_DATE/JSON GA; vector index, CES và fuzzy còn PREVIEW.
 
 ---
 
 ## Mục lục
 
-- [1. Quy tắc \& triết lý](#1-quy-tắc--triết-lý)
+- [1. Quy tắc & triết lý](#1-quy-tắc--triết-lý)
 - [2. `SELECT`](#2-select)
 - [3. `WITH` (CTE)](#3-with-cte)
 - [4. `JOIN` / `LATERAL` / `APPLY`](#4-join--lateral--apply)
@@ -19,27 +19,36 @@ PostgreSQL 19 **beta** (GA mục tiêu cuối 10/2026): `GRAPH_TABLE`, `REPACK`,
 - [6. `INSERT` / `UPDATE` / `DELETE` / `TRUNCATE`](#6-insert--update--delete--truncate)
 - [7. `RETURNING` / `OUTPUT`](#7-returning--output)
 - [8. `TOP` / `LIMIT` / `FETCH`](#8-top--limit--fetch)
-- [9. `GRAPH_TABLE` / `MATCH` (PostgreSQL 19)](#9-graph_table--match-postgresql-19)
+- [9. GRAPH_TABLE / MATCH — không có SQL/PGQ trong PostgreSQL 19](#9-graph_table--match--không-có-sqlpgq-trong-postgresql-19)
 - [10. `REPACK` (PostgreSQL 19)](#10-repack-postgresql-19)
-- [11. `FOR PORTION OF` (PostgreSQL 19)](#11-for-portion-of-postgresql-19)
+- [11. FOR PORTION OF — đã rút khỏi PostgreSQL 19](#11-for-portion-of--đã-rút-khỏi-postgresql-19)
 - [12. `BEGIN` / giao dịch / `WAIT FOR`](#12-begin--giao-dịch--wait-for)
+  - [`WAITFOR` vs `WAIT FOR`](#waitfor-vs-wait-for)
 - [13. DDL: `CREATE` / `ALTER` / `DROP`](#13-ddl-create--alter--drop)
 - [14. Constraint](#14-constraint)
 - [15. Window: `OVER` / `FILTER` / `IGNORE NULLS`](#15-window-over--filter--ignore-nulls)
-- [16. `GROUP BY ALL`](#16-group-by-all)
+- [16. GROUP BY ALL — không suy ra SELECT list](#16-group-by-all--không-suy-ra-select-list)
 - [17. Điều khiển luồng](#17-điều-khiển-luồng)
 - [18. `GRANT` / `REVOKE` / `DENY`](#18-grant--revoke--deny)
 - [19. SQL Server 2025 — built-in mới](#19-sql-server-2025--built-in-mới)
 - [20. PostgreSQL 19 — clause mới](#20-postgresql-19--clause-mới)
 - [21. Hay đụng identifier](#21-hay-đụng-identifier)
 - [22. Hai session — ví dụ làm việc](#22-hai-session--ví-dụ-làm-việc)
-- [23. Best practices \& checklist](#23-best-practices--checklist)
+  - [22.1 `BEGIN` port](#221-begin-port)
+  - [22.2 `WAITFOR` vs `WAIT FOR`](#222-waitfor-vs-wait-for)
+  - [22.3 `CURRENT_DATE` đụng cột](#223-current_date-đụng-cột)
+  - [22.4 `DO SELECT` vs `DO UPDATE`](#224-do-select-vs-do-update)
+  - [22.5 Thêm cột khi GROUP BY](#225-thêm-cột-khi-group-by)
+  - [22.6 Sửa khoảng application-time](#226-sửa-khoảng-application-time)
+  - [22.7 `VECTOR` identifier vs type](#227-vector-identifier-vs-type)
+- [23. Best practices & checklist](#23-best-practices--checklist)
 - [24. Bẫy khi review](#24-bẫy-khi-review)
 - [25. Version gates](#25-version-gates)
-- [Phụ lục A. Keyword vs hàm vs kiểu](#phụ-lục-a-keyword-vs-hàm-vs-kiểu--cùng-chữ)
-- [Phụ lục B. `ON CONFLICT DO SELECT`](#phụ-lục-b-on-conflict-do-select--keyword-path)
-- [Phụ lục C. SQL Graph vs SQL/PGQ](#phụ-lục-c-sql-graph-ss-vs-sqlpgq--keyword-đừng-trộn)
-- [Phụ lục D. `REPACK` vs `VACUUM` vs `CLUSTER`](#phụ-lục-d-repack-vs-vacuum-vs-cluster--token)
+- [Phụ lục A. Keyword vs hàm vs kiểu — cùng chữ](#phụ-lục-a-keyword-vs-hàm-vs-kiểu--cùng-chữ)
+- [Phụ lục B. `ON CONFLICT DO SELECT` — keyword path](#phụ-lục-b-on-conflict-do-select--keyword-path)
+- [Phụ lục C. SQL Graph và SQL/PGQ](#phụ-lục-c-sql-graph-và-sqlpgq)
+- [Phụ lục D. `REPACK` vs `VACUUM` vs `CLUSTER` — token](#phụ-lục-d-repack-vs-vacuum-vs-cluster--token)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -83,7 +92,7 @@ TABLE orders LIMIT 5;
 - `SELECT @v = col FROM t` T-SQL gán biến (không xác định nếu nhiều hàng) — khác `SELECT` trả result set.
 - Alias `SELECT` không dùng trong `WHERE` cùng mức.
 - `ON CONFLICT DO SELECT` **không** bắt đầu bằng `SELECT` — clause của `INSERT` (§20, [dml.md](dml.md)).
-- `SELECT` trong `GRAPH_TABLE ( … COLUMNS (…))` là query ngoài; `COLUMNS` không phải list `SELECT` đầy đủ.
+- PostgreSQL 19 Beta 4 không có SQL/PGQ; dùng JOIN/recursive CTE và GROUP BY tường minh.
 
 ---
 
@@ -111,7 +120,7 @@ SELECT * FROM walk;
 - Hint `FROM dbo.T WITH (UPDLOCK)` không phải CTE.
 - `WITH` XML (`FOR XML`) / `WITH` JSON (`FOR JSON`) SQL Server — [json.md](json.md).
 - CTE không phải temp table: tối ưu có thể inline; `MATERIALIZED` / `NOT MATERIALIZED` PostgreSQL (12+) gợi ý.
-- SQL/PGQ 19 **chưa** variable-length path — recursive CTE vẫn cần cho đồ thị sâu. `GRAPH_TABLE` không thay `WITH RECURSIVE`.
+- PostgreSQL 19 Beta 4 không có SQL/PGQ; dùng JOIN/recursive CTE và GROUP BY tường minh.
 
 Chi tiết: [cte-subqueries.md](cte-subqueries.md).
 
@@ -145,7 +154,7 @@ LEFT JOIN LATERAL fn_best_price(o.sku) AS p ON true;
 - `NATURAL JOIN` / `USING`: PG có; SQL Server không `NATURAL` — tránh `NATURAL` (schema evolution).
 - `ON` vs `WHERE` với `LEFT JOIN`: predicate phải `ON` nếu muốn giữ hàng không khớp — [joins.md](joins.md).
 - PG 19: nhiều `LEFT JOIN` có thể rewrite ANTI; `NOT IN` không NULL → ANTI — [operators.md](operators.md).
-- `MATCH` trong `GRAPH_TABLE` rewrite thành join — không keyword `JOIN` trong pattern, nhưng plan = join.
+- PostgreSQL 19 Beta 4 không có SQL/PGQ; dùng JOIN/recursive CTE và GROUP BY tường minh.
 
 ---
 
@@ -208,7 +217,7 @@ TRUNCATE TABLE orders;                   -- DDL-ish: PG transactional; SQL Serve
 
 **Ghi chú:** `TRUNCATE` SQL Server không fire DELETE trigger (mặc định), reset IDENTITY; PG `TRUNCATE … CASCADE` FK. Không port mù. Chi tiết [dml.md](dml.md).
 
-`UPDATE`/`DELETE … FOR PORTION OF` 19: cùng verb, thêm clause temporal — §11. Không `TRUNCATE FOR PORTION OF`.
+UPDATE/DELETE FOR PORTION OF đã bị rút khỏi PostgreSQL 19; xem mục 11.
 
 `INSERT … ON CONFLICT DO SELECT` 19: keyword `DO` + `SELECT` sau conflict — không phải statement `SELECT` độc lập.
 
@@ -273,40 +282,9 @@ OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY;
 
 ---
 
-## 9. `GRAPH_TABLE` / `MATCH` (PostgreSQL 19)
+## 9. GRAPH_TABLE / MATCH — không có SQL/PGQ trong PostgreSQL 19
 
-SQL/PGQ: property graph = **metadata** trên bảng vertex/edge đã có. `GRAPH_TABLE` + `MATCH` rewrite thành join — cùng planner, không engine graph riêng. Index PK/FK vẫn bắt buộc.
-
-```sql
-CREATE PROPERTY GRAPH shop
-    VERTEX TABLES (customers, orders)
-    EDGE TABLES (
-        customer_orders SOURCE customers DESTINATION orders
-    );
-
-SELECT name
-FROM GRAPH_TABLE (
-    shop
-    MATCH (c IS customers)-[IS customer_orders]->(o IS orders)
-    COLUMNS (c.name)
-);
-```
-
-Cần PK/FK hoặc `KEY` / `SOURCE KEY` / `DESTINATION KEY`. Label reserved (`"order"`) phải quote. `DROP PROPERTY GRAPH` **không** drop bảng.
-
-**Chưa có (19):** variable-length `{1,4}`, shortest path, path variable đầy đủ. Path cố định hoặc recursive CTE.
-
-SQL Server 2025 **không** SQL/PGQ. SQL Graph cũ `AS NODE` / `AS EDGE` / `MATCH` **không** cùng chuẩn — đừng port pattern PGQ sang SS hay ngược.
-
-**Ghi chú:** **Beta**. `EXPLAIN` = join. Thiếu index FK = nested loop nặng. `MATCH` / `COLUMNS` / `VERTEX` / `EDGE` / `PROPERTY` `GRAPH` là keyword contextual. Quyền `USAGE` graph vs bảng — đọc GRANT docs 19, đừng bịa. Chi tiết [select.md](select.md), [ddl.md](ddl.md). Hybrid vector + full-text SS **không** phải `GRAPH_TABLE` — [typesystem.md](typesystem.md).
-
-Hai session — metadata vs data:
-
-```text
-T1: DROP PROPERTY GRAPH shop;            -- bảng customers/orders còn
-T2: SELECT * FROM customers;             -- OK
-    SELECT * FROM GRAPH_TABLE (shop …);  -- lỗi: graph không còn
-```
+SQL/PGQ đã bị rút trong Beta 4, xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). Không dùng GRAPH_TABLE/CREATE PROPERTY GRAPH như cú pháp PostgreSQL 19. Query quan hệ bằng JOIN hoặc recursive CTE; SQL Server MATCH thuộc SQL Graph riêng. Chi tiết và ví dụ thay thế: [select.md](select.md), [ddl.md](ddl.md).
 
 ---
 
@@ -333,28 +311,9 @@ SQL Server tương đương gần: `ALTER INDEX … REBUILD` (`ONLINE = ON` hist
 
 ---
 
-## 11. `FOR PORTION OF` (PostgreSQL 19)
+## 11. FOR PORTION OF — đã rút khỏi PostgreSQL 19
 
-Application-time: cắt range validity rồi update/delete một đoạn. Cần cột range + `WITHOUT OVERLAPS` (PG **18+**).
-
-```sql
-UPDATE products
-FOR PORTION OF valid_at FROM DATE '2026-01-01' TO DATE '2026-07-01'
-SET price = 99
-WHERE sku = 'ABC';
-
-DELETE FROM products
-FOR PORTION OF valid_at ('[2028-01-01,)')
-WHERE sku = 'ABC';
-```
-
-Cắt range, insert leftover (0–2 leftover với range; multirange: 0–1). Bound **hằng** (`now()` được; **không** column ref). Hàm `range_minus_multi` / `multirange_minus_multi`.
-
-Race `READ COMMITTED`: leftover/lost portion nếu hai txn cắt cùng hàng — **`SELECT FOR UPDATE`** cùng predicate + portion trước. RR/SSI: khóa đó không bắt buộc theo docs nhưng test.
-
-**Không** phải SQL Server system-versioned `FOR SYSTEM_TIME`. Cùng chữ `FOR`, khác máy.
-
-**Ghi chú:** **Beta**. Constraint `WITHOUT OVERLAPS` fail nếu leftover chồng hàng khác. Không dùng cho bitemporal đầy đủ trừ khi tự quản system-time. [dml.md](dml.md), [constraints.md](constraints.md). Keyword `PORTION` contextual.
+Temporal DML FOR PORTION OF đã bị rút trong Beta 4, xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). WITHOUT OVERLAPS/PERIOD từ PostgreSQL 18 vẫn là constraint, không tự chia hàng. Dùng transaction và DML ứng dụng khi cần tách khoảng. [dml.md](dml.md) mục 8, [constraints.md](constraints.md) mục 9.
 
 ---
 
@@ -418,13 +377,13 @@ ALTER TABLE t ADD COLUMN note text;      -- PG; SQL Server: ADD note nvarchar(10
 DROP TABLE IF EXISTS t;                  -- cả hai (SS 2016+)
 ```
 
-Nhóm object: `TABLE` `VIEW` `INDEX` `SCHEMA` `DATABASE` `TYPE` `DOMAIN` `SEQUENCE` `FUNCTION` `PROCEDURE` `TRIGGER` `MATERIALIZED VIEW` `PROPERTY GRAPH`.
+Nhóm object: `TABLE` `VIEW` `INDEX` `SCHEMA` `DATABASE` `TYPE` `DOMAIN` `SEQUENCE` `FUNCTION` `PROCEDURE` `TRIGGER` `MATERIALIZED VIEW`.
 
-**Ghi chú:** PG DDL hầu hết transactional; SQL Server nhiều DDL commit ngầm — [ddl.md](ddl.md), [transactions.md](transactions.md). `CREATE OR REPLACE` phổ biến PG; T-SQL `CREATE OR ALTER` (proc/view/function, 2016 SP1+). `CONCURRENTLY` (PG index/repack) không trong txn.
+**Ghi chú:** DDL thường có thể rollback trên cả hai engine; ngoại lệ theo lệnh — [ddl.md](ddl.md), [transactions.md](transactions.md). CREATE OR REPLACE (PG) và CREATE OR ALTER (SS) có hạn chế riêng; GO không COMMIT.
 
-`CREATE VECTOR INDEX` SS **PREVIEW** — `VECTOR` contextual. `CREATE JSON INDEX` **PREVIEW** on-prem. `CREATE EXTERNAL MODEL` — AI, không keyword graph.
+`CREATE VECTOR INDEX` SS **PREVIEW** — `VECTOR` contextual. CREATE JSON INDEX GA. `CREATE EXTERNAL MODEL` — AI, không keyword graph.
 
-`ALTER TABLE … MERGE PARTITIONS` / `SPLIT PARTITION` PG **19 beta** — [ddl.md](ddl.md). Keyword `SPLIT`/`MERGE` DDL ≠ `MERGE` DML.
+SPLIT/MERGE partition đã bị rút khỏi PostgreSQL 19 Beta 4; xem [ddl.md](ddl.md) mục 7.
 
 ---
 
@@ -441,7 +400,7 @@ CREATE TABLE t (
 );
 ```
 
-**Ghi chú:** `DEFAULT` vừa keyword constraint vừa `DEFAULT VALUES` lúc insert. `PRIMARY` không dùng làm tên cột unquoted. Deferred: chỉ PostgreSQL — [constraints.md](constraints.md). `WITHOUT OVERLAPS` 18+ đi với PK temporal — cần cho `FOR PORTION OF`.
+**Ghi chú:** `DEFAULT` vừa keyword constraint vừa `DEFAULT VALUES` lúc insert. `PRIMARY` không dùng làm tên cột unquoted. Deferred: chỉ PostgreSQL — [constraints.md](constraints.md). `WITHOUT OVERLAPS` 18+ đi với PK temporal — FOR PORTION OF đã bị rút khỏi 19.
 
 PG 19: `ALTER … CONSTRAINT … [NOT] ENFORCED` trên **CHECK**. Khác `NOT VALID`.
 
@@ -468,23 +427,17 @@ Hàm 19: `lead`, `lag`, `first_value`, `last_value`, `nth_value`. Mặc định 
 
 ---
 
-## 16. `GROUP BY ALL`
+## 16. GROUP BY ALL — không suy ra SELECT list
 
-PostgreSQL **19**: group mọi cột non-aggregate / non-window trên `SELECT` list.
+Tính năng suy ra cột nhóm từ SELECT list đã bị rút từ Beta 3, xem [thông báo Beta 3](https://www.postgresql.org/about/news/postgresql-186-1711-1615-1519-1424-and-19-beta-3-released-3365/). PostgreSQL vẫn có ALL/DISTINCT **trước danh sách grouping element** để kiểm soát grouping set trùng. Ví dụ portable:
 
 ```sql
-SELECT customer_id, status, count(*)
+SELECT customer_id, status, count(*) AS n
 FROM orders
-GROUP BY ALL;
+GROUP BY customer_id, status;
 ```
 
-Tiện, nhưng **đổi list SELECT = đổi grouping** — review như đổi `GROUP BY` tường minh.
-
-SQL Server: không `GROUP BY ALL` (có `GROUP BY` + `CUBE`/`ROLLUP`/`GROUPING SETS`). `SELECT ALL` (vs `DISTINCT`) khác hẳn.
-
-**Ghi chú:** `ALL` đã reserved nhiều ngữ cảnh (`FETCH FIRST n ROWS ONLY` vs `WITH TIES`, `UNION ALL`, `> ALL`). Parser 19 thêm vị trí sau `GROUP BY`. Cột mới trên `SELECT` lọt grouping — bẫy PR “thêm cột hiển thị”. Optimizer 19 `GROUP BY` subquery target list — [select.md](select.md).
-
-Không liên quan `PREVIEW_FEATURES`.
+SELECT ALL giữ hàng trùng của kết quả SELECT, UNION ALL giữ hàng trùng khi hợp tập; mỗi ALL có phạm vi khác nhau. Xem [select.md](select.md) mục 6.3.
 
 ---
 
@@ -556,8 +509,8 @@ Không đợt reserved word lớn; thêm **type / hàm / config**. Tên có th�
 | `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTOR_NORMALIZE` / `VECTORPROPERTY` | Hàm | **GA** |
 | `VECTOR_SEARCH` / `CREATE VECTOR INDEX` | ANN | **PREVIEW** + `PREVIEW_FEATURES` |
 | `AI_GENERATE_EMBEDDINGS` / `AI_GENERATE_CHUNKS` | Hàm | Model REST; credential tách |
-| `JSON_OBJECTAGG` / `JSON_ARRAYAGG` | Aggregate | 2025; on-prem nhiều **PREVIEW** |
-| `JSON_CONTAINS` / `CREATE JSON INDEX` | JSON | **PREVIEW** on-prem — [operators.md](operators.md) |
+| `JSON_OBJECTAGG` / `JSON_ARRAYAGG` | Aggregate | **2025 GA** |
+| `JSON_CONTAINS` / `CREATE JSON INDEX` | JSON | **GA** — [operators.md](operators.md) |
 | `REGEXP_LIKE` … | Regex | **GA** |
 | `CURRENT_DATE` | Hàm `date` | **2025** — đụng cột cùng tên |
 | `UNISTR` / `PRODUCT` | Hàm | **2025** |
@@ -578,12 +531,12 @@ Fuzzy `EDIT_DISTANCE*` / `JARO_WINKLER*`: **PREVIEW**. CES / mirroring: kiến t
 |---|---|---|
 | `REPACK` [`CONCURRENTLY`] | Rebuild bảng/index | Không trong txn; **beta 19** |
 | `WAIT` `FOR` | Chờ LSN standby | ≠ `WAITFOR` T-SQL |
-| `GRAPH_TABLE` `MATCH` `COLUMNS` | SQL/PGQ | Path cố định 19; **beta** |
+| COLUMNS | tên/plural cột theo ngữ cảnh | GRAPH_TABLE đã rút khỏi PG 19 |
 | `PROPERTY` `GRAPH` `VERTEX` `EDGE` | DDL graph | `DROP` không drop bảng |
-| `FOR PORTION OF` | Temporal DML | Cần 18 `WITHOUT OVERLAPS` |
+| `FOR PORTION OF` | Temporal DML | Đã rút khỏi PG 19; xem mục tương ứng |
 | `IGNORE NULLS` / `RESPECT NULLS` | Window | Không `WHERE` |
 | `DO SELECT` | `ON CONFLICT DO SELECT` | Khóa hàng đã có; **beta** |
-| `GROUP BY ALL` | Group list SELECT | Đổi SELECT = đổi group |
+| GROUP BY ALL suy ra SELECT list | Tính năng thử nghiệm đã rút | Đã rút từ Beta 3; grouping-set ALL vẫn hợp lệ |
 | `CHECK [NOT] ENFORCED` | Constraint | Khác `NOT VALID` |
 
 ```sql
@@ -622,7 +575,7 @@ CREATE TABLE dbo.[User] (Id int);
 
 PostgreSQL: `user` / `current_user` là function-like keywords (`SELECT user`).
 
-`MATCH` + graph 19: cột `match` trong `GRAPH_TABLE` khó đọc. `ALL` + `GROUP BY ALL`.
+Từ khóa phải kiểm theo grammar hiện tại, không theo patch beta cũ; SQL/PGQ đã bị rút khỏi 19.
 
 ---
 
@@ -662,20 +615,17 @@ T2: INSERT … ON CONFLICT (id) DO SELECT FOR UPDATE RETURNING *;
     -- không ghi, trả + khóa hàng cũ
 ```
 
-### 22.5 `GROUP BY ALL` thêm cột
+### 22.5 Thêm cột khi GROUP BY
 
-```text
-T1: SELECT customer_id, count(*) FROM orders GROUP BY ALL;           -- group customer_id
-T2: SELECT customer_id, status, count(*) FROM orders GROUP BY ALL;   -- group hai cột — count đổi
-```
+Thêm status vào SELECT có thể yêu cầu thêm status vào GROUP BY và thay grain từ khách hàng thành khách hàng + trạng thái. Viết nhóm tường minh để reviewer nhìn thấy thay đổi. PostgreSQL 19 không có GROUP BY ALL suy ra list.
 
-### 22.6 `FOR PORTION OF` race
+---
 
-```text
-T1: UPDATE … FOR PORTION OF valid_at FROM DATE '2026-01-01' TO DATE '2026-07-01' …
-T2: cùng hàng, portion khác, READ COMMITTED không FOR UPDATE
-    -- leftover chồng / mất đoạn — [dml.md](dml.md)
-```
+### 22.6 Sửa khoảng application-time
+
+FOR PORTION OF đã bị rút khỏi PostgreSQL 19. Khi ứng dụng chia range bằng nhiều DML, giữ một transaction và xử lý khóa/constraint/trigger cho cả hàng gốc lẫn đoạn mới. [dml.md](dml.md) mục 8.
+
+---
 
 ### 22.7 `VECTOR` identifier vs type
 
@@ -695,9 +645,9 @@ T2: CREATE TABLE dbo.Doc (Embedding vector(3)); -- kiểu 2025
 - `BEGIN TRAN` vs `BEGIN` — đọc dialect trước khi review txn.
 - `OUTPUT`/`RETURNING`, `TOP`/`LIMIT`, `APPLY`/`LATERAL` ghi rõ khi port.
 - `MERGE`: test race; cân nhắc `ON CONFLICT` (PG); 19 `DO SELECT` khi chỉ cần hàng cũ.
-- Preview/beta (`VECTOR_SEARCH`, `GRAPH_TABLE`, `REPACK`, `FOR PORTION OF`): không production mặc định.
+- PostgreSQL 19 Beta 4 không có SQL/PGQ; dùng JOIN/recursive CTE và GROUP BY tường minh.
 - `WAITFOR` ≠ `WAIT FOR`. `FOR SYSTEM_TIME` ≠ `FOR PORTION OF`.
-- `GROUP BY ALL`: review như đổi grouping.
+- GROUP BY liệt kê nhóm tường minh; không dùng tính năng suy ra SELECT list đã bị rút.
 - `CURRENT_DATE` / `VECTOR` / `JSON`: soi cột cũ trước nâng 2025.
 - Tra `pg_get_keywords` khi đặt tên mới trên PG.
 
@@ -718,10 +668,10 @@ T2: CREATE TABLE dbo.Doc (Embedding vector(3)); -- kiểu 2025
 - `GO` trong keyword list — không phải T-SQL.
 - `TRUNCATE` như `DELETE` (trigger, identity, FK).
 - `DENY` port sang PG.
-- `GRAPH_TABLE` kỳ vọng shortest path / `{1,4}` trên 19.
+- PostgreSQL 19 Beta 4 không có SQL/PGQ; dùng JOIN/recursive CTE và GROUP BY tường minh.
 - `REPACK` trong `BEGIN` block.
 - `DO SELECT` tưởng `DO UPDATE`.
-- `GROUP BY ALL` + thêm cột SELECT.
+- PostgreSQL 19 Beta 4 không có SQL/PGQ; dùng JOIN/recursive CTE và GROUP BY tường minh.
 - `MATCH` MERGE vs `MATCH` PGQ vs SQL Graph SS.
 - `VECTOR_SEARCH` prod không `PREVIEW_FEATURES`.
 - Port `REPACK` → `REORGANIZE` (không cùng) — [internal.md](internal.md).
@@ -738,18 +688,18 @@ T2: CREATE TABLE dbo.Doc (Embedding vector(3)); -- kiểu 2025
 | `ON CONFLICT` | — (`MERGE`/hint) | **9.5+**; `DO SELECT` **19** |
 | `OFFSET FETCH` | 2012+ | lâu |
 | `IS DISTINCT FROM` | **2022+** | lõi |
-| `JSON_OBJECTAGG` | **2025** (on-prem **PREVIEW** nhiều phần) | lâu |
+| `JSON_OBJECTAGG` | **2025 GA** | lâu |
 | `REGEXP_LIKE` | **2025** | `~` lâu |
 | `CURRENT_DATE` | **2025** | lõi |
 | `VECTOR` type | **2025 GA** | pgvector ext |
 | `VECTOR_SEARCH` | **2025 PREVIEW** | — |
 | `UNISTR` / `PRODUCT` | **2025** | — / thủ công |
-| `GRAPH_TABLE` / PGQ | — (SQL Graph khác) | **19** (**beta**) |
+| `GRAPH_TABLE` / PGQ | — (SQL Graph khác) | Đã rút khỏi PG 19; xem mục tương ứng |
 | `REPACK` | rebuild index | **19** |
 | `WAIT FOR` LSN | — (`WAITFOR` khác) | **19** |
-| `FOR PORTION OF` | `FOR SYSTEM_TIME` khác | **19** |
+| `FOR PORTION OF` | `FOR SYSTEM_TIME` khác | Đã rút khỏi PG 19; xem mục tương ứng |
 | `IGNORE NULLS` window | — | **19** |
-| `GROUP BY ALL` | — | **19** |
+| `GROUP BY ALL` | — | Đã rút khỏi PG 19; xem mục tương ứng |
 | CHECK `[NOT] ENFORCED` | — | **19** |
 | `FILTER` aggregate | — | lõi |
 | `LATERAL` | `APPLY` | lõi |
@@ -766,19 +716,19 @@ Parser không quan tâm “ý định nghiệp vụ”. Cùng token, khác vị 
 | Token | Vị trí A | Vị trí B |
 |---|---|---|
 | `SELECT` | Bắt đầu query | `ON CONFLICT DO SELECT` (PG **19**) |
-| `MATCH` | `MERGE … WHEN MATCHED` | `GRAPH_TABLE … MATCH` (PG **19**); SQL Graph SS |
-| `FOR` | `FOR XML` / `FOR JSON` / cursor `FOR` | `FOR PORTION OF` / `FOR UPDATE` / `WAIT FOR` |
+| MATCH | MERGE WHEN MATCHED / SQL Graph SS | SQL/PGQ đã rút khỏi PG 19 |
+| FOR | FOR XML / FOR JSON / cursor FOR | FOR UPDATE / WAIT FOR; FOR PORTION OF đã rút |
 | `WAIT` | — | `WAIT FOR` (hai token, PG **19**) |
 | `WAITFOR` | T-SQL delay | không có trên PG |
-| `ALL` | `UNION ALL` / `> ALL` / `FETCH … ALL` | `GROUP BY ALL` (PG **19**) |
+| ALL | UNION ALL / > ALL | GROUP BY ALL grouping_element giữ grouping set trùng |
 | `DO` | `DO $$` PL block | `DO UPDATE` / `DO NOTHING` / `DO SELECT` |
 | `VECTOR` | Kiểu / hàm SS **2025** | Tên cột/bảng |
 | `CURRENT_DATE` | Hàm (SS **2025**, PG lõi) | Tên cột |
-| `JSON` | Kiểu SS **PREVIEW** on-prem / PG | Tên cột |
+| `JSON` | Kiểu SS **GA** / PG | Tên cột |
 | `FILTER` | Aggregate PG | Tên cột; không T-SQL aggregate |
 | `OVER` | Window | Tên cột |
-| `MERGE` | DML upsert | `ALTER TABLE MERGE PARTITIONS` (PG **19**) |
-| `COLUMNS` | `GRAPH_TABLE … COLUMNS` | tên cột (plural) |
+| MERGE | DML nhiều nhánh | SPLIT/MERGE partition đã rút khỏi PG 19 |
+| COLUMNS | tên/plural cột theo ngữ cảnh | GRAPH_TABLE đã rút khỏi PG 19 |
 
 Review: highlight token rồi hỏi *vị trí*. Đừng grep `SELECT` trong `DO SELECT` rồi bảo “query lồng”.
 
@@ -807,16 +757,9 @@ Không `OUTPUT`. Không T-SQL. **Beta 19**. Unique index bắt buộc. [dml.md](
 
 ---
 
-## Phụ lục C. SQL Graph SS vs SQL/PGQ — keyword đừng trộn
+## Phụ lục C. SQL Graph và SQL/PGQ
 
-| | SQL Server Graph (cũ) | PostgreSQL 19 SQL/PGQ |
-|---|---|---|
-| DDL | `AS NODE` / `AS EDGE` | `CREATE PROPERTY GRAPH` `VERTEX TABLES` `EDGE TABLES` |
-| Query | `MATCH` trong `SELECT` (syntax Graph) | `GRAPH_TABLE ( … MATCH … COLUMNS …)` |
-| Engine | Graph tables riêng | Metadata + rewrite join |
-| 2025 | **Không** nâng thành PGQ | **Beta** path cố định |
-
-Port `MATCH (a)-[e]->(b)` SS → `GRAPH_TABLE` = viết lại schema, không tìm-thay keyword. Vector hybrid search SS không dùng `MATCH`.
+SQL Server AS NODE/AS EDGE/MATCH thuộc SQL Graph. PostgreSQL 19 Beta 4 không còn SQL/PGQ. Không tìm-thay keyword giữa hai hệ; với PostgreSQL dùng bảng vertex/edge thông thường, JOIN và recursive CTE.
 
 ---
 
@@ -831,3 +774,13 @@ REPACK (CONCURRENTLY, ANALYZE) employees USING INDEX employees_pkey;  -- 19
 Cả ba *rewrite/sắp heap* theo nghĩa vận hành, **ba keyword**. Job cron `CLUSTER` không tự thành `REPACK (CONCURRENTLY)`. `VACUUM` không `CONCURRENTLY` kiểu index. `REPACK` cấm transaction block — `BEGIN; REPACK …` lỗi.
 
 SQL Server: không token này. `ALTER INDEX … REBUILD` / `REORGANIZE` — edition `ONLINE` — [internal.md](internal.md).
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL SELECT grammar](https://www.postgresql.org/docs/19/sql-select.html)
+- [PostgreSQL INSERT grammar](https://www.postgresql.org/docs/19/sql-insert.html)
+- [SQL Server 2025 language features](https://learn.microsoft.com/en-us/sql/sql-server/what-s-new-in-sql-server-2025?view=sql-server-ver17)

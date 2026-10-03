@@ -1,9 +1,9 @@
 # Window function
 
-> **Baseline:** SQL Server **2025** · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** · PostgreSQL **19 Beta 4**.<br>
 > Window tính trên **partition** của hàng đã lọc (`WHERE` / `GROUP BY` / `HAVING`), **không** gộp mất hàng — khác aggregate thường.
 
-Window không phải “GROUP BY giữ cột”. Mỗi hàng thấy một *khung* hàng liên quan theo `PARTITION BY` + `ORDER BY` + frame (`ROWS` / `RANGE` / `GROUPS`). Cùng `SUM(total) OVER (ORDER BY dt)` trên hai engine **khác nhau** nếu trùng khóa sắp — vì mặc định frame là `RANGE … CURRENT ROW` (gộp peer). File này là ngữ nghĩa frame, offset, phân trang; không phải catalog mọi hàm analytic.
+Window giữ từng hàng và tính thêm giá trị theo `PARTITION BY`, `ORDER BY` và frame (`ROWS` / `RANGE` / `GROUPS`). Trên cả hai engine, `SUM(total) OVER (ORDER BY dt)` mặc định dùng `RANGE … CURRENT ROW`, nên các hàng trùng dt nhận cùng tổng. Dùng ROWS và khóa sắp xếp duy nhất khi cần tổng tăng theo từng hàng. File này trình bày ngữ nghĩa frame, offset và phân trang.
 
 Logical processing: [select.md](select.md). Aggregate không window: [functions.md](functions.md). CTE bọc window: [cte-subqueries.md](cte-subqueries.md).
 
@@ -11,11 +11,12 @@ Logical processing: [select.md](select.md). Aggregate không window: [functions.
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
-- [2. Cú pháp \& thứ tự logic](#2-cú-pháp--thứ-tự-logic)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
+- [2. Cú pháp & thứ tự logic](#2-cú-pháp--thứ-tự-logic)
 - [3. Ranking](#3-ranking)
 - [4. Offset](#4-offset)
 - [5. Bẫy `LAST_VALUE`](#5-bẫy-last_value)
+  - [5.0 Hình dung: cửa sổ mặc định chỉ nhìn *tới ghế mình*](#50-hình-dung-cửa-sổ-mặc-định-chỉ-nhìn-tới-ghế-mình)
 - [6. Aggregate làm window](#6-aggregate-làm-window)
 - [7. Frame: `ROWS` / `RANGE` / `GROUPS`](#7-frame-rows--range--groups)
   - [7.1 `ROWS` vs `RANGE` vs peer](#71-rows-vs-range-vs-peer)
@@ -23,17 +24,18 @@ Logical processing: [select.md](select.md). Aggregate không window: [functions.
   - [7.3 `EXCLUDE` (PostgreSQL)](#73-exclude-postgresql)
 - [8. Named `WINDOW`](#8-named-window)
 - [9. `IGNORE NULLS`](#9-ignore-nulls)
-  - [9.1 Cú pháp \& hàm](#91-cú-pháp--hàm)
+  - [9.1 Cú pháp & hàm](#91-cú-pháp--hàm)
   - [9.2 LOCF, gap, `NTH_VALUE`](#92-locf-gap-nth_value)
 - [10. Phân trang: `ROW_NUMBER` vs keyset](#10-phân-trang-row_number-vs-keyset)
 - [11. Gaps-and-islands](#11-gaps-and-islands)
 - [12. Worked examples](#12-worked-examples)
 - [13. Hàm nào nhìn frame](#13-hàm-nào-nhìn-frame)
-- [14. `NULLS` trong `OVER` \& percentile](#14-nulls-trong-over--percentile)
-- [15. Best practices \& checklist](#15-best-practices--checklist)
+- [14. `NULLS` trong `OVER` & percentile](#14-nulls-trong-over--percentile)
+- [15. Best practices & checklist](#15-best-practices--checklist)
 - [16. Bẫy khi review](#16-bẫy-khi-review)
 - [17. Version gates](#17-version-gates)
 - [Phụ lục A. Chaining named `WINDOW`](#phụ-lục-a-chaining-named-window)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -350,17 +352,21 @@ FROM s;
 Cách trên **vẫn** `ROWS` theo hàng — sai nếu một ngày nhiều hàng. Đúng nghĩa `GROUPS`: gộp theo `d` trước, rồi window trên aggregate; hoặc join `DENSE_RANK` hiện tại với `DENSE_RANK` ∈ [cur-1, cur].
 
 ```sql
--- Ý GROUPS 1 PRECEDING: tổng qty các ngày (d-1 và d), mọi hàng cùng ngày
-WITH x AS (
-    SELECT d, qty, DENSE_RANK() OVER (ORDER BY d) AS g
-    FROM daily
+-- SQL Server: tổng nhóm ngày hiện tại và nhóm ngày trước có dữ liệu.
+-- Gộp trước, tính window trên nhóm, rồi trả kết quả về từng hàng gốc.
+WITH by_day AS (
+    SELECT d, SUM(qty) AS day_qty
+    FROM dbo.Daily
+    GROUP BY d
+), grouped_window AS (
+    SELECT d, SUM(day_qty) OVER (
+        ORDER BY d ROWS BETWEEN 1 PRECEDING AND CURRENT ROW
+    ) AS grp_window
+    FROM by_day
 )
-SELECT
-    a.d, a.qty,
-    SUM(b.qty) AS grp_window
-FROM x AS a
-JOIN x AS b ON b.g BETWEEN a.g - 1 AND a.g
-GROUP BY a.d, a.qty, a.g;          -- cẩn thận grain; thường gộp x trước
+SELECT a.d, a.qty, w.grp_window
+FROM dbo.Daily AS a
+JOIN grouped_window AS w ON a.d = w.d OR (a.d IS NULL AND w.d IS NULL);
 ```
 
 Cú pháp biên đầy đủ (PG; SS subset): `UNBOUNDED PRECEDING` | `n PRECEDING` | `CURRENT ROW` | `n FOLLOWING` | `UNBOUNDED FOLLOWING`. `n` không âm. Frame `FOLLOWING` trước `PRECEDING` → lỗi. `RANGE` + `n PRECEDING` trên PG cần đúng *một* cột `ORDER BY` kiểu có phép cộng (số / datetime + interval).
@@ -379,13 +385,29 @@ AVG(v) OVER (
 -- EXCLUDE NO OTHERS : mặc định
 ```
 
-SQL Server không có. Trung bình “hàng kề không kể mình”: `(LAG(v)+LEAD(v))/2` hoặc `SUM(v) OVER (ROWS 1 PRECEDING AND 1 FOLLOWING) - v`.
+SQL Server không có EXCLUDE. Với frame này, lấy LAG/LEAD theo cùng ORDER BY xác định rồi AVG hai giá trị bằng APPLY; AVG bỏ NULL và xử lý đầu/cuối partition đúng. `(LAG(v)+LEAD(v))/2` chỉ tương đương khi cả hai hàng kề có giá trị và phép chia giữ phần lẻ.
+
+```sql
+-- SQL Server: id là khóa sắp xếp duy nhất trong mỗi grp.
+WITH neighbors AS (
+    SELECT id, grp, v,
+           LAG(v) OVER (PARTITION BY grp ORDER BY id) AS prev_v,
+           LEAD(v) OVER (PARTITION BY grp ORDER BY id) AS next_v
+    FROM dbo.Measurements
+)
+SELECT n.id, n.v, a.neighbor_avg
+FROM neighbors AS n
+CROSS APPLY (
+    SELECT AVG(CAST(x.v AS decimal(19,4))) AS neighbor_avg
+    FROM (VALUES (n.prev_v), (n.next_v)) AS x(v)
+) AS a;
+```
 
 ---
 
 ## 8. Named `WINDOW`
 
-Cả hai engine: mệnh đề `WINDOW` (SQL Server **2022+**; PostgreSQL lõi). Tên là identifier. Cửa sổ sau *tham chiếu* cửa sổ trước — thêm `ORDER BY` / frame, **không** được đổi `PARTITION BY` đã có.
+Cả hai engine: mệnh đề `WINDOW` (SQL Server **2022+**, compat >= 160; PostgreSQL lõi). Tên là identifier. Cửa sổ sau *tham chiếu* cửa sổ trước — thêm `ORDER BY` / frame, **không** được đổi `PARTITION BY` đã có.
 
 ```sql
 -- Cả hai (SS 2022+, PG)
@@ -467,9 +489,9 @@ LAST_VALUE(value) IGNORE NULLS OVER (
 Tại 10:00 và 11:00: `LAST_VALUE` + `IGNORE NULLS` + frame đến hiện tại = 10. Thiếu `IGNORE NULLS` = NULL. Thiếu nới frame nhưng thêm `UNBOUNDED FOLLOWING` = 20 trên *mọi* hàng (cuối partition), không phải LOCF.
 
 ```sql
--- SAI: IGNORE NULLS không cứu frame mặc định LAST_VALUE
+-- Nếu muốn non-null cuối TOÀN partition, frame mặc định vẫn thiếu UNBOUNDED FOLLOWING
 LAST_VALUE(value) IGNORE NULLS OVER (ORDER BY ts)
--- RANGE … CURRENT ROW: hàng NULL → NULL (không có non-null *sau* mình trong frame)
+-- RANGE ... CURRENT ROW: có thể trả non-null TRƯỚC mình; không nhìn non-null phía sau frame.
 
 -- PostgreSQL 19: giá trị non-null thứ 2 trong frame đủ rộng
 NTH_VALUE(value, 2) IGNORE NULLS OVER (
@@ -760,7 +782,7 @@ ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC NULLS LAST, id)
 | `RANGE` + interval / `n PRECEDING` | **không** (chỉ UNBOUNDED/CURRENT ROW) | có |
 | `GROUPS` frame | — | lõi (SQL:2011) |
 | `EXCLUDE` frame | — | lõi |
-| Named `WINDOW` | **2022+** | lõi |
+| Named `WINDOW` | **2022+**, compat >= 160 | lõi |
 | `IGNORE NULLS` / `RESPECT NULLS` | **2022+** (`LAG`/`LEAD`/`FIRST_VALUE`/`LAST_VALUE`) | **19** (+ `nth_value`) |
 | `NTH_VALUE` | — | lõi |
 | `FILTER` trên window aggregate | — | lõi |
@@ -788,3 +810,13 @@ Cấm: `WINDOW w2 AS (w1 PARTITION BY other)` khi `w1` đã có partition — đ
 `OVER w_run` và `OVER (w_run)` cùng nghĩa khi tên đủ. Ranking (`ROW_NUMBER`) trên `w_run` **bỏ qua** frame — vẫn hữu ích vì cùng `PARTITION`/`ORDER` với `SUM` running, một spec.
 
 SQL Server 2019-: bung từng `OVER (` đầy đủ. PG mọi bản lõi có `WINDOW`.
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL window functions](https://www.postgresql.org/docs/19/functions-window.html)
+- [PostgreSQL SELECT / frame](https://www.postgresql.org/docs/19/sql-select.html)
+- [T-SQL WINDOW](https://learn.microsoft.com/en-us/sql/t-sql/queries/select-window-transact-sql?view=sql-server-ver17)

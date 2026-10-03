@@ -1,9 +1,9 @@
 # JSON
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
 > JSON trong RDBMS là **tài liệu trong cột**, không phải document DB. Cột quan hệ + index rẻ hơn document khi query equality ổn định.
 
-SQL Server 2025 thêm kiểu `json` binary (**on-prem 2025: PREVIEW** theo Learn; **GA Azure SQL / MI** policy 2025). PostgreSQL: `json` (text) vs **`jsonb`** (binary) — mặc định mới nên `jsonb`. Path, modify, unnest (`OPENJSON` vs `jsonb_to_recordset`), aggregate (`JSON_OBJECTAGG` **PREVIEW** on-prem / `json_array()` rỗng → `[]` ở **19**) lệch mạnh. Index: `CREATE JSON INDEX` **PREVIEW** vs GIN.
+SQL Server 2025 thêm kiểu `json` binary (**GA SQL Server 2025 và Azure SQL/MI theo update policy**). PostgreSQL: `json` (text) vs **`jsonb`** (binary) — mặc định mới nên `jsonb`. Path, modify, unnest (`OPENJSON` vs `jsonb_to_recordset`), aggregate (`JSON_OBJECTAGG` **GA** on-prem / `json_array()` rỗng → `[]` ở **19**) lệch mạnh. Index: `CREATE JSON INDEX` **GA** vs GIN.
 
 Kiểu & literal: [typesystem.md](typesystem.md), [literals.md](literals.md). Toán tử `@>` / `JSON_VALUE`: [operators.md](operators.md). Index JSON/vector: [indexes.md](indexes.md).
 
@@ -11,34 +11,44 @@ Kiểu & literal: [typesystem.md](typesystem.md), [literals.md](literals.md). To
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
-- [2. On-prem PREVIEW vs Azure GA](#2-on-prem-preview-vs-azure-ga)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
+- [2. Trạng thái JSON trong SQL Server 2025](#2-trạng-thái-json-trong-sql-server-2025)
 - [3. json vs jsonb vs nvarchar](#3-json-vs-jsonb-vs-nvarchar)
 - [4. Tạo JSON](#4-tạo-json)
 - [5. Đọc theo path](#5-đọc-theo-path)
-- [6. Sửa document: JSON\_MODIFY vs json.modify](#6-sửa-document-json_modify-vs-jsonmodify)
-- [7. Unnest: OPENJSON vs jsonb\_to\_recordset](#7-unnest-openjson-vs-jsonb_to_recordset)
-- [8. Aggregate \& json\_array() \[\] breaking](#8-aggregate--json_array--breaking)
+- [6. Sửa document: JSON_MODIFY vs json.modify](#6-sửa-document-json_modify-vs-jsonmodify)
+- [7. Unnest: OPENJSON vs jsonb_to_recordset](#7-unnest-openjson-vs-jsonb_to_recordset)
+- [8. Aggregate & json_array() [] breaking](#8-aggregate--json_array--breaking)
+  - [8.1 PG 19 breaking: `json_array()` 0 hàng → `[]`](#81-pg-19-breaking-json_array-0-hàng--)
 - [9. Index JSON](#9-index-json)
 - [10. COPY TO JSON (PostgreSQL 19)](#10-copy-to-json-postgresql-19)
 - [11. Validate](#11-validate)
 - [12. Worked examples](#12-worked-examples)
-  - [12.8 Bảng hàm JSON](#128-bảng-hàm-json-không-bịa)
-  - [12.9 On-prem vs Azure](#129-on-prem-vs-azure--checklist-migrate-schema)
-  - [12.10 GIN vs btree vs JSON INDEX](#1210-gin-vs-btree-vs-json-index--chọn)
-- [13. Best practices \& checklist](#13-best-practices--checklist)
+  - [12.1 Đọc scalar vs object](#121-đọc-scalar-vs-object)
+  - [12.2 Unnest items rồi lọc](#122-unnest-items-rồi-lọc)
+  - [12.3 Object agg theo khách](#123-object-agg-theo-khách)
+  - [12.4 Client `json_array()` sau nâng 19](#124-client-json_array-sau-nâng-19)
+  - [12.5 Null khi build object/array](#125-null-khi-build-objectarray)
+  - [12.6 lax vs strict (SQL Server path)](#126-lax-vs-strict-sql-server-path)
+  - [12.7 Export NDJSON vs array](#127-export-ndjson-vs-array)
+  - [12.8 Bảng hàm JSON (không bịa)](#128-bảng-hàm-json-không-bịa)
+  - [12.9 Checklist migrate schema](#129-checklist-migrate-schema)
+  - [12.10 GIN vs btree vs JSON INDEX — chọn](#1210-gin-vs-btree-vs-json-index--chọn)
+- [13. Best practices & checklist](#13-best-practices--checklist)
 - [14. Bẫy khi review](#14-bẫy-khi-review)
 - [15. Version gates](#15-version-gates)
-- [Phụ lục A. JSON\_CONTAINS \& wildcard](#phụ-lục-a-json_contains--wildcard-preview-on-prem)
-- [Phụ lục B. json\_array vs json\_agg vs COPY](#phụ-lục-b-json_array-vs-json_agg-vs-copy)
-- [Phụ lục C. In-place modify](#phụ-lục-c-in-place-modify--khi-nào-rewrite)
-- [Phụ lục D. Migrate nvarchar → json](#phụ-lục-d-migrate-nvarchar--json-on-prem)
-- [Phụ lục E. COPY TO JSON](#phụ-lục-e-copy-to-json--quyền-và-format)
-- [Phụ lục F. NULL semantics](#phụ-lục-f-null-semantics--sửa-document)
-- [Phụ lục G. JSON\_ARRAYAGG](#phụ-lục-g-json_arrayagg--returning-json--môi-trường)
-- [Phụ lục H. Path \$ vs ->](#phụ-lục-h-path--vs----lỗi-hay-gặp)
-- [Phụ lục I. json\_array client](#phụ-lục-i-json_array--sửa-client)
-- [Phụ lục J. Checklist JSON](#phụ-lục-j-checklist-json-why)
+- [Phụ lục A. JSON_CONTAINS & wildcard (GA SQL Server 2025)](#phụ-lục-a-json_contains--wildcard-ga-sql-server-2025)
+- [Phụ lục B. `json_array()` vs `json_agg` vs `COPY`](#phụ-lục-b-json_array-vs-json_agg-vs-copy)
+- [Phụ lục C. In-place `modify` — khi nào rewrite](#phụ-lục-c-in-place-modify--khi-nào-rewrite)
+- [Phụ lục D. Migrate `nvarchar` → `json` on-prem](#phụ-lục-d-migrate-nvarchar--json-on-prem)
+- [Phụ lục E. `COPY TO` JSON — quyền và format](#phụ-lục-e-copy-to-json--quyền-và-format)
+- [Phụ lục F. NULL semantics — sửa document](#phụ-lục-f-null-semantics--sửa-document)
+- [Phụ lục G. `JSON_ARRAYAGG` / `RETURNING JSON` — môi trường](#phụ-lục-g-json_arrayagg--returning-json--môi-trường)
+- [Phụ lục H. Path `$` vs `->` — lỗi hay gặp](#phụ-lục-h-path--vs----lỗi-hay-gặp)
+  - [Document 2 GB](#document-2-gb)
+- [Phụ lục I. `json_array()` — sửa client](#phụ-lục-i-json_array--sửa-client)
+- [Phụ lục J. Checklist JSON (WHY)](#phụ-lục-j-checklist-json-why)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -48,32 +58,27 @@ JSON cho schema linh hoạt (thuộc tính phụ, payload API, log). Key luôn q
 
 Hai dialect:
 
-- SQL Server: historically `nvarchar` + `ISJSON` / `JSON_VALUE`. 2025: kiểu `json`, JSON index, `JSON_CONTAINS`, `JSON_OBJECTAGG`/`JSON_ARRAYAGG`, method `modify` — **nhiều mục PREVIEW trên on-prem**, trong khi Azure SQL / MI đã GA một phần.
+- SQL Server: nvarchar + ISJSON/JSON_VALUE từ 2016; json native, JSON INDEX, JSON_CONTAINS, aggregate JSON và modify có trong SQL Server 2025.
 - PostgreSQL: `jsonb` + GIN `@>` là surface chín. `json` text giữ formatting, chậm hơn. 19: `json_array()` rỗng → `[]` (breaking); `COPY TO` `FORMAT json`.
 
-Đừng khóa schema prod on-prem vào kiểu `json` + JSON INDEX nếu chưa chấp nhận CU đổi API. Staging Azure “chạy rồi” **không** chứng minh on-prem GA.
+Trước khi migrate, kiểm dữ liệu, driver, build/CU, index và phương án rollback trên bản sao.
 
 ---
 
-## 2. On-prem PREVIEW vs Azure GA
+## 2. Trạng thái JSON trong SQL Server 2025
 
-Learn (policy 2025, đối chiếu CU): kiểu **json** GA trên Azure SQL Database / Azure SQL Managed Instance (update policy SQL Server 2025 hoặc Always-up-to-date). **On-prem SQL Server 2025: PREVIEW** (và SQL database in Fabric — docs hiện tại gắn preview). Hàm cũ (`JSON_VALUE`, `OPENJSON`, `FOR JSON`, `JSON_MODIFY`) vẫn chạy trên `nvarchar` **và** trên kiểu `json` — đó là đường GA lâu, không cần flag.
+Tại lần rà soát 03/10/2026, Learn ghi json native, json.modify, CREATE JSON INDEX, JSON_CONTAINS, wildcard path và WITH ARRAY WRAPPER là GA trong SQL Server 2025. JSON_OBJECTAGG/JSON_ARRAYAGG cũng có trong reference hiện tại. Không cần bật PREVIEW_FEATURES chỉ để dùng JSON.
 
-**PREVIEW on-prem (nhiều mục JSON 2025):**
+| Mảnh | Điều kiện chính |
+|---|---|
+| json native | SQL Server 2025; object/array top-level, không scalar; kiểm driver |
+| CREATE JSON INDEX | Cột json, bảng có clustered primary key; không path chồng |
+| json.modify | Method cột json; in-place khi đủ điều kiện |
+| JSON_QUERY WITH ARRAY WRAPPER | Dùng đầu vào json với path mảng/wildcard |
+| JSON_OBJECTAGG / JSON_ARRAYAGG | NULL/key/order/RETURNING theo signature từng hàm |
+| JSON_VALUE / OPENJSON / FOR JSON / JSON_MODIFY | Có từ 2016; OPENJSON cần compat >= 130 |
 
-| Surface | On-prem 2025 | Azure SQL / MI (policy 2025) |
-|---|---|---|
-| Kiểu `json` binary (~2 GB/row, UTF-8 nội bộ) | **PREVIEW** | **GA** |
-| `CREATE JSON INDEX` | **PREVIEW** | Theo Learn — đừng giả on-prem = cloud |
-| `JSON_CONTAINS` | **PREVIEW** | Đo từng môi trường |
-| `JSON_OBJECTAGG` / `JSON_ARRAYAGG` (`RETURNING JSON`) | **PREVIEW** | GA Azure / Fabric DW (policy) |
-| Method `json.modify` | **PREVIEW** (2025) | Đối chiếu Learn; `JSON_MODIFY` hàm = lâu |
-| Wildcard path ANSI / `JSON_QUERY … WITH ARRAY WRAPPER` | **PREVIEW** | Đo |
-| `JSON_VALUE` / `OPENJSON` / `FOR JSON` / `ISJSON` | GA (2016+) | GA |
-
-Một số PREVIEW còn `ALTER DATABASE SCOPED CONFIGURATION SET PREVIEW_FEATURES = ON` (vector index, CES, fuzzy — **không** chỉ JSON). Bật flag “cho JSON INDEX” có thể kéo feature khác theo **database**. JSON INDEX / `json.modify`: đọc note Learn *currently in preview* trên on-prem — không bịa “chỉ cần compat 170”.
-
-**Ghi chú:** Dùng chữ **on-prem**, không “boxed”. Feature flag lệch môi trường = bug CI: pipeline Azure dùng `JSON_OBJECTAGG RETURNING JSON`, on-prem lab fail hoặc preview.
+Azure SQL/Managed Instance/Fabric vẫn có phạm vi API và update policy riêng. Pin build/CU và kiểm release notes khi triển khai. Nguồn: [JSON overview](https://learn.microsoft.com/en-us/sql/relational-databases/json/json-data-sql-server?view=sql-server-ver17), [JSON data type](https://learn.microsoft.com/en-us/sql/t-sql/data-types/json-data-type?view=sql-server-ver17), [JSON_ARRAYAGG](https://learn.microsoft.com/en-us/sql/t-sql/functions/json-arrayagg-transact-sql?view=sql-server-ver17).
 
 ---
 
@@ -81,15 +86,15 @@ Một số PREVIEW còn `ALTER DATABASE SCOPED CONFIGURATION SET PREVIEW_FEATURE
 
 **Hình dung.** `json` PostgreSQL (và `nvarchar` + `ISJSON`) = **tờ giấy** nguyên văn: khoảng trắng, thứ tự key, key trùng đều còn — mỗi lần đọc phải parse lại.
 
-`jsonb` (và kiểu `json` binary SQL Server 2025) = **đã bóc** thành cấu trúc: hết khoảng trắng, key trùng thì key sau thắng, so sánh theo giá trị không theo chuỗi. `{"b":1,"a":2}` và `{"a":2,"b":1}` bằng nhau trên `jsonb`, không bằng nhau nếu so text.
+PostgreSQL `jsonb` lưu cấu trúc đã parse: bỏ khoảng trắng và key trùng, giữ giá trị cuối. `{"b":1,"a":2}` và `{"a":2,"b":1}` bằng nhau khi so jsonb, khác nhau khi so text. Kiểu json binary SQL Server 2025 cũng tránh parse text mỗi lần đọc, nhưng không suy ra các quy tắc equality/key trùng từ jsonb.
 
 Cột luôn lọc `status = 'open'` → cột quan hệ hoặc expression index, đừng so cả tờ giấy. Cập nhật một key trên document 10 MB thường **viết lại cả giá trị**.
 
 | | SQL Server 2025 | PostgreSQL |
 |---|---|---|
-| Native binary | `json` (UTF-8 nội bộ, ~2 GB/row) **PREVIEW** on-prem / **GA Azure** | **`jsonb`** |
+| Native binary | `json` (UTF-8 nội bộ, ~2 GB/row) **GA** on-prem / **GA Azure** | **`jsonb`** |
 | Text | `nvarchar`/`varchar` + `ISJSON` | `json` (giữ khoảng trắng, thứ tự key, key trùng) |
-| Nên dùng cột mới | `json` khi chấp nhận preview (hoặc Azure GA); không thì `nvarchar` + computed | `jsonb` |
+| Cột mới | json cho document; cột quan hệ cho key cần FK/join | jsonb thường phù hợp cho query/index |
 
 `jsonb` **không** giữ khoảng trắng, thứ tự key, key trùng (key sau thắng). `json` PG giữ nguyên — parse mỗi lần đọc. SQL Server `json` binary đã parse; expose/tương thích hàm JSON cũ.
 
@@ -99,7 +104,7 @@ Input kiểu `json` SS: object hoặc array (RFC; không scalar trần theo docs
 -- SQL Server
 CREATE TABLE dbo.Doc (
     Id      int NOT NULL PRIMARY KEY CLUSTERED,   -- JSON INDEX đòi clustered PK
-    Payload json NOT NULL                         -- PREVIEW on-prem
+    Payload json NOT NULL                         -- GA SQL Server 2025
 );
 
 -- Cũ (GA, rollback dễ)
@@ -155,8 +160,8 @@ SELECT JSON_VALUE(doc, '$.user.name');            -- scalar; object → NULL (la
 SELECT JSON_QUERY(doc, '$.user');                 -- object/array
 SELECT JSON_VALUE(doc, '$.items[0].sku');
 SELECT JSON_PATH_EXISTS(doc, '$.user.name');      -- 0/1
--- 2025 PREVIEW: wildcard mảng ANSI; JSON_QUERY … WITH ARRAY WRAPPER
-SELECT JSON_CONTAINS(doc, 'fitness', '$.tags');   -- PREVIEW; dùng JSON INDEX
+-- 2025 GA: wildcard mảng ANSI; JSON_QUERY … WITH ARRAY WRAPPER
+SELECT JSON_CONTAINS(doc, 'fitness', '$.tags');   -- GA; dùng JSON INDEX
 
 -- PostgreSQL
 SELECT doc -> 'user' ->> 'name';                  -- -> jsonb, ->> text
@@ -167,7 +172,7 @@ SELECT doc @> '{"user":{"id":1}}'::jsonb;         -- containment, GIN
 SELECT jsonb_path_exists(doc, '$.user.name');
 ```
 
-`JSON_VALUE` lax: path sai / kiểu sai → `NULL`. `strict`: lỗi. PG `->` không tồn tại key → `NULL`. `->>` luôn text (mất kiểu số).
+`JSON_VALUE` lax: path hợp lệ nhưng không tìm thấy key hoặc gặp object/array → `NULL`; path sai cú pháp vẫn lỗi. `strict` báo lỗi cho key thiếu/kiểu không phù hợp. PG `->` không tồn tại key → `NULL`; `->>` trả text khi có giá trị.
 
 SQL Server path **bắt buộc** `$`. PG `jsonpath` cũng `$` trong `jsonb_path_*`; toán tử `->` dùng key/index.
 
@@ -188,10 +193,10 @@ SET Payload = JSON_MODIFY(Payload, '$.user.name', @name)
 WHERE Id = @id;
 ```
 
-**PREVIEW on-prem:** method `modify` trên cột kiểu **`json`** — ưu tiên in-place khi đủ chỗ (chuỗi mới ≤ cũ; số cùng kiểu / trong range — Learn). Không gán lại cả document nếu patch nhỏ.
+**GA SQL Server 2025:** method `modify` trên cột kiểu **`json`** — ưu tiên in-place khi đủ chỗ (chuỗi mới ≤ cũ; số cùng kiểu / trong range — Learn). Không gán lại cả document nếu patch nhỏ.
 
 ```sql
--- Learn: json data type — modify (PREVIEW, SQL Server 2025)
+-- Learn: json data type — modify (GA, SQL Server 2025)
 UPDATE dbo.Doc
 SET Payload.modify('$.a', 14859)
 WHERE Id = 1;
@@ -201,7 +206,7 @@ SET Payload.modify('$.b', 'def')
 WHERE Id = 1;
 ```
 
-Cột `nvarchar`: **không** có `.modify` — dùng `JSON_MODIFY`. Azure: kiểu `json` GA nhưng method `modify` vẫn đọc note preview trên 2025 docs — đối chiếu Learn trước khi viết proc.
+Cột nvarchar không có method modify; dùng JSON_MODIFY. Trên cột json, modify có thể cập nhật in-place khi đủ điều kiện.
 
 PostgreSQL jsonb:
 
@@ -216,7 +221,7 @@ SET payload = jsonb_set(payload, '{user,name}', to_jsonb(@name))
 WHERE id = @id;
 ```
 
-Cập nhật cột = gán document mới (trừ optimize binary/preview `modify`). Key sâu trên LOB lớn = rewrite. Tách cột nóng ra quan hệ nếu update thường xuyên.
+Cập nhật cột = gán document mới (trừ optimize binary/GA `modify`). Key sâu trên LOB lớn = rewrite. Tách cột nóng ra quan hệ nếu update thường xuyên.
 
 `JSON_MODIFY` path `append` / `lax`/`strict`. Không merge sâu như `||` jsonb (jsonb `||` object = key-level, không recursive sâu trừ `jsonb_set`).
 
@@ -265,7 +270,7 @@ PG: `jsonb_each` / `jsonb_each_text` cặp key-value object. `jsonb_populate_rec
 ## 8. Aggregate & json_array() [] breaking
 
 ```sql
--- SQL Server 2025 — JSON_OBJECTAGG / JSON_ARRAYAGG: PREVIEW trên on-prem;
+-- SQL Server 2025 — JSON_OBJECTAGG / JSON_ARRAYAGG: GA trên on-prem;
 -- GA Azure SQL / MI (policy 2025) / Fabric DW
 SELECT customer_id, JSON_ARRAYAGG(id ORDER BY id)
 FROM dbo.Orders
@@ -299,18 +304,18 @@ SELECT json_array(SELECT x FROM generate_series(1, 0) AS t(x));
 -- []  (trước 19: NULL)
 ```
 
-App `IS NULL` khi “không phần tử” phải sửa. Giữ NULL cũ: `NULLIF(json_array(SELECT …), '[]'::json)` — chỉ khi thật sự cần tương thích.
+App `IS NULL` khi “không phần tử” phải sửa. Giữ NULL cũ: `NULLIF(json_array(SELECT …)::jsonb, '[]'::jsonb)` — chỉ khi thật sự cần tương thích.
 
 `json_agg` / `json_arrayagg`: 0 hàng trong `GROUP BY` không tạo nhóm; scalar subquery `SELECT json_agg(x) FROM empty` → **`NULL`** (khác `json_array()`). Đừng nhầm hai hàm. Muốn `[]`: `COALESCE(json_agg(…), '[]'::json)`.
 
-**Ghi chú:** Key trùng trong `JSON_OBJECTAGG` / `jsonb_object_agg`: key sau thắng (không lỗi). `ORDER BY` trong `JSON_ARRAYAGG` / `json_agg` để array ổn định. `RETURNING JSON` SS = kiểu `json` (preview on-prem).
+**Ghi chú:** jsonb_object_agg PostgreSQL giữ giá trị cuối của key trùng theo thứ tự input; không giả JSON_OBJECTAGG T-SQL có cùng quy tắc. Chuẩn hóa key duy nhất trước aggregate nếu contract cần tính xác định. `ORDER BY` trong `JSON_ARRAYAGG` / `json_agg` để array ổn định. `RETURNING JSON` SS = kiểu `json` (GA trong SQL Server 2025).
 
 ---
 
 ## 9. Index JSON
 
 ```sql
--- SQL Server 2025 PREVIEW on-prem
+-- SQL Server 2025 GA SQL Server 2025
 CREATE JSON INDEX jix ON dbo.Doc (Payload);                 -- recursive $
 CREATE JSON INDEX jix2 ON dbo.Doc (Payload)
     FOR ('$.status', '$.user.id');                         -- không overlap
@@ -372,7 +377,7 @@ CHECK (JSON_PATH_EXISTS(Payload, '$.basket') = 1)
 
 -- PostgreSQL
 SELECT '{"a":1}'::jsonb;                       -- lỗi nếu invalid
-SELECT payload IS JSON OBJECT;                 -- SQL/JSON IS JSON
+SELECT payload::text IS JSON OBJECT;                 -- SQL/JSON IS JSON
 -- PG 19: IS JSON trên domain overlay text/json/jsonb/bytea
 CHECK (payload ? 'basket')
 ```
@@ -426,7 +431,7 @@ WHERE x.qty > 1;
 ### 12.3 Object agg theo khách
 
 ```sql
--- SQL Server PREVIEW on-prem / GA Azure (policy)
+-- SQL Server 2025 GA; kiểm update policy nếu dùng Azure SQL/MI.
 SELECT customer_id, JSON_OBJECTAGG(sku: qty RETURNING JSON)
 FROM dbo.OrderLines
 GROUP BY customer_id;
@@ -443,7 +448,7 @@ GROUP BY customer_id;
 Trước 19:  json_array(SELECT … empty) IS NULL  → nhánh “không có phần tử”
 19:        []  → IS NULL = false  → nhánh “có array”
 Sửa: kiểm json_typeof(x) = 'array' AND jsonb_array_length(x::jsonb) = 0
-  hoặc NULLIF(..., '[]')
+  hoặc NULLIF(x::jsonb, '[]'::jsonb)
 Không đụng json_agg
 ```
 
@@ -453,9 +458,9 @@ Không đụng json_agg
 
 ### 12.6 lax vs strict (SQL Server path)
 
-Mặc định **lax**: path sai, index mảng vượt biên, `JSON_VALUE` gặp object → `NULL`. `strict`: lỗi statement. Báo cáo “thiếu data” khi path typo là bẫy lax. PG `jsonb_path_query` có `silent` option — khác tên, cùng ý “nuốt”.
+Mặc định **lax**: path hợp lệ nhưng không tìm thấy key, index mảng vượt biên hoặc `JSON_VALUE` gặp object → `NULL`. Path sai cú pháp vẫn gây lỗi. `strict` báo lỗi khi key không tồn tại hoặc kiểu không phù hợp. PG jsonpath cũng có lax/strict và tùy chọn `silent`; các lỗi được bỏ qua phụ thuộc từng API.
 
-JSON INDEX + `JSON_CONTAINS` (**PREVIEW**): không implicit convert số ↔ chuỗi. Containment PG `@>` so cấu trúc jsonb, không phải substring.
+JSON INDEX + `JSON_CONTAINS` (**GA**): không implicit convert số ↔ chuỗi. Containment PG `@>` so cấu trúc jsonb, không phải substring.
 
 ### 12.7 Export NDJSON vs array
 
@@ -476,25 +481,25 @@ COPY (SELECT id, name FROM users ORDER BY id)
 | Scalar path | `JSON_VALUE` | `->>` / `#>>` |
 | Object/array path | `JSON_QUERY` | `->` / `#>` |
 | Tồn tại path | `JSON_PATH_EXISTS` | `jsonb_path_exists` / `?` |
-| Containment | `JSON_CONTAINS` **PREVIEW** | `@>` GIN |
+| Containment | `JSON_CONTAINS` **GA** | `@>` GIN |
 | Sửa hàm | `JSON_MODIFY` GA | `jsonb_set` / `\|\|` / `-` |
-| Sửa in-place cột typed | `json.modify` **PREVIEW** | không method cột |
+| Sửa in-place cột typed | `json.modify` **GA** | không method cột |
 | Unnest | `OPENJSON` | `jsonb_to_recordset` / `jsonb_array_elements` |
-| Agg object/array | `JSON_OBJECTAGG` / `JSON_ARRAYAGG` **PREVIEW** on-prem | `json[b]_object_agg` / `json[b]_agg` |
+| Agg object/array | `JSON_OBJECTAGG` / `JSON_ARRAYAGG` **GA** on-prem | `json[b]_object_agg` / `json[b]_agg` |
 | Constructor array từ query | — | `json_array(SELECT …)` — 19: rỗng = `[]` |
 | Export stream | `FOR JSON` | `COPY TO (FORMAT json)` **19** |
 
-`JSON_CONTAINS` (PREVIEW): so khớp giá trị tại path; **không** convert số ↔ chuỗi. Wildcard path ANSI **PREVIEW**. `WITH ARRAY WRAPPER` trên `JSON_QUERY` **PREVIEW** — bọc scalar thành array; đối chiếu Learn, đừng bịa trên `JSON_VALUE`.
+`JSON_CONTAINS` (GA): so khớp giá trị tại path; **không** convert số ↔ chuỗi. Wildcard path ANSI **GA**. `WITH ARRAY WRAPPER` trên `JSON_QUERY` **GA** trả kết quả path thành array và yêu cầu đầu vào kiểu json; không dùng trên `JSON_VALUE`.
 
-### 12.9 On-prem vs Azure — checklist migrate schema
+### 12.9 Checklist migrate schema
 
-```text
-1. Cột nvarchar + ISJSON + computed JSON_VALUE + btree  →  portable GA
-2. Đổi kiểu json on-prem  →  PREVIEW; rollback kiểu khó; clustered PK nếu JSON INDEX
-3. JSON_OBJECTAGG trong view báo cáo  →  Azure GA, on-prem preview → CI hai môi trường
-4. Payload.modify  →  chỉ cột json 2025 preview; nvarchar giữ JSON_MODIFY
-5. Không bật PREVIEW_FEATURES “cho JSON” nếu không cần vector/CES/fuzzy cùng DB
-```
+1. Kiểm text hiện có là object/array hợp lệ; ISJSON VALUE cho scalar không chứng minh cast sang json hợp lệ.
+2. Đo rewrite/dung lượng và kiểm driver trước khi ALTER kiểu cột.
+3. Nếu dùng JSON INDEX: bảng phải có clustered primary key và path không overlap.
+4. Giữ JSON_MODIFY cho nvarchar; json.modify chỉ áp cột json.
+5. Test NULL, key trùng, số so với chuỗi và thứ tự array trên cả hai dialect.
+
+---
 
 ### 12.10 GIN vs btree vs JSON INDEX — chọn
 
@@ -502,9 +507,9 @@ COPY (SELECT id, name FROM users ORDER BY id)
 Query: payload->>'status' = 'open'          → btree expression (PG) / computed (SS GA)
 Query: payload @> '{"tag":"a"}'           → GIN jsonb_path_ops (PG)
 Query: JSON_VALUE / JSON_CONTAINS nhiều path
-        + clustered PK + chấp nhận PREVIEW  → JSON INDEX on-prem
+        + cột json + clustered PK      → JSON INDEX SQL Server 2025
 Query: tồn tại key ?                       → GIN jsonb_ops, không path_ops
-Document 10 MB update 1 key/s               → tách cột; modify PREVIEW chỉ giảm rewrite khi đủ chỗ
+Document 10 MB update 1 key/s               → tách cột; modify GA chỉ giảm rewrite khi đủ chỗ
 ```
 
 TOAST/LOB: [internal.md](internal.md) §7. Index chi tiết: [indexes.md](indexes.md) §9.
@@ -512,25 +517,24 @@ TOAST/LOB: [internal.md](internal.md) §7. Index chi tiết: [indexes.md](indexe
 ---
 
 
-
 ## 13. Best practices & checklist
 
 - Cột ổn định → relational. JSON cho phần còn lại.
 - PG: `jsonb` trừ khi phải round-trip bitwise text.
-- SS **on-prem**: hiểu **PREVIEW** vs Azure **GA** trước khi `json` + JSON INDEX / agg / `modify` khóa schema.
+- SQL Server 2025: JSON GA; kiểm build/CU, kiểu đầu vào và điều kiện index.
 - Path: `JSON_QUERY` cho object; `JSON_VALUE` scalar. PG `->` vs `->>`.
 - Unnest có schema (`WITH` / `jsonb_to_recordset`) — đừng parse text tay.
 - Index: một key equality = btree expression; containment = GIN `@>` / JSON INDEX path.
 - Aggregate: `RETURNING JSON` khi muốn kiểu `json`; PG 19 `json_array()` rỗng = `[]` ≠ `json_agg` NULL.
 - `COPY TO` json: NDJSON mặc định; `FORCE_ARRAY` khi client cần một array.
 - Validate lúc ghi (`json` type / `::jsonb` / CHECK path).
-- Document lớn: tránh update key sâu từng request — tách bảng; on-prem `modify` in-place chỉ khi PREVIEW chấp nhận.
+- Document lớn: đo I/O khi update, kể cả khi modify có cơ hội in-place; tách bảng nếu key nóng.
 
 ---
 
 ## 14. Bẫy khi review
 
-- Path thiếu `$` trên SS; lax nuốt lỗi, báo cáo NULL.
+- Path thiếu `$` trên SS gây lỗi cú pháp; typo tên key hợp lệ ở lax lại trả NULL.
 - `JSON_VALUE` trên object — NULL, tưởng thiếu data.
 - `json_array()` upgrade 19: `NULL` → `[]` phá client; nhầm với `json_agg`.
 - Duplicate key nvarchar vs jsonb khác nhau.
@@ -540,7 +544,7 @@ TOAST/LOB: [internal.md](internal.md) §7. Index chi tiết: [indexes.md](indexe
 - `JSON_CONTAINS` so chuỗi với số JSON.
 - Port `@>` sang T-SQL (không có) hoặc `JSON_MODIFY` sang `||` jsonb (merge khác).
 - `FOR JSON` NULL bị drop, round-trip mất field.
-- Preview aggregate / `modify` / JSON INDEX / kiểu `json` trên prod **on-prem** như đã GA Azure.
+- Không kiểm driver và giới hạn API trước khi migrate json/JSON INDEX.
 - Cột JSON cho `customer_id` — không FK, không unique.
 - `COPY TO` json rồi `json.loads` cả file NDJSON.
 - `.modify` trên cột `nvarchar`.
@@ -553,12 +557,12 @@ TOAST/LOB: [internal.md](internal.md) §7. Index chi tiết: [indexes.md](indexe
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
 | `JSON_VALUE` / `OPENJSON` / `FOR JSON` / `JSON_MODIFY` | 2016+ | — (`->`, `jsonb_to_recordset`, `jsonb_set`) |
-| Kiểu `json` native | **2025 PREVIEW on-prem**; **GA Azure** / MI policy 2025 | `json`/`jsonb` lâu |
+| Kiểu `json` native | **2025 GA**; Azure SQL/MI theo update policy | `json`/`jsonb` lâu |
 | `JSON_OBJECT` / `JSON_ARRAY` | 2022+ | `json[b]_build_*` / `json_array()` |
-| `JSON_OBJECTAGG` / `JSON_ARRAYAGG` | **2025 PREVIEW on-prem**; GA Azure/Fabric DW | `json[b]_agg` / `object_agg` |
-| `CREATE JSON INDEX` / `JSON_CONTAINS` | **2025 PREVIEW** | GIN |
-| `json.modify` method | **2025 PREVIEW** | `jsonb_set` |
-| Array wildcard path / `WITH ARRAY WRAPPER` | **2025 PREVIEW** | `jsonpath` `[*]` |
+| `JSON_OBJECTAGG` / `JSON_ARRAYAGG` | **2025 GA**; Azure/Fabric theo nền tảng | `json[b]_agg` / `object_agg` |
+| `CREATE JSON INDEX` / `JSON_CONTAINS` | **2025 GA** | GIN |
+| `json.modify` method | **2025 GA** | `jsonb_set` |
+| Array wildcard path / `WITH ARRAY WRAPPER` | **2025 GA** | `jsonpath` `[*]` |
 | `json_array()` 0 hàng → `[]` | — | **19** breaking |
 | `COPY TO` `FORMAT json` / `FORCE_ARRAY` | — | **19** |
 | `IS JSON` trên domain | — | **19** nới |
@@ -570,17 +574,17 @@ Vector: [indexes.md](indexes.md), [typesystem.md](typesystem.md). Isolation khô
 
 ---
 
-## Phụ lục A. JSON_CONTAINS & wildcard (PREVIEW on-prem)
+## Phụ lục A. JSON_CONTAINS & wildcard (GA SQL Server 2025)
 
-`JSON_CONTAINS(json, value, path)` — PREVIEW on-prem; tối ưu cùng JSON INDEX. Value so khớp **kiểu JSON**, không implicit nvarchar `'1'` = số `1`. Path recursive như JSON INDEX: `$.tags` gồm phần tử mảng nếu cấu trúc cho phép — test, đừng giả `@>` PG.
+`JSON_CONTAINS(json, value, path)` — GA SQL Server 2025; tối ưu cùng JSON INDEX. Value so khớp **kiểu JSON**, không implicit nvarchar `'1'` = số `1`. Path recursive như JSON INDEX: `$.tags` gồm phần tử mảng nếu cấu trúc cho phép — test, đừng giả `@>` PG.
 
-Wildcard mảng ANSI **PREVIEW**: path kiểu `$.items[*].sku` (đối chiếu Learn cú pháp đúng). `JSON_QUERY(..., WITH ARRAY WRAPPER)` **PREVIEW**: khi path ra một phần tử, bọc `[…]` cho client ổn định.
+Wildcard mảng ANSI **GA**: path kiểu `$.items[*].sku`. `JSON_QUERY(Payload, '$.items[*].sku' WITH ARRAY WRAPPER)` yêu cầu Payload có kiểu json; kết quả là array kể cả khi chỉ tìm thấy một phần tử.
 
-PG: `jsonb_path_query` + `[*]` không PREVIEW. `@>` không wildcard path T-SQL.
+PG: `jsonb_path_query` và jsonpath `[*]` có trong core từ PostgreSQL 12. `@>` kiểm containment, không nhận path T-SQL.
 
 ```sql
--- SS PREVIEW — đối chiếu Learn nếu CU đổi chữ ký
-SELECT JSON_CONTAINS(Payload, N'"open"', '$.status');
+-- SS GA — đối chiếu Learn nếu CU đổi chữ ký
+SELECT JSON_CONTAINS(Payload, N'open', '$.status');
 SELECT JSON_QUERY(Payload, '$.items[*].sku' WITH ARRAY WRAPPER);
 
 -- PG
@@ -596,8 +600,8 @@ SELECT jsonb_path_query(payload, '$.items[*].sku');
 json_array(SELECT x FROM t)     0 hàng → []     (19 breaking; trước NULL)
 json_agg(x) FROM t              0 hàng, không GROUP BY → NULL
 COPY t TO … (FORMAT json)       0 hàng → file rỗng (không [] trừ FORCE_ARRAY trên 0 hàng = [])
-FOR JSON PATH                   0 hàng → NULL / rỗng tùy WITHOUT_ARRAY_WRAPPER — test
-JSON_ARRAYAGG                   PREVIEW on-prem; GROUP BY 0 nhóm = không hàng
+FOR JSON PATH                   0 hàng → [] (mặc định có array wrapper)
+JSON_ARRAYAGG                   GA SQL Server 2025; GROUP BY 0 nhóm = không hàng
 ```
 
 Client TypeScript `if (data === null)` với `json_array` 19 = nhánh chết. Contract OpenAPI “null = empty” phải đổi `[]`.
@@ -618,15 +622,15 @@ Learn: chuỗi mới ≤ cũ; số cùng kiểu / trong range → in-place có t
 -- 1. Lọc invalid
 SELECT Id FROM dbo.Doc WHERE ISJSON(Payload) = 0;
 
--- 2. Staging (PREVIEW on-prem — lab)
+-- 2. Staging (GA SQL Server 2025 — lab)
 ALTER TABLE dbo.Doc ADD PayloadJson json NULL;
 UPDATE dbo.Doc SET PayloadJson = CAST(Payload AS json);
 
 -- 3. Clustered PK đã có trước JSON INDEX
--- 4. Không DROP nvarchar cùng deploy PREVIEW INDEX
+-- 4. Giữ cột nguồn cho đến khi đã kiểm migration và kế hoạch rollback.
 ```
 
-Azure: kiểu `json` GA — vẫn test `modify`/INDEX/agg từng mục (một số vẫn preview trên 2025 docs). Rollback on-prem: giữ cột nvarchar đến khi GA. Ép fail cả batch nếu một hàng bẩn — lọc trước.
+JSON đã GA nhưng migration vẫn cần kế hoạch rollback kiểu cột và kiểm dữ liệu. Giữ cột nguồn khi cần đối chiếu; đừng chỉ lọc ISJSON rồi giả mọi scalar cast sang json được.
 
 PG `json` → `jsonb`: `ALTER … TYPE jsonb USING payload::jsonb` — mất key trùng/whitespace; rewrite bảng; `ACCESS EXCLUSIVE` trừ kỹ thuật ẩn (không bịa `CONCURRENTLY` cho ALTER TYPE).
 
@@ -644,7 +648,7 @@ COPY users TO '/var/lib/pgsql/users.json'
 
 `\copy` (psql) = file client, không superuser. Format `json` chỉ `TO`. `HEADER`/`DELIMITER` với json = lỗi. Partitioned 19: `COPY TO` bảng cha logical — đối chiếu docs, không giả mỗi partition một file tự động.
 
-Không `COPY FROM json`. Load JSON: `jsonb_populate_record` / `COPY` CSV / app. SS: `OPENJSON` + `INSERT SELECT`, `BULK INSERT` text.
+Không COPY FROM FORMAT json. Load qua jsonb_populate_record, CSV hoặc app; SQL Server dùng OPENJSON. CI kiểm dialect và build/CU thực tế.
 
 SIMD `COPY FROM` text/CSV 19: throughput; `ON_ERROR SET_NULL` nuốt ô bẩn. Khác JSON export.
 
@@ -667,7 +671,7 @@ Port “set null = xóa field” phải đọc lại. Round-trip API optional fi
 ## Phụ lục G. `JSON_ARRAYAGG` / `RETURNING JSON` — môi trường
 
 ```sql
--- PREVIEW on-prem 2025; GA Azure SQL / MI / Fabric DW (policy Learn)
+-- SQL Server 2025 GA; kiểm nền tảng/update policy trên Azure và Fabric.
 SELECT JSON_ARRAYAGG(sku ORDER BY sku RETURNING JSON)
 FROM dbo.Items;
 
@@ -675,9 +679,9 @@ SELECT JSON_OBJECTAGG(sku: qty RETURNING JSON)
 FROM dbo.Items;
 ```
 
-Không `RETURNING JSON` → kiểu nvarchar JSON text (đối chiếu Learn). GROUPING SETS: Learn nói hỗ trợ trên agg JSON — test, đừng giả mọi grouping set. Key trùng: key sau thắng.
+Không `RETURNING JSON` → kiểu nvarchar(max) chứa JSON text. Các aggregate JSON hỗ trợ GROUPING SETS. Không giả quy tắc key trùng giống jsonb PostgreSQL; bảo đảm key duy nhất trước aggregate nếu API yêu cầu kết quả xác định.
 
-PG `jsonb_object_agg` không PREVIEW. `json_array()` constructor ≠ `JSON_ARRAYAGG` T-SQL.
+PG `jsonb_object_agg` có trong core từ PostgreSQL 9.4. `json_array()` constructor và `JSON_ARRAYAGG` T-SQL có cách nhận đầu vào khác nhau.
 
 CI: job Azure dùng `JSON_OBJECTAGG` + job on-prem cùng repo → `#if` dialect / feature detect, không copy mù.
 
@@ -697,13 +701,13 @@ doc -> 'user' -> 'name'               -- jsonb (có quotes nếu string)
 doc @> '{"user":{"name":"Ada"}}'      -- containment, không path T-SQL
 ```
 
-`JSON_CONTAINS` PREVIEW không thay `@>`. Số JSON vs chuỗi: INDEX/CONTAINS không convert. Wildcard `[*]` PREVIEW on-prem.
+`JSON_CONTAINS` GA không thay `@>`. Số JSON vs chuỗi: INDEX/CONTAINS không convert. Wildcard `[*]` GA SQL Server 2025.
 
 Unnest rồi `WHERE sku = …` parse mọi document — đẩy `@>` / `JSON_CONTAINS` / computed trước.
 
 ### Document 2 GB
 
-SS `json` ~2 GB/row (PREVIEW on-prem). Update key = rewrite trừ `modify` in-place đủ chỗ. PG TOAST jsonb lớn — `jsonb_set` tuple mới + TOAST. Tách bảng khi update nóng. [internal.md](internal.md) §7.
+SS `json` ~2 GB/row (GA SQL Server 2025). Update key = rewrite trừ `modify` in-place đủ chỗ. PG TOAST jsonb lớn — `jsonb_set` tuple mới + TOAST. Tách bảng khi update nóng. [internal.md](internal.md) §7.
 
 ---
 
@@ -714,7 +718,7 @@ API: GET /items → { "skus": <json_array subquery> }
 18: 0 hàng → skus: null     → client if (!skus) empty
 19: 0 hàng → skus: []       → if (!skus) không vào; length 0
 Sửa: Array.isArray && length === 0
-     hoặc NULLIF(json_array(SELECT …), '[]'::json) nếu cần null cũ
+     hoặc NULLIF(json_array(SELECT …)::jsonb, '[]'::jsonb) nếu cần null cũ
 Không đổi json_agg / jsonb_agg (vẫn NULL trên empty scalar)
 COPY FORCE_ARRAY bảng rỗng: []  — khác NDJSON rỗng
 ```
@@ -723,7 +727,7 @@ COPY FORCE_ARRAY bảng rỗng: []  — khác NDJSON rỗng
 
 `ABSENT ON NULL` trên constructor list (không phải query form — query luôn absent null). Đối chiếu `json_array` signature docs, đừng mix với `JSON_ARRAYAGG` T-SQL.
 
-On-prem 2025: kiểu `json`, JSON INDEX, `JSON_CONTAINS`, agg `RETURNING JSON`, `json.modify` = **PREVIEW**. Azure SQL/MI policy 2025: kiểu `json` **GA**; từng hàm INDEX/agg/modify vẫn đối chiếu Learn. `JSON_VALUE`/`OPENJSON`/`FOR JSON`/`JSON_MODIFY` = GA lâu trên `nvarchar`.
+SQL Server 2025: json native, JSON INDEX, JSON_CONTAINS, RETURNING JSON và json.modify thuộc API JSON hiện tại; JSON_VALUE/OPENJSON/FOR JSON/JSON_MODIFY vẫn hỗ trợ nvarchar.
 
 `COPY TO (FORMAT json)` 19: NDJSON mặc định; `FORCE_ARRAY` một array; chỉ TO; không CSV option.
 
@@ -736,17 +740,15 @@ COPY (SELECT id, name FROM users ORDER BY id)
     TO STDOUT WITH (FORMAT json, FORCE_ARRAY);
 ```
 
-Không `COPY FROM json`. Load: `jsonb_populate_record` / CSV / app. SS: `FOR JSON` / `OPENJSON`. Feature flag lệch Azure GA vs on-prem PREVIEW: CI hai môi trường, không một script agg preview trên prod on-prem.
+Không COPY FROM FORMAT json. Load qua jsonb_populate_record, CSV hoặc app; SQL Server dùng OPENJSON. CI kiểm dialect và build/CU thực tế.
 
-`json_array(SELECT …)` 19: 0 hàng = `[]` (breaking từ `NULL`). `json.modify('$.a', v)` PREVIEW trên cột `json`, không `nvarchar`. JSON INDEX path không chồng; clustered PK bắt buộc.
-
----
+`json_array(SELECT …)` 19: 0 hàng = `[]` (breaking từ `NULL`). `json.modify('$.a', v)` GA trên cột `json`, không `nvarchar`. JSON INDEX path không chồng; clustered PK bắt buộc.
 
 ---
 
 ## Phụ lục J. Checklist JSON (WHY)
 
-1. **On-prem PREVIEW vs Azure GA** — kiểu `json`/INDEX/agg/`modify` lệch môi trường.
+1. **JSON 2025 GA** — kiểm build/CU, driver và giới hạn từng API.
 2. **`json_array()` 19: rỗng = `[]`** — client `IS NULL` vỡ; `json_agg` vẫn NULL.
 3. **`COPY TO FORMAT json`** — NDJSON; `FORCE_ARRAY` một array; chỉ TO.
 4. **JSON INDEX: clustered PK, path không chồng** — không heap.
@@ -755,3 +757,14 @@ Không `COPY FROM json`. Load: `jsonb_populate_record` / CSV / app. SS: `FOR JSO
 7. **GIN `jsonb_path_ops` chỉ `@>`** — tồn tại key cần `jsonb_ops`.
 8. **Cột quan hệ cho key ổn định** — JSON không FK.
 
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [SQL Server JSON overview (GA)](https://learn.microsoft.com/en-us/sql/relational-databases/json/json-data-sql-server?view=sql-server-ver17)
+- [SQL Server JSON data type](https://learn.microsoft.com/en-us/sql/t-sql/data-types/json-data-type?view=sql-server-ver17)
+- [PostgreSQL JSON functions](https://www.postgresql.org/docs/19/functions-json.html)
+- [PostgreSQL COPY JSON](https://www.postgresql.org/docs/19/sql-copy.html)

@@ -1,36 +1,38 @@
 # CTE & subquery
 
-> **Baseline:** SQL Server **2025** · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** · PostgreSQL **19 Beta 4**.<br>
 > CTE là *tên* cho một truy vấn phụ trong *một* statement — không phải temp table, không phải transaction.
 
 Subquery và CTE cùng mô hình: biểu thức bảng. Optimizer **được** inline, nhân bản, hoặc spool. PostgreSQL cho hint `MATERIALIZED` / `NOT MATERIALIZED`; SQL Server không — CTE bị tham chiếu nhiều lần có thể **chạy nhiều lần**. Đệ quy hai dialect lệch từ khóa (`RECURSIVE`), chặn vòng (`CYCLE` vs `MAXRECURSION`), và DML (`DELETE` qua CTE vs data-modifying `WITH`). File này là hợp đồng để review, không phải “WITH luôn chạy trước”.
 
-Join semi/anti: [joins.md](joins.md). Logical `SELECT`: [select.md](select.md). Window trong CTE: [window-functions.md](window-functions.md). Graph metadata (SQL/PGQ): [select.md](select.md), [ddl.md](ddl.md) — **không** thay path biến độ dài; dùng recursive CTE dưới đây.
+Join semi/anti: [joins.md](joins.md). Logical `SELECT`: [select.md](select.md). Window trong CTE: [window-functions.md](window-functions.md). SQL/PGQ đã rút khỏi 19 Beta 4: [select.md](select.md), [ddl.md](ddl.md). Truy vấn đường đi nhiều bước bằng recursive CTE dưới đây.
 
 ---
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. Scalar subquery](#2-scalar-subquery)
 - [3. `IN` / `EXISTS`](#3-in--exists)
 - [4. Derived table](#4-derived-table)
 - [5. CTE không đệ quy](#5-cte-không-đệ-quy)
   - [5.1 Bẫy `;WITH`](#51-bẫy-with)
 - [6. `RECURSIVE`](#6-recursive)
-- [7. Graph path: recursive, không PGQ biến độ dài](#7-graph-path-recursive-không-pgq-biến-độ-dài)
-- [8. `CYCLE` \& `SEARCH` (PostgreSQL)](#8-cycle--search-postgresql)
+- [7. Graph path bằng recursive CTE](#7-graph-path-bằng-recursive-cte)
+- [8. `CYCLE` & `SEARCH` (PostgreSQL)](#8-cycle--search-postgresql)
+  - [`SEARCH`](#search)
 - [9. `MAXRECURSION` (SQL Server)](#9-maxrecursion-sql-server)
 - [10. Materialize / inline](#10-materialize--inline)
 - [11. `UPDATE` / `DELETE` + CTE](#11-update--delete--cte)
 - [12. `LATERAL` / `APPLY`](#12-lateral--apply)
 - [13. Worked examples](#13-worked-examples)
-- [14. Nhiều anchor \& đi lên cây](#14-nhiều-anchor--đi-lên-cây)
+- [14. Nhiều anchor & đi lên cây](#14-nhiều-anchor--đi-lên-cây)
 - [15. `INSERT`/`MERGE` + CTE](#15-insertmerge--cte)
-- [16. Best practices \& checklist](#16-best-practices--checklist)
+- [16. Best practices & checklist](#16-best-practices--checklist)
 - [17. Bẫy khi review](#17-bẫy-khi-review)
 - [18. Version gates](#18-version-gates)
 - [Phụ lục A. CTE vs view vs temp](#phụ-lục-a-cte-vs-view-vs-temp)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -143,7 +145,7 @@ agg AS (
 SELECT * FROM agg WHERE revenue > 1000;
 ```
 
-Nhiều CTE: cách nhau `,`. CTE sau thấy CTE trước; **không** forward-reference. Một `WITH` — không lồng `WITH` trong định nghĩa CTE (SS cấm nested `WITH` trong CTE_query_definition).
+Nhiều CTE cách nhau bằng dấu phẩy. SQL Server yêu cầu CTE được tham chiếu đã định nghĩa trước và không cho nested WITH trong CTE_query_definition. PostgreSQL cho nested WITH ở subquery; WITH RECURSIVE còn cho forward-reference khi dependency không tạo mutual recursion.
 
 `WITH` đứng **đầu** statement (`SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MERGE`; PG thêm được CTE *là* DML — §11).
 
@@ -231,20 +233,11 @@ OPTION (MAXRECURSION 100);
 
 ---
 
-## 7. Graph path: recursive, không PGQ biến độ dài
+## 7. Graph path bằng recursive CTE
 
-PostgreSQL **19** SQL/PGQ: `CREATE PROPERTY GRAPH` + `GRAPH_TABLE` / `MATCH` là **metadata** trên bảng vertex/edge đã có. Planner rewrite thành join thường — không engine graph riêng. Index PK/FK vẫn bắt buộc. DDL / `FROM GRAPH_TABLE`: [ddl.md](ddl.md), [select.md](select.md). Kiến trúc: [internal.md](internal.md).
+PostgreSQL 19 Beta 4 đã rút SQL/PGQ (`CREATE PROPERTY GRAPH`/`GRAPH_TABLE`), xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). Với bảng cạnh `edges(src, dst)`, truy vấn một bước dùng JOIN; nhiều bước dùng recursive CTE.
 
-**19 chưa có:** variable-length `{1,4}`, shortest path, path variable đầy đủ. Path trong `MATCH` là **cố định** (một bước, hoặc số bước viết tay). Đường đi độ dài không biết = **recursive CTE** (mục 6–9), không phải chờ PGQ.
-
-SQL Server `AS NODE` / `AS EDGE` / `MATCH` là **SQL Graph** cũ — **không** phải SQL/PGQ. Đừng port `GRAPH_TABLE` sang T-SQL hay ngược lại. SQL Graph SS có `MATCH` pattern ngắn; path biến độ dài vẫn thường recursive CTE / `SHORTEST_PATH` (surface Graph SS — đối chiếu Learn, không trộn PGQ).
-
-```sql
--- Cả hai ý: mọi hậu duệ từ gốc, trần depth — công cụ chính trên PG 19
--- (PG: WITH RECURSIVE; SS: WITH + MAXRECURSION)
-```
-
-**Ghi chú:** Review `GRAPH_TABLE` kỳ vọng “mọi đường ≤ 4 cạnh” trên 19 beta → viết recursive + `depth <= 4` + `CYCLE`. `EXPLAIN` PGQ = join; thiếu FK index = nested loop nặng.
+Mang theo `depth` để giới hạn đường đi và `path`/`CYCLE` để chặn vòng. `UNION` chỉ loại các **hàng kết quả giống hệt nhau**: thêm depth khác nhau thì không tự chặn cycle. SQL Server SQL Graph có `SHORTEST_PATH` riêng; không trộn cú pháp đó vào PostgreSQL. Ví dụ CYCLE ở mục 8 và MAXRECURSION ở mục 9.
 
 ---
 
@@ -685,7 +678,7 @@ CTE + `INSERT…SELECT` SS: `IDENTITY` / `OUTPUT` trên câu `INSERT` ngoài, kh
 - Anti-join: `NOT EXISTS`, không `NOT IN` nullable.
 - T-SQL: `;` trước `WITH` trong batch.
 - Đệ quy: điều kiện `depth`; PG `CYCLE`; SS `MAXRECURSION` khớp trần (tránh `0` mù).
-- Path biến độ dài: recursive CTE, không SQL/PGQ 19 `{1,n}`.
+- Path biến độ dài: recursive CTE; kiểm cycle và giới hạn độ sâu.
 - Không forward-ref CTE; không `ORDER BY` trong CTE trừ khi `TOP`/`LIMIT`.
 - Nhiều tham chiếu + đắt / volatile → PG `MATERIALIZED` hoặc `#temp`.
 - `DELETE FROM cte` SS: hiểu là xóa base — tên CTE trong review phải rõ.
@@ -697,7 +690,7 @@ CTE + `INSERT…SELECT` SS: `IDENTITY` / `OUTPUT` trên câu `INSERT` ngoài, kh
 □ EXISTS/NOT EXISTS thay IN/NOT IN nullable
 □ RECURSIVE keyword đúng dialect
 □ CYCLE hoặc MAXRECURSION + depth
-□ Không GRAPH_TABLE cho path {1,4} trên PG 19
+□ SQL/PGQ đã rút khỏi PG 19 Beta 4; dùng JOIN hoặc recursive CTE
 □ MATERIALIZED / temp khi CTE 2 lần + đắt
 □ LATERAL/APPLY CROSS vs OUTER
 □ Scalar subquery unique
@@ -726,7 +719,7 @@ CTE + `INSERT…SELECT` SS: `IDENTITY` / `OUTPUT` trên câu `INSERT` ngoài, kh
 - `IN (SELECT col)` col nullable + `NOT IN`.
 - `CROSS APPLY` nuốt hàng trái.
 - `OFFSET` phân trang trong CTE thay keyset — [window-functions.md](window-functions.md).
-- `GRAPH_TABLE` thay recursive path biến độ dài.
+- Dùng GRAPH_TABLE đã bị rút khỏi PostgreSQL 19 Beta 4.
 - SQL Graph SS `MATCH` copy sang PGQ.
 - `MERGE` + CTE như snapshot dưới RC.
 - `DISTINCT` trên recursive member SS.
@@ -748,7 +741,7 @@ CTE + `INSERT…SELECT` SS: `IDENTITY` / `OUTPUT` trên câu `INSERT` ngoài, kh
 | `LATERAL` | `APPLY` | lõi |
 | `IN` tuple `(a,b)` | — | lõi |
 | Nested CTE trong CTE | không (warehouse Fabric: biến thể riêng) | subquery `WITH` được ở nhiều ngữ cảnh |
-| SQL/PGQ `GRAPH_TABLE` path biến độ dài | SQL Graph khác (không PGQ) | **19 chưa có** — recursive CTE |
+| SQL/PGQ `GRAPH_TABLE` | SQL Graph riêng | Đã rút khỏi 19 Beta 4; dùng JOIN/recursive CTE |
 
 Routine chứa CTE / TVF + `MAXRECURSION`: [routines.md](routines.md). Isolation khi DML CTE: [transactions.md](transactions.md).
 
@@ -769,3 +762,12 @@ View indexed SS / materialized view PG **không** phải CTE `MATERIALIZED`. Tê
 Batch xóa: CTE + `TOP (1000)` trong vòng `WHILE @@ROWCOUNT > 0` (SS) hoặc loop `DELETE … RETURNING` (PG) — mỗi vòng một statement, không một recursive xóa.
 
 `MERGE` nguồn CTE: vẫn race dưới RC nếu không khóa / `UPDLOCK` / `ON CONFLICT` — [dml.md](dml.md), [concurrency.md](concurrency.md).
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL SELECT / WITH / LATERAL](https://www.postgresql.org/docs/19/sql-select.html)
+- [T-SQL common table expressions](https://learn.microsoft.com/en-us/sql/t-sql/queries/with-common-table-expression-transact-sql?view=sql-server-ver17)

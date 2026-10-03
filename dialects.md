@@ -1,6 +1,6 @@
 # Dialect, identifier & quy ước
 
-> **Baseline:** SQL Server **2025** (T-SQL) · PostgreSQL **19**.  
+> **Baseline:** SQL Server **2025** (T-SQL) · PostgreSQL **19 Beta 4**.<br>
 > SQL chuẩn: ISO/IEC 9075 (SQL:2023 + SQL/PGQ). Engine **không** implement đủ chuẩn; luôn kiểm tra dialect.
 
 SQL không phải một ngôn ngữ. ANSI/ISO định nghĩa lõi (`SELECT`, `JOIN`, `NULL`), mỗi engine thêm dialect, identifier, batch, collation và session option riêng. Port script giữa SQL Server và PostgreSQL thất bại trước hết ở *quy ước* — folding tên, `search_path` / default schema, `GO` vs `;`, three-valued logic — chứ không phải ở `SELECT`. File này là lớp nền: [typesystem.md](typesystem.md), [literals.md](literals.md), [keywords.md](keywords.md) giả định bạn đã hiểu các luật dưới đây.
@@ -11,11 +11,11 @@ Kiến trúc (process, TDS vs libpq, catalog, WAL): [internal.md](internal.md). 
 
 ## Mục lục
 
-- [1. Tổng quan \& triết lý](#1-tổng-quan--triết-lý)
+- [1. Tổng quan & triết lý](#1-tổng-quan--triết-lý)
 - [2. Ba lớp SQL](#2-ba-lớp-sql)
 - [3. Identifier](#3-identifier)
   - [3.1 Unquoted vs quoted](#31-unquoted-vs-quoted)
-  - [3.2 Folding \& độ dài](#32-folding--độ-dài)
+  - [3.2 Folding & độ dài](#32-folding--độ-dài)
   - [3.3 Prefix đặc biệt (SQL Server)](#33-prefix-đặc-biệt-sql-server)
   - [3.4 Phân giải tên object](#34-phân-giải-tên-object)
   - [3.5 CR/LF, encoding tên, `MULE_INTERNAL`](#35-crlf-encoding-tên-mule_internal)
@@ -24,30 +24,36 @@ Kiến trúc (process, TDS vs libpq, catalog, WAL): [internal.md](internal.md). 
   - [4.2 `GO` vs `;`](#42-go-vs-)
   - [4.3 Phạm vi biến qua batch](#43-phạm-vi-biến-qua-batch)
 - [5. Schema, catalog, search path](#5-schema-catalog-search-path)
-  - [5.1 SQL Server: default schema \& 3-part](#51-sql-server-default-schema--3-part)
+  - [5.1 SQL Server: default schema & 3-part](#51-sql-server-default-schema--3-part)
   - [5.2 PostgreSQL: `search_path`](#52-postgresql-search_path)
-  - [5.3 Cross-database \& FDW](#53-cross-database--fdw)
+  - [5.3 Cross-database & FDW](#53-cross-database--fdw)
 - [6. NULL — ba giá trị logic](#6-null--ba-giá-trị-logic)
+  - [6.0 Hình dung: NULL là “chưa biết”, không phải 0 hay chuỗi rỗng](#60-hình-dung-null-là-chưa-biết-không-phải-0-hay-chuỗi-rỗng)
   - [6.1 `WHERE` vs `CHECK`](#61-where-vs-check)
   - [6.2 `UNIQUE` + NULL](#62-unique--null)
 - [7. Case, collation, encoding](#7-case-collation-encoding)
-- [8. Parameter \& quoting](#8-parameter--quoting)
+- [8. Parameter & quoting](#8-parameter--quoting)
   - [8.1 Parameter](#81-parameter)
   - [8.2 Dynamic SQL](#82-dynamic-sql)
 - [9. Session SET](#9-session-set)
 - [10. Compatibility, PREVIEW, protocol](#10-compatibility-preview-protocol)
   - [10.1 Compat 170 vs PostgreSQL không compat](#101-compat-170-vs-postgresql-không-compat)
   - [10.2 `PREVIEW_FEATURES`](#102-preview_features)
-  - [10.3 `standard_conforming_strings` \& `escape_string_warning`](#103-standard_conforming_strings--escape_string_warning)
+  - [10.3 `standard_conforming_strings` & `escape_string_warning`](#103-standard_conforming_strings--escape_string_warning)
   - [10.4 TDS 8 / TLS 1.3 — client breaking](#104-tds-8--tls-13--client-breaking)
   - [10.5 Edition / SKU chỉ khi đụng SET / identifier](#105-edition--sku-chỉ-khi-đụng-set--identifier)
 - [11. Hai session — ví dụ làm việc](#11-hai-session--ví-dụ-làm-việc)
+  - [11.1 Folding tên khi port](#111-folding-tên-khi-port)
+  - [11.2 `search_path` vs default schema](#112-search_path-vs-default-schema)
+  - [11.3 FDW read-only vs linked server](#113-fdw-read-only-vs-linked-server)
+  - [11.4 `PREVIEW_FEATURES` kéo theo database](#114-preview_features-kéo-theo-database)
 - [12. Checklist nâng cấp (dialect / session)](#12-checklist-nâng-cấp-dialect--session)
-- [13. Best practices \& checklist](#13-best-practices--checklist)
+- [13. Best practices & checklist](#13-best-practices--checklist)
 - [14. Bẫy khi review](#14-bẫy-khi-review)
 - [15. Version gates](#15-version-gates)
-- [Phụ lục A. `@@OPTIONS` / GUC](#phụ-lục-a-options--guc--soi-session-khi-chạy-được-trên-máy-tôi)
-- [Phụ lục B. Identifier CR/LF](#phụ-lục-b-identifier-crlf--query-catalog-trước-pg_upgrade)
+- [Phụ lục A. `@@OPTIONS` / GUC — soi session khi “chạy được trên máy tôi”](#phụ-lục-a-options--guc--soi-session-khi-chạy-được-trên-máy-tôi)
+- [Phụ lục B. Identifier CR/LF — query catalog trước `pg_upgrade`](#phụ-lục-b-identifier-crlf--query-catalog-trước-pg_upgrade)
+- [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
 
@@ -57,7 +63,7 @@ Hai engine cùng “SQL” nhưng khác nhau ở bốn chỗ hay gây bug khi po
 
 | Trục | SQL Server | PostgreSQL |
 |---|---|---|
-| Tên unquoted | Không phân biệt hoa/thường (collation); lưu theo cách viết | **Fold về chữ thường** |
+| Tên unquoted | So theo collation (CI hoặc CS); lưu theo cách viết | **Fold về chữ thường** |
 | Kết thúc lệnh | `;` khuyến nghị; `GO` là lệnh *client* | `;` bắt buộc giữa statement |
 | Catalog | 4-part: server.database.schema.object | Một statement = một database; cross-DB qua FDW |
 | Session | Hàng chục `SET ANSI_*` ảnh hưởng parser/index | `search_path`, `TimeZone`, timeout |
@@ -93,7 +99,7 @@ OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY;
 
 - `FETCH` portable; `TOP` / `LIMIT` đọc nhanh hơn với người quen dialect — chọn một convention trong repo.
 - Lớp extension **không** có trên engine kia: `VECTOR_SEARCH` (SQL Server, **PREVIEW**) ≠ `pgvector` operator `<=>`.
-- SQL/PGQ (`GRAPH_TABLE`) là PostgreSQL **19** (**beta** đến GA ~10/2026) — [select.md](select.md), [ddl.md](ddl.md), [keywords.md](keywords.md). SQL Server Graph cũ (`NODE`/`EDGE`) **không** phải SQL/PGQ.
+- SQL/PGQ đã bị rút khỏi PostgreSQL 19 trong [Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). Dùng JOIN/recursive CTE; SQL Server NODE/EDGE/MATCH thuộc SQL Graph riêng.
 
 Hai session — cùng “10 hàng mới nhất”, khác guarantee nếu thiếu `ORDER BY`:
 
@@ -147,7 +153,7 @@ CREATE TABLE "Orders" (id int);   -- bảng "Orders"
 
 ### 3.2 Folding & độ dài
 
-PostgreSQL folding là **lowercase Unicode**, không phải case-fold locale. `"İ"` (I chấm Turkish) quoted khác `İ` unquoted.
+PostgreSQL fold identifier không quote về chữ thường; không coi đây là Unicode case-fold đầy đủ. Quy tắc với ký tự ngoài ASCII phụ thuộc encoding/implementation. Dùng tên ASCII lowercase để tránh lệch giữa tool và server.
 
 SQL Server so sánh identifier unquoted theo collation database (thường CI). `CREATE TABLE Foo` rồi `FROM FOO` thành công; catalog `sys.tables.name` vẫn là `Foo` nếu bạn viết vậy.
 
@@ -258,7 +264,7 @@ SQL Server: tên object không chứa một số ký tự điều khiển theo i
 SELECT 1; -- trailing
 ```
 
-Lồng `/* */`: SQL Server **không** lồng; `/* outer /* inner */ vẫn đóng sớm`. PostgreSQL **lồng** được.
+Cả SQL Server và PostgreSQL đều hỗ trợ comment `/* ... */` lồng nhau. Mỗi `/*` cần một `*/` tương ứng, kể cả khi chuỗi đó nằm trong đoạn SQL đã comment. [T-SQL block comment](https://learn.microsoft.com/en-us/sql/t-sql/language-elements/slash-star-comment-transact-sql?view=sql-server-ver17).
 
 `--` chạy đến hết dòng. Chuỗi chứa `--` trong literal không phải comment.
 
@@ -271,7 +277,7 @@ Hai session — comment lồng khi generate SQL:
 
 ```text
 T1 (SS):  /* meta /* generated */ still-code-here */ SELECT 1;
-          -- parser đóng ở inner */; still-code-here là token
+          -- lồng: cả khối là comment; SELECT 1 chạy
 T2 (PG):  /* meta /* generated */ still-code-here */ SELECT 1;
           -- lồng: cả khối là comment; SELECT 1 chạy
 ```
@@ -644,11 +650,11 @@ ALTER DATABASE Sales SET COMPATIBILITY_LEVEL = 170;
 ALTER DATABASE SCOPED CONFIGURATION SET PREVIEW_FEATURES = ON;  -- SQL Server 2025
 ```
 
-Công tắc **database scoped**. Bật vector index / `VECTOR_SEARCH`, fuzzy string, Change Event Streaming, một số JSON on-prem. **Không** bật production trừ khi chấp nhận đổi theo CU.
+Công tắc **database scoped** dành cho vector index/VECTOR_SEARCH, fuzzy string và Change Event Streaming; JSON 2025 hiện đã GA. **Không** bật production trừ khi chấp nhận đổi theo CU.
 
-Azure SQL một số JSON/vector đã GA trong khi on-prem còn **PREVIEW** — đừng copy runbook cloud. Bật “cho vector” kéo **cả** feature preview trên database đó, không phải từng lệnh.
+JSON 2025 hiện đã GA; vector index vẫn PREVIEW trên SQL Server 2025. Đối chiếu từng API và nền tảng trước khi copy runbook cloud. Bật “cho vector” kéo **cả** feature preview trên database đó, không phải từng lệnh.
 
-PostgreSQL 19: không có flag tương đương. Cả major đang **beta** đến GA ~10/2026 — SQL/PGQ, `REPACK`, `WAIT FOR`, `FOR PORTION OF` có thể chỉnh trước GA.
+PostgreSQL 19 không có flag PREVIEW_FEATURES. Cả major đang beta; REPACK và WAIT FOR còn trong Beta 4, còn SQL/PGQ và FOR PORTION OF đã bị rút. Theo dõi release notes trước khi nâng major.
 
 ### 10.3 `standard_conforming_strings` & `escape_string_warning`
 
@@ -750,7 +756,7 @@ Chỉ mục **parser / session / client / identifier**. Optimizer/HA/SKU đầy 
 1. **Driver TDS 8 / TLS 1.3** (ODBC, JDBC, sqlcmd, bcp, linked server, replication, log shipping, PolyBase) — client cũ đứt sau patch, không phải `SET ANSI`.
 2. **Nâng engine, giữ compat 160** đo Query Store — 170 đổi plan (DOP/OPPO), không đổi folding tên.
 3. **Compat 170 khi ổn** — IQP mặc định ON; không giả “script cũ parse fail”.
-4. **`PREVIEW_FEATURES` off production** — vector index / CES / fuzzy / nhiều JSON on-prem.
+4. **`PREVIEW_FEATURES` off production** — vector index / CES / fuzzy; JSON GA không cần flag này.
 5. **So `SET` options app vs SSMS** — `QUOTED_IDENTIFIER` / `ANSI_NULLS` gắn proc; indexed view fail lúc deploy.
 6. **Pool reset** — `#temp`, `SESSION_CONTEXT`, `USE` không leak request sau.
 7. **SKU staging = prod** (Standard vs Enterprise Developer) — chỉ khi hint/`ONLINE`/RG; identifier không đổi.
@@ -763,7 +769,7 @@ Chỉ mục **parser / session / client / identifier**. Optimizer/HA/SKU đầy 
 4. **Đổi encoding `MULE_INTERNAL` trước** — encoding gỡ.
 5. **Test `postgres_fdw` trong txn `READ ONLY`** — ghi remote fail; ETL phải txn read-write.
 6. **`search_path` / `DISCARD ALL` trên pool** — không đổi so 18, nhưng custom GUC vẫn leak.
-7. **JIT / `max_locks_per_transaction` 128** — GUC session/cluster; nhân đôi setting cũ nếu muốn cùng số lock. SQL/PGQ/`REPACK` = **beta**, không schema prod sớm.
+7. **JIT / `max_locks_per_transaction` 128** — GUC session/cluster; kiểm ngân sách shared memory khi đổi cấu hình. REPACK còn trong 19 Beta 4; SQL/PGQ đã bị rút.
 
 ---
 
@@ -891,3 +897,12 @@ T2 (pg_upgrade → 19): từ chối cluster cho đến khi đổi tên
 ```
 
 `MULE_INTERNAL`: `SELECT datcollate, encoding FROM pg_database;` — đổi encoding **trước** đêm cutover, không SET session.
+
+---
+
+## Nguồn chính thức
+
+Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+
+- [PostgreSQL lexical structure](https://www.postgresql.org/docs/19/sql-syntax-lexical.html)
+- [T-SQL nested block comments](https://learn.microsoft.com/en-us/sql/t-sql/language-elements/slash-star-comment-transact-sql?view=sql-server-ver17)
