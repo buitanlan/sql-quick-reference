@@ -5,7 +5,7 @@
 
 SQL xử lý đồng thời bằng **transaction**: một đơn vị công việc hoặc thành công hết (`COMMIT`) hoặc không để lại hiệu ứng (`ROLLBACK`). Isolation quyết định *mình thấy gì của người khác* và *người khác thấy gì của mình* trước khi commit. Hai engine hiện thực isolation khác nhau (khóa vs MVCC/SSI) nên không thể copy `SET TRANSACTION ISOLATION LEVEL` rồi cho rằng hành vi giống nhau.
 
-Khóa, wait, deadlock, tempdb/xmin: [concurrency.md](concurrency.md). Kiến trúc MVCC/WAL: [internal.md](internal.md). Temporal leftover: [constraints.md](constraints.md), [dml.md](dml.md).
+Khóa, wait, deadlock, tempdb/xmin: [concurrency.md](concurrency.md). Kiến trúc MVCC/WAL: [internal.md](internal.md). Ràng buộc & DML đồng thời: [constraints.md](constraints.md), [dml.md](dml.md).
 
 ---
 
@@ -147,7 +147,7 @@ COMMIT;
 ROLLBACK;
 ```
 
-PostgreSQL nhận `BEGIN ISOLATION LEVEL … READ ONLY` / `READ WRITE` / `DEFERRABLE` ngay lúc mở. SQL Server tách: `BEGIN TRAN` rồi `SET TRANSACTION ISOLATION LEVEL` (và `SET TRANSACTION READ ONLY` **không** có trên T-SQL theo nghĩa PG).
+PostgreSQL nhận `BEGIN ISOLATION LEVEL … READ ONLY` / `READ WRITE` / `DEFERRABLE` ngay lúc mở (phạm vi **transaction-level**, tự kết thúc cùng txn). SQL Server tách riêng: nên đặt `SET TRANSACTION ISOLATION LEVEL …` **trước** `BEGIN TRAN` và cảnh giác phạm vi **session-level** — giữ nguyên sang các txn kế tiếp trên cùng connection nên rất dễ rò rỉ trong connection pool nếu không reset (và `SET TRANSACTION READ ONLY` **không** có trên T-SQL theo nghĩa PG).
 
 ### 2.1 `BEGIN` T-SQL không phải transaction
 
@@ -205,7 +205,7 @@ SELECT pg_current_xact_id_if_assigned();  -- NULL nếu txn mới chưa xin xid
 BEGIN TRAN PayInvoice;
 -- …
 COMMIT TRAN PayInvoice;
--- ROLLBACK TRAN PayInvoice;   -- chỉ đúng nếu đó là savepoint hoặc tên khớp mức hiện tại
+-- ROLLBACK TRAN PayInvoice;   -- chỉ nhận tên savepoint hoặc tên txn NGOÀI CÙNG (truyền tên inner nested txn báo lỗi Msg 6401)
 ```
 
 Tên txn **không** tạo nested thật. `ROLLBACK TRAN PayInvoice` khi `PayInvoice` là tên txn ngoài cùng = rollback cả stack. Nhầm tên savepoint với tên txn = rollback quá tay.
@@ -281,7 +281,7 @@ SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 SET TRANSACTION READ ONLY DEFERRABLE;   -- SSI read-only: chờ snapshot “an toàn”, ít abort
 ```
 
-`SET TRANSACTION` phải là **lệnh đầu** trong txn (sau `BEGIN`, trước DML). Đặt sau `SELECT` → lỗi hoặc không áp dụng như ý.
+Trên PostgreSQL, `SET TRANSACTION` có phạm vi **transaction-level** và phải là **lệnh đầu** trong txn (sau `BEGIN`, trước mọi truy vấn/DML — đặt sau `SELECT` báo lỗi `25001`). Ngược lại, trên SQL Server, `SET TRANSACTION ISOLATION LEVEL` có phạm vi **session-level**: nên đặt **trước** `BEGIN TRAN` (riêng `SNAPSHOT` sẽ lỗi nếu đổi sau khi đã truy cập dữ liệu) và **lưu ý rò rỉ connection pool** — isolation mới dính lại cho các request sau dùng lại session đó nếu không reset.
 
 `READ ONLY DEFERRABLE` (PG, SERIALIZABLE): session có thể **đợi** đến khi có snapshot không conflict, rồi đọc. Không ghi. Không tương đương SS `SNAPSHOT` + hint.
 
@@ -292,9 +292,10 @@ SET TRANSACTION READ ONLY DEFERRABLE;   -- SSI read-only: chờ snapshot “an t
 | Hiện tượng | Ý nghĩa | RU | RC | RR | SR |
 |---|---|---|---|---|---|
 | Dirty read | Đọc dữ liệu **chưa commit** của txn khác | SS: có · PG: không | không | không | không |
-| Non-repeatable read | Cùng hàng, đọc 2 lần ra 2 giá trị | có | có (RC) | không | không |
+| Non-repeatable read | Cùng hàng, đọc 2 lần ra 2 giá trị | có | có | không | không |
 | Phantom | Lần 2 `SELECT` thấy hàng **mới** khớp predicate | có | có | SS: có · PG: không | không |
-| Write skew | Hai txn đọc tập chồng, ghi phần không chồng, cả hai commit — invariant vỡ | — | có | có (trừ SSI) | SSI / range-lock |
+| Lost update | Hai txn cùng đọc một hàng rồi ghi đè lẫn nhau | có | có (cả RCSI) | SS: deadlock/chặn · PG: abort `40001` | không (abort/deadlock) |
+| Write skew | Hai txn đọc tập chồng, ghi phần không chồng, cả hai commit — invariant vỡ | có | có | có (PG RR & SS `SNAPSHOT`; SS RR deadlock nếu `UPDATE` hàng đã đọc, vẫn bị nếu qua `INSERT`) | không (PG SSI / SS range-lock) |
 
 ### 5.1 Non-repeatable — ví dụ
 
@@ -396,9 +397,9 @@ Chặn bằng gì:
 | Cách | Cơ chế | Nhược |
 |---|---|---|
 | PG `SERIALIZABLE` (SSI) | Engine nhớ “T1 đọc tập active, T2 ghi Bob ∈ tập đó” → abort một bên `40001` | App phải retry; không phải lock range |
-| SS `SERIALIZABLE` | Key-range / predicate lock trên `active=1` | Predicate phức tạp có thể **không** khóa đủ — test |
+| SS `SERIALIZABLE` | Key-range / S lock trên tập `active = 1` | Thiếu index phù hợp sẽ **khóa rộng hơn (over-lock / table lock)** và tăng deadlock `1205` (không phải khóa thiếu) |
 | Constraint / một hàng `on_call_count` | Một chỗ ghi, unique/check | Đổi schema |
-| `UPDATE … WHERE (SELECT COUNT(*) FILTER (WHERE active)) > 1` | Atomic trên engine | Vẫn cần isolation/khóa đúng; test race |
+| `UPDATE on_call SET active = false WHERE doctor = 'Ada' AND (SELECT COUNT(*) FROM on_call WHERE active) > 1` | Kiểm tra trong cùng câu `UPDATE` | **Vẫn bị write skew ở `READ COMMITTED`** (cả 2 cùng thấy `COUNT = 2`) — vẫn cần khóa cả tập hoặc `SERIALIZABLE` |
 
 RCSI/SI **không** chặn write skew: cả hai thấy photocopy “còn 2”, ghi hai hàng khác, commit. `UPDLOCK` trên *một* bác sĩ cũng không đủ — phải khóa **cả tập** đang đọc, hoặc SSI, hoặc một counter.
 
@@ -425,7 +426,7 @@ Hệ quả:
 
 ### 7.3 SNAPSHOT isolation
 
-Cả txn thấy một snapshot lúc `BEGIN` (lần đầu đọc). Ghi đụng hàng người khác đã commit → error **3960**, phải rollback/retry. Gần PostgreSQL `REPEATABLE READ`.
+Cả txn thấy một snapshot được lấy ở **câu lệnh truy cập dữ liệu đầu tiên** sau `BEGIN TRAN` (không phải ngay tại `BEGIN TRAN`). Ghi đụng hàng người khác đã commit → error **3960**, phải rollback/retry. Nếu session khác chạy **DDL** (`ALTER TABLE`, `CREATE/REBUILD INDEX`, `TRUNCATE`…) trên bảng mà txn `SNAPSHOT` đang truy cập, SQL Server ném lỗi **3961** (*object modified by a concurrent DDL statement*). Gần PostgreSQL `REPEATABLE READ`.
 
 ```sql
 SET TRANSACTION ISOLATION LEVEL SNAPSHOT;
@@ -437,7 +438,7 @@ Cần `ALLOW_SNAPSHOT_ISOLATION ON`. Khác RCSI: RCSI chỉ áp cho statement �
 
 `ACCELERATED_DATABASE_RECOVERY` (2019+, **tempdb ADR = 2025**):
 
-- Recovery nhanh (sLRU + PVS): rollback txn lớn không quét log cũ như trước.
+- Recovery nhanh (**sLog + PVS**): rollback txn lớn không quét log cũ như trước.
 - Version store **trong user DB** (PVS) thay vì `tempdb` khi RCSI/SI — giảm tranh tempdb.
 - **2025:** ADR trong **tempdb** — recovery temp table, log truncate mạnh hơn.
 
@@ -455,7 +456,7 @@ Dirty read, đọc hai lần một hàng, bỏ hàng đang move page. **Không**
 
 ### 7.6 Isolation không thay constraint
 
-`NOLOCK` vẫn fail FK/CHECK lúc ghi. `SNAPSHOT` vẫn đụng unique lúc commit. Isolation ≠ “tắt rule”.
+`NOLOCK` vẫn fail FK/CHECK lúc ghi. Trên SQL Server, `UNIQUE` / `PK` luôn kiểm tra **ngay lúc chạy statement** (không đợi `COMMIT` — kể cả ở `SNAPSHOT`, lỗi `2627`/`2601` văng ra ngay tại `INSERT`/`UPDATE`). Isolation ≠ “tắt rule”.
 
 ---
 
@@ -482,7 +483,7 @@ HOT update (cùng page, không đụng cột index): bản mới cùng page, ind
 
 ### 8.1 Snapshot theo level
 
-- **READ COMMITTED:** mỗi *statement* lấy snapshot mới. Sau khi đợi lock, statement **re-check** predicate trên bản mới — `UPDATE` có thể “mất” hàng vừa bị người khác đổi/xóa.
+- **READ COMMITTED (cơ chế `EvalPlanQual` / EPQ):** mỗi *statement* lấy snapshot mới. Khi `UPDATE`/`DELETE`/`SELECT FOR UPDATE` đụng tuple vừa bị txn khác sửa và commit trong lúc đợi lock, PG chạy **EvalPlanQual (EPQ)** để re-fetch phiên bản mới nhất của tuple và kiểm tra lại `WHERE` — nếu không còn khớp thì bỏ qua hàng. **Lưu ý anomaly với `JOIN` / subquery:** EPQ chỉ re-fetch tuple mới của bảng mục tiêu (và các bảng join có row mark), **không** chạy lại subquery/aggregate vốn đọc theo snapshot ban đầu của statement, nên có thể tạo kết quả pha trộn khi `WHERE` chứa subquery.
 - **REPEATABLE READ / SERIALIZABLE:** một snapshot cho cả txn. Hàng bị người khác đổi → `could not serialize access due to concurrent update` (`40001`).
 
 ```
@@ -492,7 +493,7 @@ SQLSTATE: 40001
 
 Retry cả transaction từ đầu (đọc lại). Chia range bằng nhiều DML ở RC cần khóa và retry toàn transaction; xem [dml.md](dml.md) và [constraints.md](constraints.md).
 
-SSI thêm *si* (serialization anomaly): write skew abort dù không đụng cùng tuple. Mã vẫn `40001`, message khác (`reason code` trong log: `pivot` / `rw-conflict`).
+SSI (**Serializable Snapshot Isolation**) phát hiện serialization anomaly: write skew abort dù không đụng cùng tuple. Mã vẫn `40001`, message khác (chi tiết rw-conflict trong log).
 
 ### 8.2 Visibility & vacuum
 
@@ -543,16 +544,19 @@ COMMIT;                     -- 1 và 2 được commit — PK fail bị nuốt
 ```
 
 ```sql
-SET XACT_ABORT ON;          -- khuyến nghị: lỗi → rollback cả txn
+-- 1) XACT_ABORT ON NGOÀI TRY...CATCH: tự rollback ngay và dừng batch
+SET XACT_ABORT ON;          -- khuyến nghị
 BEGIN TRAN;
 INSERT …;
-UPDATE …;                   -- nếu fail, cả txn doomed (XACT_STATE = -1)
-COMMIT;                     -- fail; phải ROLLBACK
+UPDATE …;                   -- nếu fail: tự ROLLBACK ngay và dừng batch;
+                            -- KHÔNG vào XACT_STATE = -1 và KHÔNG chạy tới COMMIT
+COMMIT;
 ```
 
-Try/catch:
+Trong `TRY...CATCH`, lỗi lúc `XACT_ABORT ON` sẽ nhảy vào `CATCH` với trạng thái **doomed (`XACT_STATE() = -1`)** — bắt buộc `ROLLBACK`:
 
 ```sql
+-- 2) XACT_ABORT ON TRONG TRY...CATCH: vào CATCH với XACT_STATE() = -1 (doomed)
 SET XACT_ABORT ON;
 BEGIN TRY
     BEGIN TRAN;
@@ -560,7 +564,7 @@ BEGIN TRY
     COMMIT;
 END TRY
 BEGIN CATCH
-    IF XACT_STATE() <> 0 ROLLBACK;
+    IF XACT_STATE() <> 0 ROLLBACK;   -- COMMIT khi XACT_STATE() = -1 báo lỗi 3930
     THROW;
 END CATCH;
 ```
@@ -579,15 +583,15 @@ INSERT INTO t VALUES (2);
 COMMIT;
 ```
 
-PL/pgSQL `BEGIN … EXCEPTION` tạo savepoint ẩn quanh block — nuốt lỗi *trong function*, không tự commit.
+PL/pgSQL `BEGIN … EXCEPTION` tạo **subtransaction (savepoint ẩn)** quanh block — nuốt lỗi *trong function*, không tự commit. **Bẫy hiệu năng `SubtransSLRU` (> 64 subtransaction):** mỗi backend PG chỉ cache tối đa **64 subtransaction XID** trong `PGPROC`; khi một giao dịch mở > 64 savepoint hoặc vòng lặp chạy `BEGIN … EXCEPTION` có ghi dữ liệu, cache tràn (`suboverflowed`) ép mọi backend khác tra cứu SLRU (`pg_subtrans`) dưới `SubtransSLRU` lock — gây nghẽn toàn cluster (đặc biệt nặng trên standby). Tránh đặt `BEGIN … EXCEPTION` trong vòng lặp lớn; thay bằng `INSERT … ON CONFLICT` hoặc kiểm tra trước.
 
 ### 9.2 Bảng so sánh abort
 
 | | SQL Server `XACT_ABORT OFF` | SQL Server `XACT_ABORT ON` | PostgreSQL |
 |---|---|---|---|
-| Unique/FK fail | Abort statement | Abort txn (doomed) | Abort txn |
-| Lệnh sau lỗi | Chạy tiếp | Không (cần rollback) | Lỗi “aborted” |
-| `CATCH`/`EXCEPTION` | Có; phải tự rollback | Doomed; chỉ rollback | Savepoint / `EXCEPTION` |
+| Unique/FK fail | Abort statement | Tự rollback & dừng batch (hoặc doomed `-1` trong `TRY...CATCH`) | Abort txn |
+| Lệnh sau lỗi | Chạy tiếp | Không (ngoài `TRY` đã rollback; trong `CATCH` chỉ `ROLLBACK`) | Lỗi “aborted” |
+| `CATCH`/`EXCEPTION` | Có; phải tự rollback | Doomed (`-1`); chỉ `ROLLBACK` | Savepoint / `EXCEPTION` |
 | Batch compile fail | Tùy | Tùy | Cả script (psql) tùy `ON_ERROR_STOP` |
 
 Port proc SS “insert thử, nếu trùng thì update” **không** `XACT_ABORT` sang PG: phải `ON CONFLICT` hoặc savepoint — đừng `INSERT` rồi bắt exception ở client rồi `UPDATE` cùng txn chưa rollback.
@@ -762,6 +766,11 @@ Delayed durability / `synchronous_commit=off`: `COMMIT` trả về, crash có th
 
 SQL Server delayed durability + AG: đọc Learn (không bịa tương tác optimized locking).
 
+**Two-Phase Commit (2PC / Prepared Transactions):**
+
+- **PostgreSQL:** hỗ trợ 2PC native qua `PREPARE TRANSACTION '<gid>'` (yêu cầu `max_prepared_transactions > 0`, mặc định `0`), sau đó hoàn tất bằng `COMMIT PREPARED '<gid>'` hoặc `ROLLBACK PREPARED '<gid>'`. **Bẫy orphaned prepared transaction:** nếu coordinator bên ngoài crash mà không kết thúc, prepared transaction tồn tại bền vững qua cả restart server, giữ chặt toàn bộ **lock** và ghim **`xmin` horizon** gây bloat/wraparound — bắt buộc giám sát `pg_prepared_xacts`.
+- **SQL Server:** dùng `BEGIN DISTRIBUTED TRANSACTION` điều phối qua **MSDTC** (Microsoft Distributed Transaction Coordinator) / XA; giao dịch in-doubt giữ lock và chặn cắt log (`log_reuse_wait_desc`) cho đến khi MSDTC giải quyết hoặc DBA dọn tay (`KILL '<UOW>'`). Kiến trúc microservices thường ưu tiên Outbox pattern thay vì 2PC.
+
 ---
 
 ## 15. Worked examples
@@ -793,7 +802,7 @@ BEGIN TRAN;
 INSERT INTO dbo.Users (Email) VALUES (N'a@x.com');  -- fail 2627 nếu trùng
 -- @@TRANCOUNT vẫn 1 — NGUY HIỂM nếu COMMIT
 ROLLBACK;
--- Đúng: MERGE / IF NOT EXISTS + UPDLOCK / catch + rollback
+-- Đúng: MERGE ... WITH (HOLDLOCK) / IF NOT EXISTS (...) WITH (UPDLOCK, HOLDLOCK) / XACT_ABORT ON + CATCH ROLLBACK
 
 -- PostgreSQL
 BEGIN;
@@ -887,7 +896,7 @@ Retry cả khối từ `SELECT`.
 | Optimized locking | **2025** (on-prem off mặc định; cần ADR; LAQ cần thêm RCSI) | — |
 | `WAIT FOR LSN` + MODE/TIMEOUT/NO_THROW | — (`WAITFOR` = sleep) | **19** |
 | SSI | — | 9.1+ |
-| `COMMIT AND CHAIN` | — | 10+ |
+| `COMMIT AND CHAIN` | — | 12+ |
 | FDW thừa READ ONLY / DEFERRABLE | — | **19** |
 | Deadlock / serialize retry | **1205** / **3960** | **40P01** / **40001** |
 

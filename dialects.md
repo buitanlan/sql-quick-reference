@@ -131,8 +131,9 @@ CREATE TABLE "Order" ("Id" int NOT NULL);
 | | SQL Server | PostgreSQL |
 |---|---|---|
 | Unquoted | Case-insensitive theo collation DB; lưu *như đã viết* | **Fold về chữ thường** |
-| Quoted | `[name]` hoặc `"name"` | chỉ `"name"` |
-| Ký tự hợp lệ (unquoted) | chữ, `_`, `@`, `#`, `$`; bắt đầu bằng chữ / `_` / `@` / `#` | chữ, `_`, số, `$`; **không** bắt đầu bằng số |
+| Quoted | `[name]` hoặc `"name"` | chỉ `"name"` (và `U&"..."` cho Unicode) |
+| Escape trong quoted | `""` trong `"..."`; `]]` trong `[...]` | `""` trong `"..."` |
+| Ký tự hợp lệ (unquoted) | chữ, `0-9`, `_`, `@`, `#`, `$`; bắt đầu bằng chữ / `_` / `@` / `#` | chữ, `0-9`, `_`, `$`; **không** bắt đầu bằng số hoặc `$` |
 | Max length | 128 (`sysname`) | 63 byte mặc định (`NAMEDATALEN − 1`) |
 
 ```sql
@@ -141,13 +142,17 @@ CREATE TABLE Orders (id int);     -- bảng "orders"
 CREATE TABLE "Orders" (id int);   -- bảng "Orders"
 -- SELECT * FROM Orders;          -- đọc "orders"
 -- SELECT * FROM "Orders";        -- đọc "Orders"
+
+-- Escape dấu quote trong identifier & Unicode identifier (PG)
+-- SQL Server: CREATE TABLE [a]]b] ([c""d] int);  hoặc  CREATE TABLE "a""b" ("c""d" int);
+-- PostgreSQL: CREATE TABLE "a""b" (id int);     -- Unicode: SELECT * FROM U&"d\0061ta";
 ```
 
 **Ghi chú:**
 
 - Copy `Orders` từ SSMS sang `psql` mà không quote → thành `orders`. Nếu dump PG đã có `"Orders"` và `orders`, bạn có hai bảng.
 - `[Order]` trên SQL Server **không** tự thành `"Order"` trên PostgreSQL — tool port phải quote có chủ đích.
-- Tránh tên cần quote (`user`, `order`, `group`) — [keywords.md § hay đụng](keywords.md#21-hay-đụng-identifier).
+- Tránh tên cần quote (`user`, `order`, `group`) — [keywords.md § hay đụng](keywords.md#18-hay-đụng-identifier).
 - `QUOTED_IDENTIFIER OFF`: `"Orders"` là *chuỗi* T-SQL, không phải identifier. Proc có indexed view / computed persisted / XML index **đòi** `ON` — §9.
 
 ### 3.2 Folding & độ dài
@@ -268,8 +273,8 @@ Cả SQL Server và PostgreSQL đều hỗ trợ comment `/* ... */` lồng nhau
 `--` chạy đến hết dòng. Chuỗi chứa `--` trong literal không phải comment.
 
 ```sql
-SELECT 'http://example.com';   -- URL an toàn: nằm trong literal
--- SELECT http://x;            -- phần sau -- bị nuốt nếu không quote
+SELECT 'a--b';                 -- an toàn: -- nằm trong literal
+-- SELECT a--b;                -- phần sau -- bị nuốt thành comment nếu không quote
 ```
 
 Hai session — comment lồng khi generate SQL:
@@ -311,7 +316,7 @@ WITH cte AS (SELECT 1 AS x)
 SELECT * FROM cte;                  -- đúng
 ```
 
-`sqlcmd -v` biến `$(name)` cũng là *client*. Đưa file đó vào Dapper nguyên văn → `$(name)` thành identifier.
+`sqlcmd -v` biến `$(name)` cũng là *client*. Đưa file đó vào Dapper nguyên văn → gây **syntax error** (driver không thay thế biến `sqlcmd`).
 
 ### 4.3 Phạm vi biến qua batch
 
@@ -378,7 +383,8 @@ SELECT * FROM t;                      -- public.t
 
 **Ghi chú:**
 
-- `pg_catalog` luôn được tìm (trước hoặc ngầm). Đặt `search_path` độc hại + `SECURITY DEFINER` = classic privilege escalation — [routines.md](routines.md).
+- `pg_catalog` luôn được tìm **trước tiên** (trừ khi liệt kê tường minh ở vị trí sau trong `search_path`); `pg_temp` luôn tìm trước cho table/type/view nhưng **không** cho function/operator (trừ khi chỉ định tường minh `pg_temp`). Đặt `search_path` độc hại + `SECURITY DEFINER` = classic privilege escalation — [routines.md](routines.md).
+- **PG 15+:** quyền `CREATE` trên schema `public` đã bị thu hồi khỏi `PUBLIC` (mặc định chỉ chủ DB tạo được object trong `public`) — giảm rủi ro object shadowing; migration chạy bằng role thường cần schema riêng hoặc cấp quyền tường minh.
 - App production: `SET search_path TO app, public` lúc connect **hoặc** luôn schema-qualify (`app.orders`).
 - Đừng tạo schema `dbo` “cho giống SQL Server” trừ khi port có chủ đích.
 - `SET LOCAL search_path` chỉ trong transaction hiện tại; `SET` session sống đến hết connection.
@@ -469,21 +475,23 @@ Muốn cấm NULL: `NOT NULL` tường minh, không dựa vào `CHECK (qty > 0)`
 
 ### 6.2 `UNIQUE` + NULL
 
-`NULL ≠ NULL` nên hai hàng `(NULL)` không “trùng” theo mặc định.
+Theo chuẩn ANSI (`NULL ≠ NULL`), hai hàng `(NULL)` không “trùng” — nhưng SQL Server **không** theo mặc định này.
 
-| Engine | Nhiều NULL trong UNIQUE |
+| Engine | Hành vi `UNIQUE` với `NULL` |
 |---|---|
-| SQL Server | Cho phép nhiều NULL |
-| PostgreSQL | Cho phép nhiều NULL; `UNIQUE NULLS NOT DISTINCT` (PG 15+) cấm |
-| SQL Server “cấm nhiều NULL” | Filtered unique index `WHERE col IS NOT NULL` **không** cấm nhiều NULL — NULL vốn không vào index đó. Muốn tối đa một NULL: filtered `WHERE col IS NULL` kiểu trick hoặc computed column |
+| SQL Server (mặc định) | **Chỉ cho tối đa 1 `NULL`** (coi `NULL = NULL`, tương đương `NULLS NOT DISTINCT`; chèn `NULL` thứ 2 báo lỗi `2627`/`2601`) |
+| SQL Server (cho nhiều `NULL`) | Tạo filtered unique index: `CREATE UNIQUE INDEX uq_t_email ON dbo.T(Email) WHERE Email IS NOT NULL;` |
+| PostgreSQL | Mặc định **cho nhiều `NULL`** (`NULLS DISTINCT`); `UNIQUE NULLS NOT DISTINCT` (**PG 15+**) chỉ cho tối đa 1 `NULL` |
 
 Hai session — unique nullable:
 
 ```text
 T1: INSERT INTO t (email) VALUES (NULL); COMMIT;
 T2: INSERT INTO t (email) VALUES (NULL); COMMIT;
--- Mặc định cả hai: OK (hai NULL)
--- PG UNIQUE NULLS NOT DISTINCT: T2 lỗi unique
+-- SQL Server (UNIQUE mặc định): T2 lỗi unique (2627/2601)
+-- SQL Server (filtered WHERE email IS NOT NULL): OK (nhiều NULL)
+-- PostgreSQL (mặc định): OK (nhiều NULL)
+-- PostgreSQL (UNIQUE NULLS NOT DISTINCT): T2 lỗi unique
 ```
 
 ---
@@ -504,14 +512,14 @@ SELECT CASE WHEN N'A' = N'a' THEN 1 ELSE 0 END;   -- 1 nếu CI
 -- PostgreSQL: encoding cluster (thường UTF8); collation ICU / libc
 SHOW server_encoding;
 SHOW lc_collate;
--- PG 15+: ICU collation DETERMINISTIC = false → so khớp nondeterministic (case-insensitive)
+-- PG 12+: ICU collation deterministic = false → so khớp nondeterministic (case-insensitive); PG 15+ thêm ICU default cấp cluster/DB
 CREATE COLLATION ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
 ```
 
 **Ghi chú:**
 
 - Index btree phụ thuộc collation. Đổi collation cột = rebuild index.
-- Nondeterministic collation (PG ICU / một số SQL Server) **cấm** trên unique/PK hoặc hạn chế — đọc docs trước khi dùng làm PK chuỗi.
+- Nondeterministic ICU collation trên PG **vẫn dùng bình thường** cho `UNIQUE`/`PK`/B-tree; hạn chế nằm ở pattern matching / regex (`LIKE` không hỗ trợ cho tới **PG 18+**, một số hàm chuỗi/regex bị cấm).
 - SQL Server `LIKE` + CI: `'a' LIKE '[A-Z]'` có thể true. PostgreSQL `LIKE` không có character class — [operators.md](operators.md).
 - Encoding SQL Server: `varchar` theo code page collation; `nvarchar` UTF-16. PostgreSQL: mọi text theo encoding DB (UTF8). Đừng map `varchar` SQL Server → `varchar` PG rồi giả định byte length giống nhau.
 - SQL Server 2025: Chinese collation GB18030-2022 (compat **160+**) — chỉ khi locale cần. PG 19: Unicode 17.0.0; GB18030 encoding 2022. Không đổi identifier folding.
@@ -549,7 +557,7 @@ EXECUTE q(1);
 -- Named (:id) là client (Npgsql, JDBC) — không phải parser server trừ dialect riêng
 ```
 
-**Ghi chú:** Literal không `N` trên SQL Server CI/code-page có thể **mất ký tự Unicode** khi gán vào `nvarchar` — [literals.md](literals.md). PostgreSQL `'foo'` kiểu *unknown* đến khi neo — `PREPARE p AS SELECT $1` lỗi thiếu kiểu. SQL Server 2025: `sp_executesql` serialize compile (giảm compilation storm) — không đổi luật quoting; chi tiết routine: [routines.md](routines.md), kiến trúc plan cache: [internal.md](internal.md).
+**Ghi chú:** Literal không có tiền tố `N` trên SQL Server dùng collation code page non-UTF8 (không liên quan CI/CS) có thể **mất ký tự Unicode** (thành `?`) khi gán vào `nvarchar` — [literals.md](literals.md). PostgreSQL `'foo'` kiểu *unknown* đến khi neo — `PREPARE p AS SELECT $1` lỗi thiếu kiểu. SQL Server 2025: `sp_executesql` serialize compile (giảm compilation storm) — không đổi luật quoting; chi tiết routine: [routines.md](routines.md), kiến trúc plan cache: [internal.md](internal.md).
 
 ### 8.2 Dynamic SQL
 
@@ -595,13 +603,15 @@ SET CONCAT_NULL_YIELDS_NULL ON;
 SET ARITHABORT ON;                  -- thường đi cùng ANSI_WARNINGS
 ```
 
-| Option | Tắt thì gì xảy ra |
+| Option | Tắt / bật thì gì xảy ra |
 |---|---|
 | `QUOTED_IDENTIFIER OFF` | `"abc"` là *chuỗi*, không phải identifier |
-| `ANSI_NULLS OFF` | `WHERE x = NULL` thành `IS NULL` — deprecated, phá indexed view |
+| `ANSI_NULLS OFF` | `WHERE x = NULL` thành `IS NULL` (chỉ áp dụng literal/biến `NULL`, **không** áp dụng `col1 = col2`) — deprecated, phá indexed view |
 | `CONCAT_NULL_YIELDS_NULL OFF` | `'a' + NULL` → `'a'` |
-| `ANSI_WARNINGS OFF` | Overflow / chia 0 có thể thành `NULL` thay vì lỗi — phá index |
-| `ARITHABORT OFF` | Cùng họ indexed view / compute |
+| `ANSI_WARNINGS OFF` | Tắt cảnh báo/lỗi truncation & `NULL` trong aggregate; chia 0 / overflow chỉ trả `NULL` khi **cả** `ANSI_WARNINGS OFF` **lẫn** `ARITHABORT OFF` — phá index |
+| `ARITHABORT OFF` | Cùng họ indexed view / computed index; đi cùng `ANSI_WARNINGS OFF` mới đổi chia 0 thành `NULL` |
+| `ANSI_NULL_DFLT_ON` | `ON` (mặc định driver hiện đại): cột mới không ghi rõ `NULL`/`NOT NULL` mặc định `NULL`; `OFF` → `NOT NULL` |
+| `NOCOUNT ON` | Khuyến nghị đầu proc/trigger: tắt gói `n rows affected` (`DONE_IN_PROC`), giảm network chatter và tránh lệch result-set ở một số driver/ORM |
 
 PostgreSQL không có `ANSI_NULLS`. Có:
 
@@ -614,7 +624,7 @@ SET idle_in_transaction_session_timeout = '60s';
 -- escape_string_warning: PG 19 gỡ — SET biến này lỗi
 ```
 
-**Ghi chú:** ORM/driver (ADO.NET, JDBC, Npgsql) set option lúc connect. SSMS “script từ GUI” có thể khác app pool → “chạy được trên máy tôi”. `XACT_ABORT` / implicit txn: [transactions.md](transactions.md). `SET` trong stored proc SQL Server **dính theo object** lúc `CREATE` (`QUOTED_IDENTIFIER` / `ANSI_NULLS` lưu trên proc) — đổi session sau không sửa proc cũ.
+**Ghi chú:** ORM/driver (ADO.NET, JDBC, Npgsql) set option lúc connect. SSMS “script từ GUI” có thể khác app pool → “chạy được trên máy tôi”. `XACT_ABORT` / implicit txn: [transactions.md](transactions.md). Trên SQL Server, `QUOTED_IDENTIFIER` và `ANSI_NULLS` **dính vào metadata của object lúc `CREATE`** (áp dụng cho **stored proc, view, trigger và function**) — đổi ở session sau không ghi đè thiết lập lúc tạo object.
 
 Hai session — cùng proc, khác `CONCAT_NULL_YIELDS_NULL`:
 
@@ -649,9 +659,9 @@ ALTER DATABASE Sales SET COMPATIBILITY_LEVEL = 170;
 ALTER DATABASE SCOPED CONFIGURATION SET PREVIEW_FEATURES = ON;  -- SQL Server 2025
 ```
 
-Công tắc **database scoped** dành cho vector index/VECTOR_SEARCH, fuzzy string và Change Event Streaming; JSON 2025 hiện đã GA. **Không** bật production trừ khi chấp nhận đổi theo CU.
+Công tắc **database scoped** dành cho vector index / `VECTOR_SEARCH`, half-precision vector và Change Event Streaming (JSON 2025 đã GA; fuzzy string đã GA từ CU11 nên không còn cần flag này). **Không** bật production trừ khi chấp nhận đổi theo CU.
 
-JSON 2025 hiện đã GA; vector index vẫn PREVIEW trên SQL Server 2025. Đối chiếu từng API và nền tảng trước khi copy runbook cloud. Bật “cho vector” kéo **cả** feature preview trên database đó, không phải từng lệnh.
+Đối chiếu từng API và nền tảng trước khi copy runbook cloud. Bật “cho vector” kéo **toàn bộ** feature preview trên database đó, không phải từng lệnh.
 
 
 ### 10.3 `standard_conforming_strings` & `escape_string_warning`
@@ -722,8 +732,8 @@ T2 (PG, search_path = public, app):  SELECT * FROM t;           -- public.t, kh�
 ```
 
 ```text
-T1 (SS, default schema app):  INSERT INTO T VALUES (1);         -- app.T
-T2 (SS, default dbo):         SELECT * FROM T;                  -- dbo.T nếu tồn tại, else app? fallback dbo
+T1 (SS, default schema app):  INSERT INTO T VALUES (1);         -- tìm app.T; nếu không có mới fallback sang dbo.T
+T2 (SS, default schema dbo):  SELECT * FROM T;                  -- chỉ tìm dbo.T (không fallback sang app.T → lỗi nếu bảng nằm ở app)
 ```
 
 Luôn schema-qualify trong app.
@@ -819,11 +829,12 @@ Chỉ mục **parser / session / client / identifier**. Optimizer/HA/SKU đầy 
 | Compatibility 170 | **2025** | — (không có compat level) |
 | `PREVIEW_FEATURES` | **2025** (fuzzy không còn cần từ CU11) | — |
 | `FETCH` / `OFFSET` | 2012+ | lâu |
-| `\|\|` nối chuỗi | **2022+** | lõi |
+| `\|\|` nối chuỗi | **2025** | lõi |
 | `IS [NOT] DISTINCT FROM` | **2022+** | lõi; **19** fold `… NULL` |
 | `DROP IF EXISTS` | 2016+ | lõi |
-| `UNIQUE NULLS NOT DISTINCT` | — (filtered index) | **15+** |
-| ICU nondeterministic collation | — (CI collation khác) | **15+** |
+| `UNIQUE NULLS NOT DISTINCT` | mặc định tối đa 1 NULL (filtered index cho nhiều NULL) | **15+** |
+| ICU nondeterministic collation | — (CI collation khác) | **12+** (**15+** ICU default cấp cluster/DB) |
+| Thu hồi `CREATE` trên `public` khỏi `PUBLIC` | — | **15+** |
 | `standard_conforming_strings` luôn on | — | **19** |
 | `escape_string_warning` gỡ | — | **19** |
 | JIT default off | — | **19** |
@@ -876,25 +887,25 @@ T2 (Npgsql): search_path từ connection string / Startup
 ```sql
 -- PostgreSQL: tên chứa CR/LF (byte 13/10) — 19 từ chối upgrade
 SELECT datname FROM pg_database
-WHERE datname ~ E'\\r|\\n';
+WHERE datname ~ E'\r|\n';
 SELECT rolname FROM pg_roles
-WHERE rolname ~ E'\\r|\\n';
+WHERE rolname ~ E'\r|\n';
 SELECT spcname FROM pg_tablespace
-WHERE spcname ~ E'\\r|\\n';
+WHERE spcname ~ E'\r|\n';
 ```
 
-Pattern `E'\\r'` — escape-string, vì `'…'` 19 không unescape. Literal regex: [literals.md](literals.md).
+`E'\r|\n'` unescape `\r`/`\n` ngay ở lớp SQL string thành byte CR/LF thật rồi truyền vào regex; còn `'\r|\n'` (chuỗi chuẩn không `E`) và `E'\\r|\\n'` đều gửi 5 ký tự `\r|\n` để POSIX regex tự giải mã thành CR/LF — tránh nhầm hai lớp escape. Literal regex: [literals.md](literals.md).
 
 SQL Server: soi `sys.databases.name` / logins có ký tự điều khiển hiếm; không `MULE_INTERNAL`. Encoding collation DB ≠ encoding cluster PG.
 
 Hai session — tạo tên độc hại vs upgrade:
 
 ```text
-T1 (PG 18): CREATE ROLE "app\nadmin";     -- có thể tạo (đừng)
+T1 (PG 18): CREATE ROLE U&"app\000Aadmin"; -- tạo tên chứa newline thật (đừng; "app\nadmin" thường chỉ là 2 ký tự \ và n)
 T2 (pg_upgrade → 19): từ chối cluster cho đến khi đổi tên
 ```
 
-`MULE_INTERNAL`: `SELECT datcollate, encoding FROM pg_database;` — đổi encoding **trước** đêm cutover, không SET session.
+`MULE_INTERNAL`: `SELECT datname, datcollate, pg_encoding_to_char(encoding) AS encoding FROM pg_database;` — đổi encoding **trước** đêm cutover, không SET session.
 
 ---
 

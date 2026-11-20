@@ -67,7 +67,7 @@ Trước khi migrate, kiểm dữ liệu, driver, build/CU, index và phương �
 
 ## 2. Trạng thái JSON trong SQL Server 2025
 
-Tại lần rà soát 03/10/2026, Learn ghi json native, json.modify, CREATE JSON INDEX, JSON_CONTAINS, wildcard path và WITH ARRAY WRAPPER là GA trong SQL Server 2025. JSON_OBJECTAGG/JSON_ARRAYAGG cũng có trong reference hiện tại. Không cần bật PREVIEW_FEATURES chỉ để dùng JSON.
+Tại lần rà soát **21/11/2026**, Learn ghi json native, json.modify, CREATE JSON INDEX, JSON_CONTAINS, wildcard path và WITH ARRAY WRAPPER là GA trong SQL Server 2025. JSON_OBJECTAGG/JSON_ARRAYAGG cũng có trong reference hiện tại. Không cần bật PREVIEW_FEATURES chỉ để dùng JSON.
 
 | Mảnh | Điều kiện chính |
 |---|---|
@@ -98,7 +98,7 @@ Cột luôn lọc `status = 'open'` → cột quan hệ hoặc expression index,
 
 `jsonb` **không** giữ khoảng trắng, thứ tự key, key trùng (key sau thắng). `json` PG giữ nguyên — parse mỗi lần đọc. SQL Server `json` binary đã parse; expose/tương thích hàm JSON cũ.
 
-Input kiểu `json` SS: object hoặc array (RFC; không scalar trần theo docs kiểu). Invalid → lỗi convert lúc ghi.
+Input kiểu `json` SS: chỉ nhận **object hoặc array theo RFC 4627** (mặc định của kiểu `json` SQL Server 2025; khác RFC 8259 vốn cho phép top-level scalar như `123`, `"abc"`, `true`). Invalid → lỗi convert lúc ghi.
 
 ```sql
 -- SQL Server
@@ -120,7 +120,7 @@ CREATE TABLE doc (
 
 Ép kiểu: `SELECT CAST(N'{"a":1}' AS json)` (SS) / `'{"a":1}'::jsonb` (PG). Invalid → lỗi lúc convert, không lúc “đọc path” nếu đã binary.
 
-**Ghi chú:** Duplicate key: `jsonb` gộp; `nvarchar`/`json` text giữ — `JSON_VALUE` phụ thuộc parse. Số JSON `1` vs `1.0` vs scientific: so sánh `jsonb` khác text. Đừng so JSON string equality để “đổi dữ liệu”. `CAST(col AS json)` migrate: lọc `ISJSON = 1` trước; hàng bẩn fail.
+**Ghi chú:** Duplicate key: `jsonb` gộp; `nvarchar`/`json` text giữ — `JSON_VALUE` phụ thuộc parse. Số JSON `1` vs `1.0` vs scientific: so sánh `jsonb` khác text. Đừng so JSON string equality để “đổi dữ liệu”. `CAST(col AS json)` migrate: lọc `ISJSON = 1` trước; hàng bẩn fail. **Bẫy `\u0000` (NUL byte) trên PG:** kiểu `json` (text) chấp nhận escape `\u0000`, nhưng `jsonb` **cấm hoàn toàn NUL byte** (văng lỗi `unsupported Unicode escape sequence`) — phải làm sạch trước khi đổi `json` → `jsonb`.
 
 ---
 
@@ -132,16 +132,18 @@ SELECT id, name
 FROM dbo.Customers
 FOR JSON PATH, ROOT('customers');
 
-SELECT JSON_OBJECT('id': id, 'name': name);
+SELECT JSON_OBJECT('id': id, 'name': name) FROM dbo.Customers;
 SELECT JSON_ARRAY(1, 2, 3);
-SELECT JSON_OBJECT('id': id, 'name': name RETURNING JSON);  -- kiểu json
+SELECT JSON_OBJECT('id': id, 'name': name RETURNING JSON) FROM dbo.Customers;  -- kiểu json
 
--- PostgreSQL
-SELECT json_build_object('id', id, 'name', name);
-SELECT jsonb_build_object('id', id, 'name', name);
+-- PostgreSQL: hàm cổ điển + bộ SQL/JSON chuẩn (PG 16+)
+SELECT json_build_object('id', id, 'name', name) FROM customers;
+SELECT jsonb_build_object('id', id, 'name', name) FROM customers;
 SELECT to_jsonb(t) FROM customers t;
-SELECT json_object_agg(sku, qty) FROM items;   -- aggregate, mục 8
-SELECT json_array(1, true);                    -- constructor SQL/JSON
+SELECT JSON_OBJECT('id': id, 'name': name RETURNING jsonb) FROM customers;     -- SQL/JSON PG 16+
+SELECT JSON_ARRAY(1, true RETURNING jsonb);                                    -- SQL/JSON PG 16+
+SELECT JSON_SCALAR(123), JSON_SERIALIZE('{"a":1}'::jsonb RETURNING text);      -- SQL/JSON PG 16+
+SELECT json_object_agg(sku, qty) FROM items;                                   -- aggregate, mục 8
 ```
 
 `FOR JSON PATH` vs `AUTO`: PATH theo alias lồng (`user.name`); AUTO theo join. `WITHOUT_ARRAY_WRAPPER` một object. `INCLUDE_NULL_VALUES` (SS) vs PG mặc định bỏ/giữ tùy hàm (`json_build_object` giữ NULL).
@@ -156,25 +158,33 @@ PG 19: `COPY TO` output JSON (kể `FORCE_ARRAY`) — mục 10, không phải `F
 
 ```sql
 -- SQL Server
-SELECT JSON_VALUE(doc, '$.user.name');            -- scalar; object → NULL (lax)
+SELECT JSON_VALUE(doc, '$.user.name');            -- scalar (nvarchar(4000)); object → NULL (lax)
 SELECT JSON_QUERY(doc, '$.user');                 -- object/array
 SELECT JSON_VALUE(doc, '$.items[0].sku');
 SELECT JSON_PATH_EXISTS(doc, '$.user.name');      -- 0/1
 -- 2025 GA: wildcard mảng ANSI; JSON_QUERY … WITH ARRAY WRAPPER
 SELECT JSON_CONTAINS(doc, 'fitness', '$.tags');   -- GA; dùng JSON INDEX
 
--- PostgreSQL
+-- PostgreSQL: toán tử + jsonb subscripting (14+) + SQL/JSON chuẩn (17+)
 SELECT doc -> 'user' ->> 'name';                  -- -> jsonb, ->> text
 SELECT doc #>> '{user,name}';
+SELECT doc['user']['name'];                       -- PG 14+ subscripting (trả jsonb, KHÔNG phải text)
 SELECT doc -> 'items' -> 0 ->> 'sku';
 SELECT jsonb_path_query(doc, '$.items[*] ? (@.qty > 1)');
 SELECT doc @> '{"user":{"id":1}}'::jsonb;         -- containment, GIN
 SELECT jsonb_path_exists(doc, '$.user.name');
+
+-- SQL/JSON chuẩn trên PostgreSQL 17+ (RETURNING, ON EMPTY, ON ERROR):
+SELECT JSON_VALUE(doc, '$.user.age' RETURNING int DEFAULT 0 ON EMPTY ERROR ON ERROR);
+SELECT JSON_QUERY(doc, '$.items[*].sku' WITH CONDITIONAL WRAPPER RETURNING jsonb);
+SELECT JSON_EXISTS(doc, '$.items[*] ? (@.qty > 1)' FALSE ON ERROR);
 ```
 
-`JSON_VALUE` lax: path hợp lệ nhưng không tìm thấy key hoặc gặp object/array → `NULL`; path sai cú pháp vẫn lỗi. `strict` báo lỗi cho key thiếu/kiểu không phù hợp. PG `->` không tồn tại key → `NULL`; `->>` trả text khi có giá trị.
+`JSON_VALUE` lax: path hợp lệ nhưng không tìm thấy key hoặc gặp object/array → `NULL`; path sai cú pháp vẫn lỗi. `strict` báo lỗi cho key thiếu/kiểu không phù hợp. **Giới hạn 4000 ký tự trên SQL Server:** `JSON_VALUE` luôn trả tối đa `nvarchar(4000)` — nếu chuỗi dài hơn 4000 ký tự sẽ trả `NULL` im lặng (lax) hoặc báo lỗi (strict); phải dùng `OPENJSON ... WITH (col nvarchar(max))` để trích chuỗi lớn.
 
-SQL Server path **bắt buộc** `$`. PG `jsonpath` cũng `$` trong `jsonb_path_*`; toán tử `->` dùng key/index.
+PG `->` / subscript `doc['k']` không tồn tại key → SQL `NULL`; `->>` trả `text`. **Bẫy JSON `null` vs SQL `NULL` trên PG:** nếu document là `{"a": null}`, thì `(doc -> 'a') IS NULL` là **`FALSE`** (vì giá trị là JSON `null`, kiểu `jsonb`), còn `(doc ->> 'a') IS NULL` mới là **`TRUE`** (trả SQL `NULL`).
+
+SQL Server path **bắt buộc** `$`. PG `jsonpath` cũng `$` trong `jsonb_path_*` và `JSON_VALUE`/`JSON_QUERY`/`JSON_EXISTS`; toán tử `->` và subscript dùng key/index trực tiếp.
 
 **Ghi chú:** `JSON_VALUE` ra object = `NULL` im lặng (dùng `JSON_QUERY`). So sánh `JSON_VALUE(…, '$.qty') = 1` = nvarchar vs int — convert; JSON INDEX / `JSON_CONTAINS` **không** implicit convert kiểu (số vs chuỗi `'11000'` không khớp).
 
@@ -217,34 +227,49 @@ SELECT doc - 'secret';
 SELECT jsonb_insert(doc, '{tags,-1}', '"sql"'::jsonb, true);
 
 UPDATE doc
-SET payload = jsonb_set(payload, '{user,name}', to_jsonb(@name))
-WHERE id = @id;
+SET payload = jsonb_set_lax(payload, '{user,name}', to_jsonb($1))   -- PG 13+: tránh SQL NULL xóa cả cột
+-- hoặc: jsonb_set(payload, '{user,name}', COALESCE(to_jsonb($1), 'null'::jsonb))
+-- hoặc PG 14+ subscripting: SET payload['user']['name'] = COALESCE(to_jsonb($1), 'null'::jsonb)
+WHERE id = $2;
 ```
 
 Cập nhật cột = gán document mới (trừ optimize binary/GA `modify`). Key sâu trên LOB lớn = rewrite. Tách cột nóng ra quan hệ nếu update thường xuyên.
 
-`JSON_MODIFY` path `append` / `lax`/`strict`. Không merge sâu như `||` jsonb (jsonb `||` object = key-level, không recursive sâu trừ `jsonb_set`).
+`JSON_MODIFY` hỗ trợ path `append` / `lax`/`strict`. Cả `||` trên `jsonb` lẫn `JSON_MODIFY` đều **không deep-merge** đệ quy (`||` chỉ gộp key cấp ngoài cùng; còn `jsonb_set` chỉ gán đúng **1 path** cụ thể, không phải deep-merge).
 
-**Ghi chú:** `jsonb_set` tạo path thiếu tùy `create_missing`. Giá trị phải là jsonb (`'"Ada"'` có quotes JSON). Truyền text `Ada` không quote = invalid. `jsonb_set` với JSON `null` **không** xóa key (`-` mới xóa). `JSON_MODIFY(..., NULL)` trên SS **xóa** key (lax).
+**Ghi chú:** `jsonb_set` là hàm *strict*: truyền giá trị SQL `NULL` (như `to_jsonb($1)` khi `$1 IS NULL`) sẽ trả về **SQL `NULL` xóa trắng cả cột JSON** — phải dùng **`jsonb_set_lax`** (PG 13+, mặc định `'use_json_null'`) hoặc `COALESCE(to_jsonb($1), 'null'::jsonb)`. Ngoài ra `create_missing = true` chỉ tạo key cuối, **không tự tạo key cha trung gian** nếu path cha chưa có. Giá trị phải là `jsonb` (`'"Ada"'` có quotes JSON). `jsonb_set` với JSON `null` **không** xóa key (`-` mới xóa), khác `JSON_MODIFY(..., NULL)` trên SS **xóa** key (lax).
 
 ---
 
 ## 7. Unnest: OPENJSON vs jsonb_to_recordset
 
 ```sql
--- SQL Server
-SELECT j.sku, j.qty
+-- SQL Server: dùng AS JSON để trích object/array lồng nhau (không AS JSON → NULL ở lax)
+SELECT j.sku, j.qty, j.meta
 FROM dbo.Doc AS d
 CROSS APPLY OPENJSON(d.Payload, '$.items')
 WITH (
-    sku nvarchar(32) '$.sku',
-    qty int          '$.qty'
+    sku  nvarchar(32)  '$.sku',
+    qty  int           '$.qty',
+    meta nvarchar(max) '$.meta' AS JSON    -- hoặc kiểu json trên SQL Server 2025
 ) AS j;
 
 -- Không schema: key, value, type
 SELECT * FROM OPENJSON(@json);
 
--- PostgreSQL
+-- PostgreSQL 17+: JSON_TABLE chuẩn ISO SQL/JSON (tương đương trực tiếp OPENJSON ... WITH, hỗ trợ NESTED PATH)
+SELECT jt.sku, jt.qty, jt.meta
+FROM doc AS d,
+JSON_TABLE(
+    d.payload, '$.items[*]'
+    COLUMNS (
+        sku  text  PATH '$.sku',
+        qty  int   PATH '$.qty' DEFAULT 0 ON EMPTY,
+        meta jsonb FORMAT JSON PATH '$.meta'
+    )
+) AS jt;
+
+-- PostgreSQL cổ điển (tương thích mọi phiên bản)
 SELECT x.sku, x.qty
 FROM doc
 CROSS JOIN LATERAL jsonb_to_recordset(payload -> 'items')
@@ -254,7 +279,9 @@ SELECT e.*
 FROM doc,
 LATERAL jsonb_array_elements(payload -> 'items') AS e;
 
-SELECT * FROM json_to_recordset(payload) AS x(sku text, qty int);  -- json text
+SELECT x.sku, x.qty
+FROM doc_text,
+LATERAL json_to_recordset(payload) AS x(sku text, qty int);  -- json text
 ```
 
 `OPENJSON` + `WITH` ép kiểu SQL; sai kiểu → `NULL`/lỗi tùy convert. `jsonb_to_recordset` thiếu key → NULL cột. Fan-out: một document N phần tử = N hàng — join tiếp dễ nổ cardinality.
@@ -292,6 +319,13 @@ GROUP BY customer_id;
 
 SELECT jsonb_object_agg(sku, qty) FROM items;
 SELECT jsonb_agg(t) FROM items t;
+
+-- SQL/JSON chuẩn từ PostgreSQL 16+ (song song SQL Server 2025):
+SELECT customer_id, JSON_ARRAYAGG(id ORDER BY id ABSENT ON NULL RETURNING jsonb)
+FROM orders
+GROUP BY customer_id;
+
+SELECT JSON_OBJECTAGG(sku: qty WITH UNIQUE KEYS RETURNING jsonb) FROM items;
 ```
 
 ### 8.1 PG 19 breaking: `json_array()` 0 hàng → `[]`
@@ -315,25 +349,27 @@ App `IS NULL` khi “không phần tử” phải sửa. Giữ NULL cũ: `NULLIF
 ## 9. Index JSON
 
 ```sql
--- SQL Server 2025 GA SQL Server 2025
+-- SQL Server 2025 (GA)
 CREATE JSON INDEX jix ON dbo.Doc (Payload);                 -- recursive $
 CREATE JSON INDEX jix2 ON dbo.Doc (Payload)
     FOR ('$.status', '$.user.id');                         -- không overlap
 
--- Computed + btree (cách cũ, vẫn valid trên nvarchar) — GA
+-- Computed + btree (cách cũ, vẫn valid trên nvarchar/json) — GA
+-- Bắt buộc CAST độ dài ngắn (JSON_VALUE trả nvarchar(4000) = 8000B > giới hạn key B-tree 1700B → lỗi Msg 1946)
+-- Không bắt buộc PERSISTED vì biểu thức deterministic + precise (bỏ PERSISTED tiết kiệm dung lượng)
 ALTER TABLE dbo.Doc
-    ADD Status AS (JSON_VALUE(Payload, '$.status')) PERSISTED;
+    ADD Status AS CAST(JSON_VALUE(Payload, '$.status') AS nvarchar(50));
 CREATE INDEX ix_doc_status ON dbo.Doc (Status);
 
 -- PostgreSQL
-CREATE INDEX ON doc USING gin (payload);                    -- jsonb_ops, tồn tại key
-CREATE INDEX ON doc USING gin (payload jsonb_path_ops);     -- chỉ @>
+CREATE INDEX ON doc USING gin (payload);                    -- jsonb_ops: @>, ?, ?|, ?&, @?, @@
+CREATE INDEX ON doc USING gin (payload jsonb_path_ops);     -- nhỏ hơn: hỗ trợ @>, @?, @@ (không ?, ?|, ?&)
 CREATE INDEX ON doc ((payload->>'status'));                 -- btree equality
 ```
 
 JSON INDEX: clustered PK bắt buộc; không indexed view / memory-optimized / computed json. Path `FOR` recursive — `$.user` gồm `$.user.id`; thêm cả hai = lỗi. Phục vụ `JSON_VALUE`, `JSON_PATH_EXISTS`, `JSON_CONTAINS`.
 
-`jsonb_path_ops` nhỏ, **không** hỗ trợ tồn tại key/`?` đầy đủ như `jsonb_ops`. Expression btree khi một key equality nóng.
+`jsonb_path_ops` nhỏ hơn, hỗ trợ `@>` cùng toán tử jsonpath **`@?`** (path exists) và **`@@`** (path predicate), nhưng **không** hỗ trợ toán tử tồn tại key `?` / `?|` / `?&` như `jsonb_ops`. Expression btree khi một key equality nóng.
 
 Vector trong JSON array ≠ kiểu `vector` — [indexes.md](indexes.md) §9, [typesystem.md](typesystem.md).
 
@@ -371,7 +407,7 @@ PG 19 khác trên `COPY FROM` (không JSON): skip nhiều header; `ON_ERROR SET_
 ```sql
 -- SQL Server
 WHERE ISJSON(txt) = 1                          -- nvarchar
-WHERE ISJSON(txt, OBJECT) = 1                  -- 2022+: object/array
+WHERE ISJSON(txt, OBJECT) = 1                  -- 2022+: chỉ khớp OBJECT (các loại: VALUE | ARRAY | OBJECT | SCALAR)
 -- cột json: INSERT invalid → lỗi convert
 CHECK (JSON_PATH_EXISTS(Payload, '$.basket') = 1)
 
@@ -478,14 +514,15 @@ COPY (SELECT id, name FROM users ORDER BY id)
 
 | Việc | SQL Server | PostgreSQL |
 |---|---|---|
-| Scalar path | `JSON_VALUE` | `->>` / `#>>` |
-| Object/array path | `JSON_QUERY` | `->` / `#>` |
-| Tồn tại path | `JSON_PATH_EXISTS` | `jsonb_path_exists` / `?` |
-| Containment | `JSON_CONTAINS` **GA** | `@>` GIN |
-| Sửa hàm | `JSON_MODIFY` GA | `jsonb_set` / `\|\|` / `-` |
-| Sửa in-place cột typed | `json.modify` **GA** | không method cột |
-| Unnest | `OPENJSON` | `jsonb_to_recordset` / `jsonb_array_elements` |
-| Agg object/array | `JSON_OBJECTAGG` / `JSON_ARRAYAGG` **GA** on-prem | `json[b]_object_agg` / `json[b]_agg` |
+| Scalar path | `JSON_VALUE` (giới hạn 4000 ký tự) | `->>` / `#>>` / **`JSON_VALUE`** (17+) |
+| Object/array path | `JSON_QUERY` | `->` / `#>` / subscript `['k']` (14+) / **`JSON_QUERY`** (17+) |
+| Tồn tại path | `JSON_PATH_EXISTS` | `jsonb_path_exists` / `?` / `@?` / **`JSON_EXISTS`** (17+) |
+| Containment | `JSON_CONTAINS` **GA** | `@>` / `@?` / `@@` (GIN) |
+| Constructor SQL/JSON | `JSON_OBJECT` / `JSON_ARRAY` (2022+) | `json[b]_build_*` · **`JSON_OBJECT` / `JSON_ARRAY` / `JSON_SCALAR` / `JSON_SERIALIZE`** (16+) |
+| Sửa hàm | `JSON_MODIFY` GA | `jsonb_set` / `jsonb_set_lax` (13+) / `\|\|` / `-` / subscript (14+) |
+| Sửa in-place cột typed | `json.modify` **GA** | không method cột (MVCC luôn tạo tuple mới) |
+| Unnest | `OPENJSON` (`WITH ... AS JSON`) | **`JSON_TABLE`** (17+) / `jsonb_to_recordset` / `jsonb_array_elements` |
+| Agg object/array | `JSON_OBJECTAGG` / `JSON_ARRAYAGG` **GA** on-prem | `json[b]_object_agg` / `json[b]_agg` · **`JSON_OBJECTAGG` / `JSON_ARRAYAGG`** (16+) |
 | Constructor array từ query | — | `json_array(SELECT …)` — 19: rỗng = `[]` |
 | Export stream | `FOR JSON` | `COPY TO (FORMAT json)` **19** |
 
@@ -556,16 +593,18 @@ TOAST/LOB: [internal.md](internal.md) §7. Index chi tiết: [indexes.md](indexe
 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
-| `JSON_VALUE` / `OPENJSON` / `FOR JSON` / `JSON_MODIFY` | 2016+ | — (`->`, `jsonb_to_recordset`, `jsonb_set`) |
-| Kiểu `json` native | **2025 GA**; Azure SQL/MI theo update policy | `json`/`jsonb` lâu |
-| `JSON_OBJECT` / `JSON_ARRAY` | 2022+ | `json[b]_build_*` / `json_array()` |
-| `JSON_OBJECTAGG` / `JSON_ARRAYAGG` | **2025 GA**; Azure/Fabric theo nền tảng | `json[b]_agg` / `object_agg` |
-| `CREATE JSON INDEX` / `JSON_CONTAINS` | **2025 GA** | GIN |
-| `json.modify` method | **2025 GA** | `jsonb_set` |
-| Array wildcard path / `WITH ARRAY WRAPPER` | **2025 GA** | `jsonpath` `[*]` |
+| `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS` | `JSON_VALUE`/`JSON_QUERY` 2016+; `JSON_PATH_EXISTS` 2022+ | **`17+`** (SQL/JSON chuẩn `RETURNING`/`ON EMPTY`/`ON ERROR`; trước đó `->`/`->>`/`jsonb_path_*`) |
+| `JSON_TABLE` / `OPENJSON` | `OPENJSON` 2016+ (compat ≥ 130) | **`17+`** (`JSON_TABLE`; trước đó `jsonb_to_recordset`) |
+| Kiểu `json` native | **2025 GA**; Azure SQL/MI theo update policy | `json`/`jsonb` lâu (9.2 / 9.4) |
+| `jsonb` subscripting (`col['k']`) | — | **`14+`** |
+| `JSON_OBJECT` / `JSON_ARRAY` / `JSON_SCALAR` / `JSON_SERIALIZE` | `JSON_OBJECT`/`JSON_ARRAY` 2022+ | **`16+`** (SQL/JSON chuẩn; trước đó `json[b]_build_*`) |
+| `JSON_OBJECTAGG` / `JSON_ARRAYAGG` | **2025 GA**; Azure/Fabric theo nền tảng | **`16+`** (SQL/JSON chuẩn; `json[b]_agg`/`object_agg` 9.3/9.4) |
+| `CREATE JSON INDEX` / `JSON_CONTAINS` | **2025 GA** | GIN (`@>`, `@?`, `@@`, `?`) |
+| `json.modify` method | **2025 GA** | `jsonb_set` / `jsonb_set_lax` (13+) |
+| Array wildcard path / `WITH ARRAY WRAPPER` | **2025 GA** | `jsonpath` `[*]` (12+) / `JSON_QUERY ... WITH WRAPPER` (**17+**) |
 | `json_array()` 0 hàng → `[]` | — | **19** breaking |
 | `COPY TO` `FORMAT json` / `FORCE_ARRAY` | — | **19** |
-| `IS JSON` trên domain | — | **19** nới |
+| `IS JSON` / trên domain | `ISJSON` 2016+ (type 2022+) | `IS JSON` **16+**; trên domain **19** |
 | jsonpath `lower`/`ltrim`/… | — | **19** |
 
 Vector: [indexes.md](indexes.md), [typesystem.md](typesystem.md). Isolation không áp path JSON.
@@ -600,7 +639,8 @@ SELECT jsonb_path_query(payload, '$.items[*].sku');
 json_array(SELECT x FROM t)     0 hàng → []     (19 breaking; trước NULL)
 json_agg(x) FROM t              0 hàng, không GROUP BY → NULL
 COPY t TO … (FORMAT json)       0 hàng → file rỗng (không [] trừ FORCE_ARRAY trên 0 hàng = [])
-FOR JSON PATH                   0 hàng → [] (mặc định có array wrapper)
+FOR JSON PATH                   0 hàng → 0 rows (trực tiếp) / NULL (scalar subquery), KHÔNG trả []
+                                muốn [] dùng: ISNULL((SELECT ... FOR JSON PATH), '[]')
 JSON_ARRAYAGG                   GA SQL Server 2025; GROUP BY 0 nhóm = không hàng
 ```
 
@@ -612,7 +652,7 @@ Client TypeScript `if (data === null)` với `json_array` 19 = nhánh chết. Co
 
 ## Phụ lục C. In-place `modify` — khi nào rewrite
 
-Learn: chuỗi mới ≤ cũ; số cùng kiểu / trong range → in-place có thể. Chuỗi dài hơn, đổi object thành array, thêm key sâu → rewrite document (LOB). Không hứa “mọi UPDATE json.modify = O(1)”. Đo kích thước cột trước/sau. PG không có method cột; `jsonb_set` gần như luôn tuple mới (MVCC).
+Learn: chuỗi mới ≤ cũ; số cùng kiểu / trong range → in-place có thể. Chuỗi dài hơn, đổi object thành array, thêm key sâu → rewrite document (LOB). Không hứa “mọi UPDATE json.modify = O(1)”. Đo kích thước cột trước/sau. PG không có method cột; `UPDATE` với `jsonb_set` trên PG **luôn** tạo heap tuple mới (MVCC).
 
 ---
 
@@ -659,7 +699,8 @@ SIMD `COPY FROM` text/CSV 19: throughput; `ON_ERROR SET_NULL` nuốt ô bẩn. K
 | Thao tác | SQL Server | PostgreSQL |
 |---|---|---|
 | `JSON_MODIFY(path, NULL)` lax | **Xóa** key | — |
-| `jsonb_set(..., 'null'::jsonb)` | — | Key còn, giá trị JSON null |
+| `jsonb_set(..., NULL)` (SQL `NULL`) | — | **Cả cột thành SQL `NULL`!** (dùng `jsonb_set_lax` hoặc `COALESCE`) |
+| `jsonb_set(..., 'null'::jsonb)` | — | Key còn, giá trị JSON `null` (`->` cho `IS NULL = FALSE`, `->>` cho `TRUE`) |
 | `doc - 'key'` | — | Xóa key |
 | `FOR JSON` mặc định | Bỏ SQL NULL | — |
 | `json_build_object` | — | Giữ JSON null |
@@ -727,23 +768,6 @@ COPY FORCE_ARRAY bảng rỗng: []  — khác NDJSON rỗng
 
 `ABSENT ON NULL` trên constructor list (không phải query form — query luôn absent null). Đối chiếu `json_array` signature docs, đừng mix với `JSON_ARRAYAGG` T-SQL.
 
-SQL Server 2025: json native, JSON INDEX, JSON_CONTAINS, RETURNING JSON và json.modify thuộc API JSON hiện tại; JSON_VALUE/OPENJSON/FOR JSON/JSON_MODIFY vẫn hỗ trợ nvarchar.
-
-`COPY TO (FORMAT json)` 19: NDJSON mặc định; `FORCE_ARRAY` một array; chỉ TO; không CSV option.
-
-```sql
--- NDJSON (mỗi hàng một object)
-COPY (SELECT id, name FROM users ORDER BY id) TO STDOUT WITH (FORMAT json);
-
--- Một JSON array
-COPY (SELECT id, name FROM users ORDER BY id)
-    TO STDOUT WITH (FORMAT json, FORCE_ARRAY);
-```
-
-Không COPY FROM FORMAT json. Load qua jsonb_populate_record, CSV hoặc app; SQL Server dùng OPENJSON. CI kiểm dialect và build/CU thực tế.
-
-`json_array(SELECT …)` 19: 0 hàng = `[]` (breaking từ `NULL`). `json.modify('$.a', v)` GA trên cột `json`, không `nvarchar`. JSON INDEX path không chồng; clustered PK bắt buộc.
-
 ---
 
 ## Phụ lục J. Checklist JSON (WHY)
@@ -754,7 +778,7 @@ Không COPY FROM FORMAT json. Load qua jsonb_populate_record, CSV hoặc app; SQ
 4. **JSON INDEX: clustered PK, path không chồng** — không heap.
 5. **`.modify` chỉ cột `json`** — `nvarchar` dùng `JSON_MODIFY`.
 6. **`JSON_CONTAINS` không convert số/chuỗi**.
-7. **GIN `jsonb_path_ops` chỉ `@>`** — tồn tại key cần `jsonb_ops`.
+7. **GIN `jsonb_path_ops` hỗ trợ `@>`, `@?`, `@@`** — tồn tại key `?` cần `jsonb_ops`.
 8. **Cột quan hệ cho key ổn định** — JSON không FK.
 
 

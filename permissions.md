@@ -108,15 +108,19 @@ CREATE USER app_login PASSWORD '…';    -- = CREATE ROLE … LOGIN
 
 Role có attribute: `LOGIN`, `SUPERUSER`, `CREATEDB`, `CREATEROLE`, `INHERIT`, `BYPASSRLS`, `REPLICATION`. `SUPERUSER` bỏ qua GRANT và (cả `FORCE`) RLS.
 
-**Kế thừa (PG 16+):** attribute `INHERIT` của role nhận **và** tùy chọn trên từng `GRANT role`.
+**Kế thừa & membership (PG 16+):** attribute `INHERIT` của role nhận **và** tùy chọn trên từng `GRANT role` (`INHERIT`, `SET`, `ADMIN`).
 
 ```sql
-GRANT app_read TO app_login;                         -- kế thừa quyền app_read
-GRANT app_admin TO app_login WITH INHERIT FALSE;    -- phải SET ROLE app_admin mới dùng
+GRANT app_read TO app_login;                                     -- kế thừa quyền app_read
+GRANT app_admin TO app_login WITH INHERIT FALSE, SET TRUE;       -- phải SET ROLE app_admin mới dùng
+GRANT app_ro TO app_login WITH INHERIT TRUE, SET FALSE;          -- kế thừa quyền nhưng CẤM SET ROLE app_ro
 SET ROLE app_admin;
 ```
 
-`INHERIT FALSE`: user *là* member nhưng quyền nhóm **không** tự bật. Hữu ích cho role phá dữ liệu (`DROP`) — chỉ bật khi cố ý `SET ROLE`. `WITH ADMIN OPTION` / `WITH ADMIN TRUE` cho phép trao membership cho người khác.
+- `INHERIT FALSE`: user *là* member nhưng quyền nhóm **không** tự bật — hữu ích cho role phá dữ liệu (`DROP`), chỉ bật khi cố ý `SET ROLE`.
+- `SET FALSE`: ngược lại, kế thừa quyền trực tiếp nhưng **không** được `SET ROLE` sang role đó.
+- `WITH ADMIN TRUE` (`ADMIN OPTION`): cho phép trao membership cho người khác.
+- **`CREATEROLE` overhaul (PG 16+):** role có `CREATEROLE` **không còn** tự động quản lý/sửa mọi non-superuser role trong cluster nữa — nó chỉ được `ALTER`/`DROP`/`GRANT` membership cho các role do chính nó tạo (tự nhận `ADMIN` với `INHERIT FALSE, SET FALSE`) hoặc được trao `WITH ADMIN TRUE` tường minh.
 
 Không có database-user riêng. Quyền bảng nằm trong database đang kết nối; role thì **cả cluster** (nhìn thấy ở mọi DB, quyền object thì không).
 
@@ -129,8 +133,8 @@ Không có database-user riêng. Quyền bảng nằm trong database đang kết
 GRANT SELECT, INSERT ON dbo.Orders TO app_read;
 GRANT EXECUTE ON dbo.GetOrder TO app_read;
 DENY DELETE ON dbo.Orders TO app_read;
-REVOKE INSERT ON dbo.Orders FROM app_read;     -- gỡ GRANT, không gỡ DENY
-REVOKE DELETE ON dbo.Orders FROM app_read;     -- gỡ DENY (và GRANT nếu có)
+REVOKE INSERT ON dbo.Orders FROM app_read;     -- gỡ cả GRANT lẫn DENY (nếu có)
+REVOKE DELETE ON dbo.Orders FROM app_read;     -- gỡ cả DENY lẫn GRANT (nếu có)
 
 -- PostgreSQL
 GRANT SELECT, INSERT ON orders TO app_read;
@@ -148,7 +152,7 @@ REVOKE INSERT ON orders FROM app_read;
 
 `GRANT` trên schema SQL Server **bao gồm object hiện có và object tạo sau** trong schema đó (quyền schema-level). PostgreSQL `ON ALL TABLES` chỉ bảng **đã có**. Bảng tạo ngày mai cần `ALTER DEFAULT PRIVILEGES` (mục 5).
 
-`WITH GRANT OPTION`: người nhận được `GRANT` tiếp. Thu hồi người gốc có thể `CASCADE` (PG) kéo theo người được trao tiếp. SQL Server: `REVOKE … CASCADE` tương tự. App role **không** cần grant option.
+`WITH GRANT OPTION`: người nhận được `GRANT` tiếp. Thu hồi quyền đã cấp kèm `WITH GRANT OPTION`: trên **SQL Server**, `REVOKE` **bắt buộc** có `CASCADE` (thiếu `CASCADE` báo lỗi **`Msg 4611`**, kể cả khi người nhận chưa cấp tiếp cho ai); trên PostgreSQL mặc định `RESTRICT` (chỉ lỗi nếu đã cấp tiếp) và cần `CASCADE` để thu hồi dây chuyền. App role **không** cần grant option.
 
 **Hình dung `DENY`.** User thuộc `app_read` (`SELECT`) và `intern` (`DENY SELECT` trên `Salary`). Kết quả: **không** đọc `Salary`. Trên PostgreSQL, membership cả hai role mà chỉ một role có `SELECT` thì **vẫn đọc**. Muốn “intern không xem lương”: đừng `GRANT` role có quyền đó, hoặc RLS (mục 8), không có biển `DENY`.
 
@@ -233,10 +237,15 @@ SQL Server
 ```
 
 ```sql
--- PostgreSQL: view không nâng quyền
+-- PostgreSQL: view không nâng quyền (15+)
 CREATE VIEW app.orders_open
 WITH (security_invoker = true) AS
 SELECT * FROM app.orders WHERE status = 'open';
+
+-- PostgreSQL: view hàng rào bảo mật chống side-channel leak (UDF không LEAKPROOF không được pushdown)
+CREATE VIEW app.orders_tenant
+WITH (security_barrier = true) AS
+SELECT id, status, total FROM app.orders WHERE tenant_id = 42;
 
 -- SQL Server: chaining khi cùng owner (thường dbo)
 CREATE VIEW dbo.OrdersOpen AS
@@ -245,13 +254,17 @@ GRANT SELECT ON dbo.OrdersOpen TO app_read;
 -- app_read không cần SELECT trên dbo.Orders, nếu cùng owner
 ```
 
-View thường là **hàng rào** (ẩn cột lương) chỉ khi caller **không** có `SELECT` thẳng bảng. `security_invoker = true` hoặc khác owner phá hàng rào đó — đúng cho “view tiện”, sai cho “view che cột”.
+View thường là **hàng rào** (ẩn cột lương hoặc ẩn hàng) chỉ khi caller **không** có `SELECT` thẳng bảng. `security_invoker = true` hoặc khác owner phá hàng rào đó — đúng cho “view tiện”, sai cho “view che cột”.
+
+**Hai lưu ý quan trọng về view & ownership chaining:**
+- **SQL Server ownership chaining bỏ qua cả `DENY` trên bảng gốc:** nếu view/proc và bảng gốc cùng owner, user bị `DENY SELECT` trên `dbo.Orders` nhưng có `GRANT SELECT` trên view `dbo.OrdersOpen` (hoặc `GRANT EXECUTE` trên `dbo.GetOrders`) **vẫn đọc được dữ liệu** qua view/proc đó!
+- **PostgreSQL `WITH (security_barrier = true)` & `LEAKPROOF`:** với view lọc hàng bảo mật trên PG, luôn bật `security_barrier = true` để ngăn attacker viết hàm UDF (gây chia 0 / `RAISE NOTICE`) bị planner đẩy xuống chạy *trước* `WHERE` của view làm lộ hàng ẩn. Khi bật barrier, chỉ hàm được superuser gắn **`LEAKPROOF`** (như `=`, `<`, `>`) mới được đẩy xuống tận dụng index.
 
 `GRANT SELECT` trên view không tự che cột nếu user cũng được `SELECT` bảng gốc.
 
 ### 6.2 Procedure như hàng rào (SQL Server)
 
-Stored procedure cùng owner với bảng: caller chỉ cần `EXECUTE`. Đây là chaining, không phải `EXECUTE AS`. Dynamic SQL **bên trong** proc cắt chaining — câu trong `sp_executesql` kiểm tra quyền **caller** (trừ `EXECUTE AS`).
+Stored procedure cùng owner với bảng: caller chỉ cần `EXECUTE` (ownership chaining bỏ qua kiểm tra quyền — kể cả `DENY` — trên bảng cùng owner). Đây là chaining, không phải `EXECUTE AS`. Dynamic SQL **bên trong** proc cắt chaining — câu trong `sp_executesql` kiểm tra quyền **caller** (trừ `EXECUTE AS` hoặc Module Signing).
 
 PostgreSQL function mặc định `SECURITY INVOKER`: caller cần quyền bảng dưới, dù chỉ `GRANT EXECUTE`. Muốn hàng rào: `SECURITY DEFINER` + `search_path` khóa — [routines.md](routines.md) §11.
 
@@ -273,7 +286,11 @@ GRANT EXECUTE ON FUNCTION app.get_order(int) TO app_read; -- PG: invoker vẫn c
 
 `EXECUTE` **không** thay `GRANT` bảng khi function là invoker. App chỉ được `EXECUTE` + definer an toàn **hoặc** invoker + GRANT đúng bảng — đừng cấp cả hai “cho chắc” (definer + user cũng `db_owner`).
 
-Trigger chạy trong quyền của người gây DML (kiểm tra quyền trigger owner trên một số đường). Đừng nhét `SECURITY DEFINER` vào trigger chỉ để “ghi audit” nếu audit table có thể bị gọi từ hàm lệch path.
+**SQL Server Module Signing (Certificate):** khi proc cần chạy dynamic SQL, truy cập cross-database, hoặc cần quyền cấp server mà không muốn mở lỗ hổng `TRUSTWORTHY ON` (rất nguy hiểm vì `db_owner` leo được lên `sysadmin`) hay bị sandbox của `EXECUTE AS`, hãy ký module bằng certificate (`CREATE CERTIFICATE` → `ADD SIGNATURE TO dbo.Proc BY CERTIFICATE ...` → tạo user/login từ certificate và cấp đúng quyền tối thiểu). Sửa nội dung proc sẽ tự vô hiệu chữ ký cho đến khi ký lại.
+
+**Quyền trên trigger (khác biệt hai engine):**
+- **PostgreSQL:** trigger function mặc định là `SECURITY INVOKER` (chạy bằng quyền user thực thi DML, nên user cần quyền trên bảng mà trigger ghi thêm như bảng audit — trừ khi đánh dấu `SECURITY DEFINER` + khóa `search_path`).
+- **SQL Server:** trigger mặc định chạy dưới ngữ cảnh caller, **nhưng có ownership chaining** với bảng cùng owner — nếu trigger và bảng `dbo.Audit` cùng owner `dbo`, caller gây DML **không** cần `INSERT` trực tiếp trên `dbo.Audit`.
 
 ---
 
@@ -292,8 +309,10 @@ ALTER TABLE app.orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.orders FORCE ROW LEVEL SECURITY;   -- owner cũng bị lọc
 
 CREATE POLICY orders_tenant ON app.orders
-    USING (tenant_id = current_setting('app.tenant')::int)
-    WITH CHECK (tenant_id = current_setting('app.tenant')::int);
+    USING (tenant_id = NULLIF(current_setting('app.tenant', true), '')::int)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant', true), '')::int);
+-- Tham số true (missing_ok) + NULLIF(..., ''): tránh lỗi runtime khi session chưa set hoặc vừa RESET
+-- (trả NULL → không khớp hàng nào = fail-closed an toàn).
 
 -- Mỗi request, sau khi login app_read:
 BEGIN;
@@ -330,16 +349,19 @@ ADD BLOCK PREDICATE dbo.fn_tenant(TenantId) ON dbo.Orders AFTER UPDATE
 WITH (STATE = ON);
 GO
 
-EXEC sys.sp_set_session_context @key = N'tenant', @value = 42;
+EXEC sys.sp_set_session_context @key = N'tenant', @value = 42, @read_only = 1;
+-- @read_only = 1: ngăn code sau trong cùng session tự ghi đè lại giá trị tenant!
 ```
 
 FILTER giới hạn hàng nhìn thấy khi SELECT/UPDATE/DELETE. BLOCK AFTER INSERT/UPDATE kiểm giá trị mới, ngăn ghi/chuyển sang tenant khác; BEFORE UPDATE/DELETE kiểm hàng trước thay đổi. Thiếu BLOCK có thể cho phép UPDATE một hàng đang thấy thành tenant khác.
 
-**Khác PostgreSQL:** `dbo` / `db_owner` **không** tự bỏ qua RLS. Muốn admin thấy hết thì predicate trả `1` cho role đó, hoặc `STATE = OFF` lúc bảo trì. Đừng giả định “owner như PG”.
+**Khác PostgreSQL:** trên SQL Server, ngay cả **`sysadmin`**, `dbo` và `db_owner` **không** tự bỏ qua RLS. Muốn admin thấy hết thì predicate trả `1` cho role đó, hoặc `STATE = OFF` lúc bảo trì. Đừng giả định “owner / superuser tự bypass như PG”.
 
-PostgreSQL app cũng tự đổi được custom GUC app.tenant nếu được chạy SQL tùy ý; context phải do tầng ứng dụng tin cậy đặt và app role không có quyền quản policy.
+PostgreSQL app cũng tự đổi được custom GUC `app.tenant` nếu được chạy SQL tùy ý; context phải do tầng ứng dụng tin cậy đặt và app role không có quyền quản policy.
 
 Predicate nên `SCHEMABINDING`, inline, không gọi UDF nặng. Policy là nơi rò tenant nếu `SESSION_CONTEXT` do **client** tự set mà không có login trung gian tin cậy. App tự gửi tenant = user đổi được. Đặt context trong proc `EXECUTE AS` hoặc middleware một đường, không tin connection string của từng tenant dùng chung user.
+
+**Bẫy hiệu năng RLS (cả hai engine):** predicate RLS được bơm vào *mọi* câu truy vấn trên bảng. Cần: (1) đánh **index có `tenant_id` dẫn đầu** (ví dụ `(tenant_id, created_at)`), (2) giữ predicate **sargable** (so sánh trực tiếp `tenant_id = ...`, tuyệt đối không bọc hàm lên cột `tenant_id` hay JOIN phức tạp trong policy), và (3) trên PG có thể bọc `(SELECT NULLIF(current_setting('app.tenant', true), '')::int)` để ép InitPlan đánh giá 1 lần/statement thay vì lặp theo hàng khi plan phức tạp.
 
 ---
 
@@ -357,6 +379,8 @@ GRANT USAGE ON SEQUENCE orders_id_seq TO app_write;
 ```
 
 `INSERT` không kèm quyền `SELECT` thì `RETURNING` / `OUTPUT` có thể cần thêm `SELECT` (đặc biệt PG: `RETURNING` đòi `SELECT` trên cột trả về). Test, đừng giả định `INSERT` đủ.
+
+**SQL Server Dynamic Data Masking (DDM):** khai báo cột `MASKED WITH (FUNCTION = 'email()')` chỉ che dữ liệu trên đường trả ra cho user thiếu quyền `UNMASK` — **không phải cơ chế bảo mật chống truy vấn suy đoán**! User có `SELECT` vẫn dò được giá trị gốc bằng `WHERE Salary > 50000` (inference attack). Muốn chặn thực sự, dùng column-level `DENY`/view che cột hoặc Always Encrypted.
 
 Large object (PG): `pg_read_all_data` / `pg_write_all_data` từ **19** đọc/ghi LO, phục vụ `pg_dump` không superuser. Trước đó hai role này không đụng `pg_largeobject`. SQL Server file `varbinary` nằm trong quyền bảng, không catalog LO riêng.
 
@@ -407,9 +431,24 @@ SELECT * FROM orders;
 RESET ROLE;
 ```
 
-Dùng để **test** quyền, không để app production nhảy role tùy request nếu không kiểm soát. `SET ROLE` chỉ tới role mình là member. `EXECUTE AS` đòi `IMPERSONATE`.
+Dùng để **test** quyền, không để app production nhảy role tùy request nếu không kiểm soát. `EXECUTE AS` đòi `IMPERSONATE`. Trên PostgreSQL:
+- **`SET ROLE`** chỉ đổi `current_user` (giữ nguyên `session_user`), chỉ gọi được tới role mình là member có `SET TRUE`.
+- **`SET SESSION AUTHORIZATION`** đổi **cả `session_user` lẫn `current_user`**, và chỉ **`SUPERUSER`** mới được dùng.
 
-Chuỗi: middleware `EXECUTE AS` / `SET ROLE` rồi quên `REVERT` trên connection pool → request sau mang quyền request trước. Pool phải reset session (`sp_reset_connection` không gỡ hết mọi context; PG pool nên `DISCARD ALL` / reset role).
+**Connection pool reset:** trên SQL Server, `sp_reset_connection` (chạy tự động khi tái sử dụng kết nối từ pool chuẩn) **CÓ xóa `SESSION_CONTEXT` và CÓ gỡ `EXECUTE AS` thông thường**, nhưng **không** gỡ `EXECUTE AS ... WITH NO REVERT` hay `sp_setapprole` không cookie — tuyệt đối tránh hai dạng đó trên connection pool. Trên PostgreSQL pool (PgBouncer/driver), cần `DISCARD ALL` hoặc `RESET ROLE` + `RESET` GUC rõ ràng.
+
+**Kiểm tra / audit quyền hiệu lực (sau khi tính kế thừa, `DENY`, ownership):**
+
+```sql
+-- SQL Server (kết hợp EXECUTE AS USER = N'app_user' ... REVERT để kiểm cho user khác)
+SELECT HAS_PERMS_BY_NAME(N'dbo.Orders', N'OBJECT', N'SELECT');
+SELECT * FROM sys.fn_my_permissions(N'dbo.Orders', N'OBJECT');
+
+-- PostgreSQL (hoặc lệnh psql: \dp app.orders)
+SELECT has_table_privilege('app_login', 'app.orders', 'SELECT');
+SELECT has_schema_privilege('app_login', 'app', 'USAGE');
+SELECT pg_has_role('app_login', 'app_read', 'USAGE');
+```
 
 ---
 
@@ -458,7 +497,7 @@ CREATE ROLE app_read NOLOGIN;
 GRANT app_read TO app_login;
 
 CREATE SCHEMA app AUTHORIZATION migrator;
-REVOKE CREATE ON SCHEMA app FROM PUBLIC;
+-- Schema tự tạo mặc định KHÔNG cấp CREATE hay USAGE cho PUBLIC (chỉ schema public trước PG 15 mới bị).
 
 GRANT USAGE ON SCHEMA app TO app_read;
 
@@ -527,11 +566,15 @@ GRANT SELECT ON app.employees_public TO app_read;   -- view không có cột sal
 - View `security_invoker = true` trên view định che cột.
 - `DENY` dịch sang PG bằng một `REVOKE` trong khi user còn role khác.
 - RLS không `FORCE` và app login là **owner** bảng (PG: owner bỏ qua policy).
-- RLS SQL Server chỉ `FILTER`, không `BLOCK` → `UPDATE` kéo hàng sang tenant khác.
+- RLS PG viết `current_setting('app.tenant')::int` không có `missing_ok = true` + `NULLIF(..., '')` → văng lỗi khi session chưa set hoặc sau `RESET`.
+- RLS SQL Server chỉ `FILTER`, không `BLOCK` → `UPDATE` kéo hàng sang tenant khác; hoặc `sp_set_session_context` quên `@read_only = 1`.
+- Ownership chaining trên SQL Server bỏ qua cả **`DENY`** trên bảng gốc nếu view/proc cùng owner.
+- View lọc hàng bảo mật trên PG quên `WITH (security_barrier = true)` (dễ bị rò qua hàm UDF không `LEAKPROOF`).
+- Tin SQL Server Dynamic Data Masking chặn được `WHERE salary > 50000` (inference attack).
 - `EXECUTE` function invoker nhưng không `GRANT` bảng → production lỗi; hoặc cấp `pg_read_all_data` cho xong.
 - `SECURITY DEFINER` không `SET search_path` — [routines.md](routines.md).
 - Dynamic SQL trong proc owner: chaining đứt, hoặc `EXECUTE AS OWNER` + nối chuỗi = leo quyền.
-- Pool không `REVERT` / `RESET ROLE`.
+- Dùng `EXECUTE AS ... WITH NO REVERT` trên connection pool SS (`sp_reset_connection` không gỡ được), hoặc PG pool quên `RESET ROLE` / `DISCARD ALL`.
 
 ---
 
@@ -539,17 +582,17 @@ GRANT SELECT ON app.employees_public TO app_read;   -- view không có cột sal
 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
-| `DENY` | Có | Không |
-| `security_invoker` view | Chaining theo owner | **15+** tùy chọn; mặc định invoker **tắt** |
-| `INHERIT` từng membership | Role membership luôn “có quyền” (trừ `DENY`) | **16+** `WITH INHERIT FALSE` |
+| `DENY` | Có (`REVOKE` gỡ cả `GRANT` lẫn `DENY`) | Không |
+| `security_invoker` / `security_barrier` view | Chaining theo owner (bỏ qua cả `DENY`) | `security_barrier` lâu; `security_invoker` **15+** |
+| Role membership & `CREATEROLE` | Role membership luôn có hiệu lực (trừ `DENY`) | **16+** `WITH INHERIT/SET/ADMIN`, `CREATEROLE` overhaul |
 | Schema `public` không `CREATE` cho mọi người | N/A (`dbo`) | **15+** |
-| RLS owner bypass | **Không** bypass sẵn | Có, trừ `FORCE`; superuser/`BYPASSRLS` luôn bypass |
+| RLS bypass | Kể cả **`sysadmin` / `dbo` không tự bypass** | Owner bypass trừ `FORCE`; `SUPERUSER`/`BYPASSRLS` luôn bypass |
 | `ALTER DEFAULT PRIVILEGES` | Quyền `ON SCHEMA` phủ object mới | Cần, theo role tạo object |
 | PBKDF2, Entra `OBJECT_ID`, `##MS_*##` | **2025** | — |
 | `GRANTED BY`, LO cho `pg_read_all_data` | — | **19** |
 | Cảnh báo hết hạn mật khẩu | Policy Windows / Linux 2025 | **19** `password_expiration_warning_threshold` |
 
-Từ khóa `GRANT` ngắn: [keywords.md](keywords.md) §18. Definer và `search_path`: [routines.md](routines.md) §11.
+Từ khóa `GRANT` ngắn: [keywords.md](keywords.md) §15. Definer và `search_path`: [routines.md](routines.md) §11.
 
 ---
 

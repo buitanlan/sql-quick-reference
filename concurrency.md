@@ -75,7 +75,7 @@ PostgreSQL 19: `log_lock_waits` **bật mặc định**; `pg_stat_lock`. SQL Ser
 
 ### 1.1 Hình dung: khóa là biển “đừng đụng”, không phải isolation
 
-Isolation (§ trên [transactions.md](transactions.md)) = *tôi thấy gì*. Khóa = *ai phải đứng chờ, hoặc ai bị giết khi vòng chờ*.
+Isolation ([transactions.md](transactions.md) §4–§5) = *tôi thấy gì*. Khóa = *ai phải đứng chờ, hoặc ai bị giết khi vòng chờ*.
 
 Hình dung hành lang khách sạn:
 
@@ -178,7 +178,7 @@ ALTER TABLE dbo.Orders SET (LOCK_ESCALATION = AUTO);   -- partition
 Hai thành phần (Learn):
 
 1. **TID locking:** mỗi txn một Transaction ID. Hàng bị sửa gắn TID. Thay vì giữ hàng nghìn X key đến `COMMIT`, giữ **một X trên TID**; lock hàng/page **nhả ngay sau khi sửa từng hàng**.
-2. **LAQ (Lock After Qualification):** đánh giá predicate trên bản **committed mới nhất** **không** lấy lock; chỉ lấy X khi hàng *khớp* để sửa. **Cần RCSI**. Không áp `REPEATABLE READ` / `SERIALIZABLE` (vẫn cần giữ lock chống phantom).
+2. **LAQ (Lock After Qualification):** đánh giá predicate trên bản **committed mới nhất** **không** lấy lock; chỉ lấy X khi hàng *khớp* để sửa. **Cần RCSI**. Không áp `REPEATABLE READ` (giữ S lock chống non-repeatable read, **không** chống phantom) / `SERIALIZABLE` (dùng key-range lock chống phantom).
 
 ```text
 UPDATE 1000 hàng, RC, một txn
@@ -253,6 +253,10 @@ SELECT * FROM pg_stat_lock;          -- PG 19: thống kê theo loại lock
 
 `REPACK (CONCURRENTLY)`: `SHARE UPDATE EXCLUSIVE` lúc copy + logical decoding stash; `ACCESS EXCLUSIVE` **lúc swap**. Deadlock lock-upgrade lúc swap — [indexes.md](indexes.md) §10. Snapshot lấy trước repack có thể thấy bảng rỗng sau commit — [ddl.md](ddl.md) §10.1. `lock_timeout` abort statement, không chờ vô hạn.
 
+**Lock queue pile-up khi chạy DDL (`ACCESS EXCLUSIVE` / `Sch-M`):** nếu một query đọc dài đang giữ `ACCESS SHARE` (PG) / `Sch-S` (SS), lệnh `ALTER TABLE` đứng chờ `ACCESS EXCLUSIVE` / `Sch-M` sẽ xếp sau query đó nhưng đồng thời **chặn mọi `SELECT`/DML mới đến phía sau mình** (cả hệ thống nghẽn dù DDL chưa chạy). Cách tránh trên production:
+- **PostgreSQL:** đặt `SET LOCAL lock_timeout = '2s';` trong vòng retry loop — hết giờ thì nhả hàng đợi ngay cho OLTP chạy tiếp rồi thử lại.
+- **SQL Server:** dùng tùy chọn **`WAIT_AT_LOW_PRIORITY (MAX_DURATION = 1 MINUTES, ABORT_AFTER_WAIT = SELF | BLOCKERS)`** (với `ONLINE = ON` / `ALTER TABLE SWITCH` / `REBUILD`) để DDL đứng ở hàng đợi ưu tiên thấp, không chặn query mới đến.
+
 ---
 
 ## 6. FOR UPDATE và biến thể
@@ -263,8 +267,8 @@ PostgreSQL row lock (yếu → mạnh):
 |---|---|
 | `FOR KEY SHARE` | Không cho xóa / sửa khóa unique |
 | `FOR SHARE` | Không cho UPDATE/DELETE |
-| `FOR NO KEY UPDATE` | Như UPDATE không đụng unique key |
-| `FOR UPDATE` | Như UPDATE/DELETE |
+| `FOR NO KEY UPDATE` | Chặn `FOR UPDATE` / `FOR NO KEY UPDATE` / `FOR SHARE` / `UPDATE` / `DELETE`, **vẫn tương thích `FOR KEY SHARE`** (mặc định PG dùng cho `UPDATE` không đổi khóa PK/UNIQUE được FK trỏ tới) |
+| `FOR UPDATE` | Mạnh nhất: chặn cả **`FOR KEY SHARE`** (tương đương `DELETE` hoặc `UPDATE` sửa khóa PK/UNIQUE) — không dùng bừa nếu chỉ sửa cột thường |
 
 ```sql
 SELECT * FROM accounts WHERE id = 1 FOR UPDATE;
@@ -287,6 +291,10 @@ WHERE Sku = N'A';
 `UPDLOCK` giữ update lock đến cuối transaction, kể cả READ COMMITTED. `HOLDLOCK` thêm ngữ nghĩa SERIALIZABLE, bảo vệ cả khoảng khóa khi predicate phù hợp. Đọc-rồi-ghi phải nằm trong cùng transaction; ở autocommit, khóa được nhả khi SELECT kết thúc. Optimized locking không thay cơ chế bảo vệ RMW này.
 
 **Ghi chú:** PG `SELECT FOR UPDATE` ở RC: sau khi đợi, statement **re-check** hàng — hàng có thể biến mất. RR/SSI: conflict `40001`. Chia range bằng DML ứng dụng: khóa trước — [dml.md](dml.md), [constraints.md](constraints.md).
+
+**Foreign Key locking & bẫy FK thiếu index:**
+- **PostgreSQL:** `INSERT`/`UPDATE` bảng con tự lấy **`FOR KEY SHARE`** trên hàng cha tương ứng. Vì vậy `UPDATE` bảng cha không đổi cột khóa (lấy `FOR NO KEY UPDATE`) **không** xung đột với `INSERT` bảng con — nhưng nếu ứng dụng viết `SELECT ... FOR UPDATE` trên bảng cha sẽ **chặn** mọi `INSERT` vào bảng con. Khi `DELETE` hoặc sửa PK bảng cha mà cột FK bảng con **thiếu index**, PG phải **Seq Scan toàn bộ bảng con** cho mỗi hàng cha.
+- **SQL Server:** `INSERT`/`UPDATE` bảng con lấy S lock trên hàng cha; `DELETE` cha khi cột FK bảng con **thiếu index** gây **scan toàn bảng con** + giữ khóa kéo dài (dễ leo thang khóa bảng và deadlock). Luôn tạo index cho cột FK trên cả hai engine.
 
 ---
 
@@ -318,7 +326,7 @@ ORDER BY Id;
 
 Không fairness: worker có thể đói. Không dùng cho “đúng thứ tự tuyệt đối” trừ một worker. `NOWAIT` = lỗi ngay nếu đụng lock, không skip.
 
-**Ghi chú:** READPAST bỏ row lock, không bỏ page lock; ROWLOCK không bảo đảm không escalation. Ở READ COMMITTED khi RCSI ON, dùng READCOMMITTEDLOCK để READPAST hợp lệ (không kết hợp ROWLOCK vì cùng nhóm granularity hint). Giữ SELECT claim và UPDATE trạng thái trong cùng transaction, hoặc dùng một UPDATE ... OUTPUT nguyên tử. SELECT autocommit có UPDLOCK vẫn nhả khóa trước statement tiếp theo. [Table hints](https://learn.microsoft.com/en-us/sql/t-sql/queries/hints-transact-sql-table?view=sql-server-ver17).
+**Ghi chú:** `READPAST` bỏ row lock, không bỏ page lock; `ROWLOCK` không bảo đảm không escalation. Ở `READ COMMITTED` khi RCSI ON, dùng `READCOMMITTEDLOCK` để `READPAST` hợp lệ — `READCOMMITTEDLOCK` là **isolation hint** nên kết hợp **hoàn toàn hợp lệ** với `ROWLOCK` (granularity hint), ví dụ `WITH (READPAST, UPDLOCK, ROWLOCK, READCOMMITTEDLOCK)`. Giữ `SELECT` claim và `UPDATE` trạng thái trong cùng transaction, hoặc dùng một `UPDATE ... OUTPUT` nguyên tử. `SELECT` autocommit có `UPDLOCK` vẫn nhả khóa trước statement tiếp theo. [Table hints](https://learn.microsoft.com/en-us/sql/t-sql/queries/hints-transact-sql-table?view=sql-server-ver17).
 
 ---
 
@@ -340,7 +348,7 @@ SSI / serialization (PG 40001, SS SNAPSHOT 3960)
   Chữa: SERIALIZABLE + retry, hoặc một chỗ ghi (counter), không phải “thêm hint NOLOCK”.
 ```
 
-Cùng mã `40001` trên PostgreSQL vừa deadlock vừa SSI — đọc **message** (`deadlock detected` vs `could not serialize access`). Retry giống nhau (cả txn); *nguyên nhân* khác.
+Trên PostgreSQL hai lỗi này **khác mã SQLSTATE**: deadlock khóa là **`40P01`** (`deadlock detected`), còn SSI / concurrent update ở RR/SR là **`40001`** (`serialization_failure`). App retry cả hai theo cùng pattern (retry cả txn kèm backoff + jitter), nhưng runbook xử lý *nguyên nhân* khác hẳn nhau.
 
 ### 8.1 Kịch bản hai session (chuyển khoản)
 
@@ -427,7 +435,7 @@ RR/SSI: snapshot đụng ghi. Không có cycle lock trong `pg_locks`. Retry gi�
 
 ### 8.5 Tránh
 
-**Một thứ tự khóa toàn cục** (luôn khóa id nhỏ trước), transaction ngắn và UPDATE nguyên tử giúp giảm deadlock. PostgreSQL có thể SELECT ... ORDER BY id FOR UPDATE khi khóa sắp xếp ổn định. Trên SQL Server, ORDER BY chỉ bảo đảm thứ tự kết quả, không bảo đảm thứ tự lấy lock trước Sort; đọc từng khóa theo thứ tự bằng các statement UPDLOCK trong cùng transaction rồi mới sửa.
+**Một thứ tự khóa toàn cục** (luôn khóa id nhỏ trước), transaction ngắn và UPDATE nguyên tử giúp giảm deadlock. PostgreSQL có thể `SELECT ... ORDER BY id FOR UPDATE` khi khóa sắp xếp ổn định. Trên SQL Server, `ORDER BY` chỉ bảo đảm thứ tự kết quả, không bảo đảm thứ tự lấy lock trước Sort; đọc từng khóa theo thứ tự bằng các statement `UPDLOCK` trong cùng transaction rồi mới sửa. Ngoài ra trên SQL Server, có thể đặt **`SET DEADLOCK_PRIORITY LOW | NORMAL | HIGH | -10..10;`** (ví dụ đặt `LOW` cho batch/báo cáo nền để khi va chạm với OLTP, job nền tự làm victim thay vì giết giao dịch người dùng).
 
 ---
 
@@ -440,8 +448,8 @@ SELECT … FROM dbo.T WITH (UPDLOCK, ROWLOCK);
 SELECT … FROM dbo.T WITH (TABLOCKX);
 SELECT … FROM dbo.T WITH (READPAST, UPDLOCK, ROWLOCK);
 
-SET LOCK_TIMEOUT 1000;                          -- ms; -1 = wait forever
-SELECT … OPTION (LOCK_TIMEOUT 1000);            -- hint query (phiên bản hỗ trợ)
+SET LOCK_TIMEOUT 1000;                          -- ms (session-level); -1 = wait forever, 0 = NOWAIT
+-- Lưu ý: T-SQL KHÔNG có query hint OPTION (LOCK_TIMEOUT ...)
 
 -- PostgreSQL: không hint NOLOCK / UPDLOCK
 SET lock_timeout = '1s';
@@ -454,6 +462,10 @@ PostgreSQL: isolation + `FOR UPDATE` + GUC timeout. `SET enable_seqscan = off` l
 SQL Server `QUERYTRACEON` / `ABORT_QUERY_EXECUTION` (2025 Query Store hint) chặn query độc — không phải lock hint.
 
 **Ghi chú:** `LOCK_TIMEOUT 0` = NOWAIT. App phải xử lý error **1222**, không nuốt thành 0 hàng. Hint trong view = mọi caller chịu.
+
+**Advisory / Application locks (khóa logic theo key/tên, không gắn hàng bảng):**
+- **PostgreSQL:** `pg_advisory_lock(key)` / `pg_try_advisory_lock(key)` giữ cấp **session** đến khi `pg_advisory_unlock` hoặc đóng kết nối; **`pg_advisory_xact_lock(key)`** / `pg_try_advisory_xact_lock(key)` tự nhả khi `COMMIT`/`ROLLBACK`. **Bẫy PgBouncer transaction pooling:** tuyệt đối **không** dùng biến thể session qua transaction pooler (khóa bị rò rỉ sang request khác mượn chung backend) — luôn dùng biến thể **`_xact_`** khi qua pooler.
+- **SQL Server:** dùng **`EXEC sp_getapplock @Resource = N'sync-job', @LockMode = 'Exclusive', @LockOwner = 'Transaction' | 'Session', @LockTimeout = 5000;`** (trả `>= 0` là thành công, `-1` là timeout). Ưu tiên `@LockOwner = 'Transaction'` để tự nhả cuối txn, tránh rò rỉ khóa trong connection pool.
 
 ---
 
@@ -486,7 +498,7 @@ Recovery txn temp (temp table) nhanh, log truncate mạnh — giảm đầy log 
 
 `UPDATE`/`DELETE` để dead tuple. `VACUUM` thu hồi khi không snapshot nào còn thấy (`xmin` horizon).
 
-Giữ horizon: `idle in transaction`, prepared xact, **replication slot**, `retain_dead_tuples` trên publication **19**.
+Giữ horizon: `idle in transaction`, prepared xact, **replication slot** (physical bật `hot_standby_feedback`, hoặc logical slot bật `retain_dead_tuples` trên **`CREATE SUBSCRIPTION`** PG **19**; mặc định logical slot chỉ giữ `catalog_xmin`).
 
 **19:** scan query đánh dấu page **all-visible**; autovacuum **parallel** index (`autovacuum_max_parallel_workers`); scoring `pg_stat_autovacuum_scores`. Bloat nặng: `REPACK (CONCURRENTLY)` — không `ACCESS EXCLUSIVE` suốt copy.
 
@@ -521,11 +533,14 @@ SQL Server → OneLake. Synapse Link **discontinued**. Resource governor **theo 
 
 ### 11.3 PostgreSQL slot
 
-Slot không advance → WAL giữ + `xmin` horizon → bloat **toàn cluster**. **19:** publish **sequence** (`ALL SEQUENCES`, `REFRESH SEQUENCES`); `retain_dead_tuples` + `max_retention_duration`; `mem_exceeded_count` trên `pg_stat_replication_slots`; `wal_level=replica` có thể bật logical không restart (`effective_wal_level`).
+Slot không advance → WAL giữ không cắt (phình `pg_wal`); riêng về vacuum horizon, logical slot mặc định chỉ giữ **`catalog_xmin`** (chặn vacuum system catalog), chỉ giữ **`xmin`** bảng user khi physical standby bật `hot_standby_feedback` hoặc logical subscription PG **19** bật `retain_dead_tuples` (+ `max_retention_duration` để giới hạn bloat). **19:** publish **sequence** (`ALL SEQUENCES`, `REFRESH SEQUENCES`); `mem_exceeded_count` trên `pg_stat_replication_slots`; `wal_level=replica` có thể bật logical không restart (`effective_wal_level`).
 
 ```sql
-SELECT slot_name, active, restart_lsn, xmin, mem_exceeded_count
-FROM pg_stat_replication_slots;   -- 19: mem_exceeded_count
+SELECT s.slot_name, s.active, s.restart_lsn, s.xmin, s.catalog_xmin,
+       st.spill_txns, st.mem_exceeded_count          -- PG 19: mem_exceeded_count
+FROM pg_replication_slots AS s
+LEFT JOIN pg_stat_replication_slots AS st
+  ON st.slot_name = s.slot_name;
 ```
 
 Drop slot chết. `retain_dead_tuples` không `max_retention_duration` = bloat vô hạn.
@@ -535,41 +550,35 @@ Drop slot chết. `retain_dead_tuples` không `max_retention_duration` = bloat v
 ### 11.4 Chẩn đoán chuỗi block
 
 ```sql
--- SQL Server: ai chặn ai (rút gọn)
-SELECT r.session_id, r.blocking_session_id, r.wait_type, r.wait_time,
+-- SQL Server: ai chặn ai — bắt đầu từ dm_exec_sessions để không bỏ sót head blocker đang sleeping/idle
+SELECT s.session_id, s.status, s.open_transaction_count,
+       r.blocking_session_id, r.wait_type, r.wait_time,
        t.text
-FROM sys.dm_exec_requests AS r
-CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
-WHERE r.blocking_session_id <> 0 OR r.session_id IN (
-    SELECT blocking_session_id FROM sys.dm_exec_requests
-    WHERE blocking_session_id <> 0
-);
+FROM sys.dm_exec_sessions AS s
+LEFT JOIN sys.dm_exec_requests AS r ON r.session_id = s.session_id
+LEFT JOIN sys.dm_exec_connections AS c ON c.session_id = s.session_id
+OUTER APPLY sys.dm_exec_sql_text(COALESCE(r.sql_handle, c.most_recent_sql_handle)) AS t
+WHERE r.blocking_session_id <> 0
+   OR s.session_id IN (
+       SELECT blocking_session_id FROM sys.dm_exec_requests
+       WHERE blocking_session_id <> 0
+   );
 
--- PostgreSQL
+-- PostgreSQL: ưu tiên hàm chuẩn pg_blocking_pids(pid) (gọn, bắt cả lock queue & parallel worker)
 SELECT blocked.pid AS blocked_pid,
-       blocking.pid AS blocking_pid,
+       blocked.wait_event,
        blocked.query AS blocked_query,
+       blocking.pid AS blocking_pid,
+       blocking.state AS blocking_state,
        blocking.query AS blocking_query
 FROM pg_stat_activity AS blocked
-JOIN pg_locks AS bl ON bl.pid = blocked.pid AND NOT bl.granted
-JOIN pg_locks AS gl ON gl.locktype = bl.locktype
-    AND gl.database IS NOT DISTINCT FROM bl.database
-    AND gl.relation IS NOT DISTINCT FROM bl.relation
-    AND gl.page IS NOT DISTINCT FROM bl.page
-    AND gl.tuple IS NOT DISTINCT FROM bl.tuple
-    AND gl.virtualxid IS NOT DISTINCT FROM bl.virtualxid
-    AND gl.transactionid IS NOT DISTINCT FROM bl.transactionid
-    AND gl.classid IS NOT DISTINCT FROM bl.classid
-    AND gl.objid IS NOT DISTINCT FROM bl.objid
-    AND gl.objsubid IS NOT DISTINCT FROM bl.objsubid
-    AND gl.granted
-JOIN pg_stat_activity AS blocking ON blocking.pid = gl.pid
-WHERE blocked.pid <> blocking.pid;
+CROSS JOIN LATERAL unnest(pg_blocking_pids(blocked.pid)) AS bp(pid)
+JOIN pg_stat_activity AS blocking ON blocking.pid = bp.pid;
 ```
 
 Head blocker thường là `idle in transaction` (PG) hoặc session SS quên `COMMIT` / implicit transaction. Kill có chủ đích; sửa pool trước.
 
-**Ghi chú:** Join `pg_locks` như trên là mẫu cổ điển — vẫn đúng 19; thêm `pg_stat_lock` (§12) để xem *loại* lock hot, không thay pid đang đợi.
+**Ghi chú:** `pg_blocking_pids(pid)` (PG 9.6+) chính xác hơn tự join `pg_locks` (tránh bỏ sót lock-queue đợi DDL hay nhóm parallel worker); kết hợp `pg_stat_lock` (§12) để xem *loại* lock hot theo lịch sử, không thay pid đang đợi.
 
 ---
 
@@ -737,7 +746,7 @@ PG: pg_replication_slots restart_lsn đứng, pg_wal đầy
 -- RCSI + optimized locking: hàng status='paid' không bị X chỉ vì cùng page
 UPDATE dbo.Orders SET Status = N'closed' WHERE Status = N'open' AND Id = @id;
 -- Hàng không khớp predicate: không X dài (LAQ)
--- REPEATABLE READ: LAQ không áp — vẫn giữ lock chống phantom
+-- REPEATABLE READ: LAQ không áp — giữ S lock chống non-repeatable read (chỉ SERIALIZABLE mới dùng key-range lock chống phantom)
 ```
 
 ---
@@ -806,7 +815,7 @@ Isolation anomalies, SNAPSHOT 3960, FDW READ ONLY: [transactions.md](transaction
 
 `locktype` = loại đối tượng (`relation`, `tuple`, `transactionid`, `page`, `extend`, `advisory`, …) — **không** phải `ACCESS EXCLUSIVE`. `waits` / `wait_time` chỉ tăng khi xin được lock sau wait **> deadlock_timeout**. Wait ngắn im. `fastpath_exceeded` → cân `max_locks_per_transaction` (19 default 128).
 
-Reset: `pg_stat_reset` (toàn stats — cẩn thận). Dashboard: so sánh `relation` vs `transactionid` — DDL/bảng nóng vs txn dài.
+Reset: **`SELECT pg_stat_reset_shared('lock');`** (chỉ reset bộ đếm lock shared; không dùng `pg_stat_reset()` vốn reset stats cấp database). Dashboard: so sánh `relation` vs `transactionid` — DDL/bảng nóng vs txn dài.
 
 `log_lock_waits` on 19: log ồn ≠ tắt; lọc application_name. Không nhầm dòng log wait với `deadlock detected` (`40P01`).
 

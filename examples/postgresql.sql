@@ -1,4 +1,4 @@
--- PostgreSQL 19 Beta 4; run in a fresh test session with no open transaction.
+-- PostgreSQL 19 (GA); run in a fresh test session with no open transaction.
 -- The IGNORE NULLS example requires 19. No extensions or persistent objects.
 
 /* Both engines support /* nested comments */ in a block. */

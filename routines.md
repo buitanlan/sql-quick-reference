@@ -25,6 +25,7 @@ Hàm built-in: [functions.md](functions.md). Txn trong routine: [transactions.md
 - [10. `CREATE EXTERNAL MODEL`](#10-create-external-model)
 - [11. Quyền: `SECURITY DEFINER` & `search_path`](#11-quyền-security-definer--search_path)
 - [12. Worked examples](#12-worked-examples)
+- [13. Lỗi: `TRY`/`CATCH` vs `EXCEPTION`](#13-lỗi-trycatch-vs-exception)
 - [14. `EXEC(@sql)` vs `sp_executesql` vs `PREPARE`](#14-execsql-vs-sp_executesql-vs-prepare)
 - [15. Best practices & checklist](#15-best-practices--checklist)
 - [16. Bẫy khi review](#16-bẫy-khi-review)
@@ -105,7 +106,10 @@ $$;
 | `GO` | Tách batch client | Không có |
 | `CREATE OR ALTER` | Proc/func/trigger (tùy object) | `CREATE OR REPLACE` |
 
-`SELECT @n = col FROM t` khi nhiều hàng trên SQL Server lấy hàng cuối được xử lý (không có ORDER BY thì không xác định); 0 hàng giữ giá trị cũ. PL/pgSQL `SELECT ... INTO` thường lấy hàng đầu, 0 hàng gán NULL; `INTO STRICT` mới yêu cầu đúng một hàng và ném NO_DATA_FOUND/TOO_MANY_ROWS. [PL/pgSQL statements](https://www.postgresql.org/docs/19/plpgsql-statements.html).
+**Gán biến từ `SELECT` (SS vs PG):**
+- SQL Server `SELECT @n = col FROM t`: 0 hàng → **giữ nguyên giá trị cũ** của `@n` (bẫy cổ điển trong vòng lặp); >1 hàng → im lặng lấy hàng cuối được xử lý (không xác định nếu thiếu `ORDER BY`).
+- SQL Server `SET @n = (SELECT col FROM t)`: 0 hàng → gán **`NULL`**; >1 hàng → **ném lỗi `Msg 512`** (subquery returned more than 1 value).
+- PL/pgSQL `SELECT col INTO n`: 0 hàng → gán `NULL`; >1 hàng → lấy hàng đầu. Dùng **`INTO STRICT`** khi cần bắt buộc đúng 1 hàng (0 hàng → `NO_DATA_FOUND`, >1 hàng → `TOO_MANY_ROWS`). [PL/pgSQL statements](https://www.postgresql.org/docs/19/plpgsql-statements.html).
 
 **Ghi chú:** Port `BEGIN` T-SQL (khối lệnh) sang PG `BEGIN` (txn hoặc block PL) — [transactions.md](transactions.md) §2.
 
@@ -160,6 +164,10 @@ SS: `EXEC proc` trong txn caller tăng `@@TRANCOUNT` nếu proc `BEGIN TRAN`. `C
 
 Parameter sniffing: plan theo lần chạy đầu. SS: `OPTIMIZE FOR`, `RECOMPILE`, OPPO (**2025**, optional parameter). PG: `plan_cache_mode`, generic vs custom; PG 19 `pg_plan_advice` / `pg_stash_advice`.
 
+**Tham số `OUTPUT` & TVP (SQL Server):**
+- Tham số `OUTPUT` phải ghi từ khóa `OUTPUT` ở **cả định nghĩa lẫn lời gọi** (`EXEC dbo.P @id = 1, @total = @out OUTPUT;` — quên `OUTPUT` lúc gọi thì `@out` không nhận giá trị mà không báo lỗi).
+- **Table-Valued Parameter (TVP):** tạo `CREATE TYPE dbo.IntList AS TABLE (Id int PRIMARY KEY);` và truyền vào proc/func với từ khóa bắt buộc **`READONLY`** (`@ids dbo.IntList READONLY`) — an toàn và sạch hơn nối chuỗi `IN (...)` dynamic; bên PG dùng mảng (`int[]` + `= ANY($1)`).
+
 ---
 
 ## 5. Function: scalar, inline TVF, MSTVF
@@ -167,29 +175,35 @@ Parameter sniffing: plan theo lần chạy đầu. SS: `OPTIMIZE FOR`, `RECOMPIL
 ### 5.1 Scalar
 
 ```sql
--- SQL Server
+-- SQL Server (2019+: kiểm soát inlining bằng WITH INLINE = ON | OFF)
 CREATE OR ALTER FUNCTION dbo.Tax(@n decimal(12,2))
 RETURNS decimal(12,2)
-WITH SCHEMABINDING
+WITH SCHEMABINDING, INLINE = ON
 AS
 BEGIN
     RETURN @n * 0.10;
 END;
 
--- PostgreSQL
+-- PostgreSQL 14+: SQL-standard body (parse & track dependency lúc CREATE)
 CREATE OR REPLACE FUNCTION tax(n numeric)
 RETURNS numeric
 LANGUAGE sql
-IMMUTABLE
-PARALLEL SAFE
-AS $$ SELECT n * 0.10 $$;
+IMMUTABLE STRICT PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT n * 0.10;
+END;
 ```
 
-SS 2019+: scalar UDF *inlining* (FROID) khi đủ điều kiện (không time-dependent, không TVP, …). Tắt / không inline → RBAR. PG `LANGUAGE sql` đơn giản thường inline; `LANGUAGE plpgsql` thì không.
+**SQL Server Scalar UDF Inlining (FROID, 2019+):** tự động chuyển scalar UDF thành biểu thức/subquery nội tuyến thay vì chạy từng hàng (RBAR). Kiểm tra hàm có đủ điều kiện không qua **`sys.sql_modules.is_inlineable`** (`1`/`0`), bật/tắt từng hàm bằng `WITH INLINE = ON | OFF`, hoặc cấp DB qua `ALTER DATABASE SCOPED CONFIGURATION SET TSQL_SCALAR_UDF_INLINING = OFF | ON;`. Các yếu tố làm **mất inline**: gọi hàm thời gian/nondeterministic (`GETDATE`, `NEWID`), dùng table variable / TVP, `WHILE` / cursor / CTE đệ quy, hoặc `TRY...CATCH`.
 
-`IMMUTABLE` (PG): cùng đối số → cùng kết quả *mãi*, không đọc bảng. `STABLE`: ổn trong statement (đọc bảng được). `VOLATILE`: mặc định. Sai `IMMUTABLE` trên hàm đọc bảng / `now()` = expression index **sai** — [functions.md](functions.md) §11.
+**PostgreSQL function attributes & `BEGIN ATOMIC`:**
+- `IMMUTABLE` (cùng input → cùng kết quả *mãi*, không đọc bảng), `STABLE` (ổn trong 1 statement, đọc bảng được), `VOLATILE` (mặc định). Sai `IMMUTABLE` trên hàm đọc bảng / `now()` = expression index **sai** — [functions.md](functions.md) §11.
+- `STRICT` (`RETURNS NULL ON NULL INPUT`): gặp bất kỳ đối số `NULL` nào là trả `NULL` ngay không chạy body.
+- `LEAKPROOF` (chỉ superuser đặt được): cam kết không lộ dữ liệu qua error/side-effect — bắt buộc để planner pushdown predicate qua view `security_barrier` / RLS.
+- `COST` / `ROWS`: gợi ý chi phí và số hàng ước lượng cho planner (quan trọng cho SRF `plpgsql`, vốn mặc định ước lượng `ROWS 1000`).
+- **PG 14+ `BEGIN ATOMIC ... END;`** (cho `LANGUAGE sql`): thay thế `AS $$ ... $$` dạng chuỗi; PG parse và **khóa dependency lúc `CREATE`** (ngăn `DROP TABLE`/`ALTER COLUMN` vô tình làm gãy hàm, đồng thời an toàn trước bẫy đổi `search_path`).
 
-SS: `WITH SCHEMABINDING` + deterministic cho persisted computed / indexed view.
+PG `LANGUAGE sql` đơn giản thường inline; `LANGUAGE plpgsql` thì không. SS: `WITH SCHEMABINDING` + deterministic cho persisted computed / indexed view.
 
 ### 5.2 Inline TVF vs MSTVF
 
@@ -322,12 +336,12 @@ FOR EACH ROW
 EXECUTE FUNCTION trg_orders_audit();
 ```
 
-`EXECUTE FUNCTION` (PG 14+; `EXECUTE PROCEDURE` còn nhận cho tương thích). Hàm trigger **không tham số**, `RETURNS trigger` (hoặc `event_trigger`).
+`EXECUTE FUNCTION` (từ **PG 11+**; `EXECUTE PROCEDURE` chỉ giữ để tương thích ngược). Hàm trigger khai báo không tham số ở chữ ký `CREATE FUNCTION f() RETURNS trigger` (hoặc `event_trigger`), nhưng khi gắn `CREATE TRIGGER ... EXECUTE FUNCTION f('a', 'b')` vẫn nhận được chuỗi đối số qua **`TG_ARGV[]`** (`TG_NARGS`).
 
 | | `FOR EACH ROW` | `FOR EACH STATEMENT` |
 |---|---|---|
-| `NEW`/`OLD` | có | không (dùng transition table) |
-| `BEFORE` | `RETURN NEW` / `NULL` (hủy hàng) / sửa `NEW` | `RETURN NULL` |
+| `NEW`/`OLD` | có (`BEFORE DELETE`: `NEW` là **`NULL`**!) | không (dùng transition table) |
+| `BEFORE` | `INSERT`/`UPDATE`: `RETURN NEW` (sửa được `NEW`); **`BEFORE DELETE` BẮT BUỘC `RETURN OLD`** (`RETURN NEW` = `NULL` sẽ **âm thầm hủy xóa mọi hàng**!); `RETURN NULL` = hủy thao tác trên hàng đó | `RETURN NULL` |
 | Burst 10k `INSERT` | 10k lần hàm | 1 lần |
 
 Transition table (statement-level, PG 10+):
@@ -351,11 +365,13 @@ FOR EACH STATEMENT
 EXECUTE FUNCTION trg_orders_audit_stmt();
 ```
 
-Cùng ý `inserted`: một `INSERT…SELECT`, không vòng. `OLD TABLE` cho `DELETE`/`UPDATE`. Transition table **không** dùng với `CONSTRAINT TRIGGER` / một số `BEFORE` — đọc docs 19 khi lệch.
+Cùng ý `inserted`: một `INSERT…SELECT`, không vòng. `OLD TABLE` cho `DELETE`/`UPDATE`. Trên PG, transition table chỉ dùng cho **`AFTER` trigger** — **cấm hoàn toàn với mọi `BEFORE` và `INSTEAD OF` trigger** (và cũng không dùng được với `CONSTRAINT TRIGGER` hay trigger có `UPDATE OF col`).
+
+**Thứ tự chạy nhiều trigger trên cùng bảng/sự kiện:** **PostgreSQL** chạy xác định theo **thứ tự bảng chữ cái (alphabet) của tên trigger**. **SQL Server** **không** đảm bảo thứ tự giữa các trigger; chỉ định được tối đa 1 trigger `First` và 1 trigger `Last` cho mỗi sự kiện `AFTER` bằng `EXEC sys.sp_settriggerorder`.
 
 Test bắt buộc: `INSERT INTO t SELECT … FROM generate_series(1,1000)` / SS `INSERT … SELECT` 1000 hàng — trigger một hàng sẽ silent-sai trên burst.
 
-**Ghi chú:** `BEFORE ROW` `RETURN NULL` nuốt hàng **không lỗi**. `AFTER` không đổi hàng đang ghi bằng `RETURN`. Mutating: trigger sửa cùng bảng → vòng; đo `pg_trigger_depth()` / `TRIGGER_NESTLEVEL()`. Không gọi REST / `AI_GENERATE_EMBEDDINGS` trong trigger OLTP.
+**Ghi chú:** `BEFORE ROW` `RETURN NULL` nuốt hàng **không lỗi** (đặc biệt bẫy `RETURN NEW` trong `BEFORE DELETE`!). `AFTER` không đổi hàng đang ghi bằng `RETURN`. Mutating: trigger sửa cùng bảng → vòng; đo `pg_trigger_depth()` / `TRIGGER_NESTLEVEL()`. Không gọi REST / `AI_GENERATE_EMBEDDINGS` trong trigger OLTP.
 
 ---
 
@@ -375,7 +391,7 @@ EXEC sys.sp_executesql
     @id = @id;
 ```
 
-`QUOTENAME(@x)` mặc định `[…]`. `QUOTENAME` trả `NULL` nếu input quá dài (>128 sau quote) — kiểm tra NULL trước `EXEC`.
+`QUOTENAME(@x)` mặc định bọc `[…]` và trả về `nvarchar(258)`. Hàm trả **`NULL` khi input > 128 ký tự** (giới hạn `sysname`) hoặc ký tự quote không hợp lệ — phải kiểm tra `NULL` trước `EXEC` (vì nối chuỗi với `NULL` làm `@sql = NULL`, và `sp_executesql NULL` im lặng không chạy gì).
 
 ```sql
 -- PostgreSQL
@@ -397,7 +413,7 @@ EXECUTE 'SELECT * FROM ' || user_table;
 SET @sql = N'SELECT * FROM ' + @table;
 ```
 
-`sp_executesql` / `EXECUTE … USING` giữ plan theo text đã parameterize. Nối literal giá trị vào chuỗi → cache nổ + injection.
+Trên SQL Server, `sp_executesql` giữ plan trong cache theo text đã parameterize. Trên PostgreSQL, PL/pgSQL `EXECUTE ... USING` tách giá trị khỏi câu SQL để chống injection, **nhưng không bao giờ cache plan** (mỗi lần chạy đều parse và plan lại — muốn cache plan cần static SQL trong PL/pgSQL hoặc `PREPARE`/`EXECUTE` ở tầng SQL). Nối literal giá trị vào chuỗi → cache nổ + injection.
 
 PL/pgSQL `EXECUTE` khác T-SQL `EXECUTE(@sql)` (ad-hoc) và khác `EXECUTE proc`. Tên trùng: trong PL luôn `EXECUTE format` cho dynamic SQL, `CALL` cho procedure.
 
@@ -526,7 +542,7 @@ GRANT EXECUTE ON FUNCTION tax(numeric) TO app_user;
 
 Caller chỉ cần `EXECUTE`; routine đọc bảng bằng quyền **invoker** (mặc định) hoặc **definer**.
 
-**PostgreSQL `SECURITY DEFINER`:** chạy với chủ sở hữu. Mặc định `search_path` có `$user` và **`pg_temp` trước** — attacker tạo `temp table` / hàm trùng tên → routine definer gọi nhầm, leo quyền.
+**PostgreSQL `SECURITY DEFINER`:** chạy với chủ sở hữu. Chuỗi `search_path` mặc định là `"$user", public` — tuy `pg_temp` không viết trong chuỗi đó, nhưng nếu chưa xuất hiện tường minh, PostgreSQL **ngầm tìm `pg_temp` đầu tiên cho table/view/type** (còn function/operator thì không tự tìm `pg_temp`). Attacker vẫn có thể tạo temp table trùng tên để đánh lừa query trong hàm definer → leo quyền. Chuẩn an toàn là ghim `SET search_path = admin, pg_temp` (`pg_temp` **cuối** để chặn tìm ngầm đầu tiên) và qualify đầy đủ `schema.table`.
 
 ```sql
 CREATE OR REPLACE FUNCTION check_password(uname text, pass text)
@@ -559,7 +575,7 @@ AS
 …
 ```
 
-`OWNER` ≈ definer. Default schema của user impersonate + synonym = bẫy tên. Module signing / certificate khi cần cross-db. Dynamic SQL trong `EXECUTE AS OWNER` vẫn injection nếu nối identifier — quyền *cao hơn* + injection = mất DB.
+`OWNER` ≈ definer. Default schema của user impersonate + synonym = bẫy tên. **Sandbox & Cross-DB:** mọi `EXECUTE AS` ở mức module bị đóng **sandbox trong chính database hiện tại** (không truy cập được DB khác hay quyền cấp server). **Tuyệt đối tránh bật `TRUSTWORTHY ON`** để vượt sandbox (vì `db_owner` có thể leo quyền lên `sysadmin`!). Cách an toàn chuẩn cho cross-DB / quyền đặc biệt là **Module Signing** (`CREATE CERTIFICATE` + `ADD SIGNATURE TO dbo.Proc BY CERTIFICATE ...` + tạo user/login từ certificate và cấp đúng quyền tối thiểu) — chi tiết [permissions.md](permissions.md). Dynamic SQL trong `EXECUTE AS OWNER` vẫn injection nếu nối identifier — quyền *cao hơn* + injection = mất DB.
 
 **Ghi chú:** Review mọi `SECURITY DEFINER` / `EXECUTE AS OWNER`: `SET search_path` (PG), schema cố định (SS), không `%s` / string-concat identifier, `PUBLIC` đã revoke. Mô hình `GRANT`/`DENY`/RLS: [permissions.md](permissions.md).
 
@@ -620,14 +636,10 @@ ALTER DATABASE SCOPED CONFIGURATION SET OPTIMIZED_SP_EXECUTESQL = ON;
 
 ---
 
-```
-
----
-
 ## 13. Lỗi: `TRY`/`CATCH` vs `EXCEPTION`
 
 ```sql
--- T-SQL: XACT_ABORT ON → lỗi nghiêm trọng abort batch; CATCH nuốt nếu BEGIN TRY
+-- T-SQL: XACT_ABORT ON → trong TRY...CATCH, lỗi nghiêm trọng biến txn thành doomed (XACT_STATE() = -1)
 SET XACT_ABORT ON;
 BEGIN TRY
     BEGIN TRAN;
@@ -635,13 +647,13 @@ BEGIN TRY
     COMMIT;
 END TRY
 BEGIN CATCH
-    IF @@TRANCOUNT > 0 ROLLBACK;
-    THROW;          -- giữ số lỗi; RAISERROR không phải rethrow đúng
+    IF XACT_STATE() <> 0 ROLLBACK TRAN;   -- 1 = committable, -1 = doomed (bắt buộc rollback), 0 = không có txn
+    THROW;                                -- giữ nguyên số lỗi gốc; RAISERROR không phải rethrow đúng
 END CATCH;
 
 -- PL/pgSQL: lỗi abort txn; EXCEPTION = savepoint ẩn quanh block
 BEGIN
-    PERFORM p(1);
+    CALL p(1);                            -- p là PROCEDURE → bắt buộc CALL (PERFORM chỉ cho FUNCTION!)
 EXCEPTION
     WHEN unique_violation THEN
         RAISE NOTICE 'dup';
@@ -652,9 +664,9 @@ END;
 
 Function PG **không** `COMMIT`/`ROLLBACK` trong `EXCEPTION`. Procedure PG `COMMIT` trong `EXCEPTION` chỉ khi không definer / không `SET` clause — dễ vỡ; đưa txn ra caller.
 
-SS: `CATCH` không bắt compile error / kill. `THROW` không đối số chỉ trong `CATCH`. `@@ERROR` sau statement, không stack như PG `GET STACKED DIAGNOSTICS`.
+SS: `CATCH` không bắt compile error / kill. Kiểm `XACT_STATE()` trong `CATCH` khi bật `SET XACT_ABORT ON`: nếu `XACT_STATE() = -1` (uncommittable) thì không được `COMMIT` hay rollback về savepoint, bắt buộc `ROLLBACK TRAN` toàn bộ. `THROW` không đối số chỉ trong `CATCH`. `@@ERROR` sau statement, không stack như PG `GET STACKED DIAGNOSTICS`.
 
-Trigger: lỗi trong trigger SS rollback statement (và txn nếu `XACT_ABORT`); PG `EXCEPTION` trong hàm trigger nuốt thì hàng vẫn ghi trừ khi `RAISE`. Đừng nuốt unique_violation trong trigger audit rồi nghĩ “không sao”.
+Trigger: lỗi trong trigger SS rollback statement (và txn nếu `XACT_ABORT`); PG `EXCEPTION` trong hàm trigger nuốt thì hàng vẫn ghi trừ khi `RAISE`. Đừng nuốt `unique_violation` trong trigger audit rồi nghĩ “không sao”.
 
 ---
 
@@ -664,8 +676,8 @@ Trigger: lỗi trong trigger SS rollback statement (và txn nếu `XACT_ABORT`);
 |---|---|---|---|
 | SS `EXEC(@sql)` / `EXECUTE(@sql)` | ad-hoc; text khác = plan khác | nối chuỗi → injection + cache nổ | **không** vào `OPTIMIZED_SP_EXECUTESQL` |
 | SS `sp_executesql` | cache theo text đã parameterize | `@p` | **có** khi scoped ON |
-| PG `EXECUTE format … USING` | plan theo prepared trong session | `$1` | không có switch cùng tên |
-| PG `PREPARE`/`EXECUTE` | generic vs custom (`plan_cache_mode`) | `$1` | `pg_plan_advice` **19** |
+| PG PL/pgSQL `EXECUTE format … USING` | **không bao giờ cache plan** (parse & plan lại mỗi lần gọi) | `$1` | — |
+| PG SQL `PREPARE`/`EXECUTE` | generic vs custom (`plan_cache_mode`) | `$1` | `pg_plan_advice` **19** |
 
 `optimize for ad hoc workloads` (SS) stub plan lần đầu — khác serialize compile. Dùng cả hai khi đo được: ad-hoc rác *và* ORM `sp_executesql` trùng text.
 
@@ -715,8 +727,11 @@ TVP (SS) / array (PG) thay list `IN (1,2,3)` dựng dynamic. `STRING_AGG` id r�
 - `LANGUAGE plpgsql IMMUTABLE` đọc bảng.
 - `EXECUTE '…' || table_name`.
 - `%s` trong `format` với input user.
-- `QUOTENAME` NULL nuốt cả batch.
-- `SECURITY DEFINER` không `SET search_path`, `pg_temp` đầu.
+- `QUOTENAME` trả `NULL` (input > 128 ký tự) làm `@sql` thành `NULL` → `sp_executesql NULL` im lặng không làm gì.
+- `BEFORE DELETE` trên PG viết `RETURN NEW` (vốn là `NULL`) → âm thầm hủy xóa mọi hàng (phải `RETURN OLD`).
+- Quên `OUTPUT` ở câu lệnh `EXEC` gọi proc T-SQL, hoặc dùng `SELECT @n = ...` trong vòng lặp mà không reset biến khi 0 hàng.
+- Bật `TRUSTWORTHY ON` để vượt sandbox `EXECUTE AS` (leo quyền `db_owner` → `sysadmin`; dùng Module Signing thay thế).
+- `SECURITY DEFINER` không `SET search_path`, để `pg_temp` tìm ngầm đầu tiên.
 - `GRANT EXECUTE … TO PUBLIC`.
 - `sp_invoke_external_rest_endpoint` chưa `sp_configure` (box 2025).
 - REST trong trigger / cursor.
@@ -737,10 +752,11 @@ TVP (SS) / array (PG) thay list `IN (1,2,3)` dựng dynamic. `STRING_AGG` id r�
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
 | `CREATE OR ALTER PROCEDURE` | 2016+ | `CREATE OR REPLACE` lâu |
-| Scalar UDF inlining (FROID) | **2019+** | SQL-language inline lâu |
+| Scalar UDF inlining (FROID) | **2019+** (`WITH INLINE`, `is_inlineable`) | SQL-language inline lâu |
+| SQL-standard body `BEGIN ATOMIC ... END;` | — | **14+** (parse & track dependency lúc `CREATE`) |
 | Interleaved execution MSTVF | **2017+** | — |
 | `THROW` | 2012+ | `RAISE` |
-| `EXECUTE FUNCTION` trigger | — | **14+** (khuyên dùng) |
+| `EXECUTE FUNCTION` trigger | — | **11+** (khuyên dùng) |
 | Transition tables | `inserted`/`deleted` | **10+** `REFERENCING … TABLE` |
 | `SECURITY DEFINER` | `EXECUTE AS` | lõi function/proc |
 | `format(%I,%L)` | — | lõi |
@@ -772,7 +788,7 @@ BEGIN
 END;
 ```
 
-PostgreSQL `BEFORE ROW`: sửa `NEW.col`, `RETURN NEW`. `INSTEAD OF` chỉ trên **view** (PG 9.1+), không trên table. `BEFORE STATEMENT` không có `NEW`.
+PostgreSQL `BEFORE ROW`: sửa `NEW.col`, `RETURN NEW` (riêng `BEFORE DELETE` bắt buộc `RETURN OLD`). `INSTEAD OF` trên PG chỉ dùng trên **view** (PG 9.1+) và **chỉ hỗ trợ `FOR EACH ROW`** (không hỗ trợ `FOR EACH STATEMENT` và không dùng trên table). `BEFORE STATEMENT` không có `NEW`.
 
 Sâu: SS nested trigger 32; `TRIGGER_NESTLEVEL()`. PG `pg_trigger_depth()`. Cả hai: trigger sửa cùng bảng + recursive ON = vòng. Audit tách bảng, không `UPDATE` lại hàng đang `inserted`.
 

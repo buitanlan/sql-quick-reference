@@ -121,9 +121,12 @@ SELECT pg_typeof(1.0 / 2);           -- numeric
 SELECT SQL_VARIANT_PROPERTY(1.0 / 2, 'BaseType');  -- numeric
 ```
 
-**Ghi chú:** `money` SQL Server (4 chữ số thập phân, có nguy cơ truncation/rounding trong tính toán) và `money` PostgreSQL (fractional precision phụ thuộc `lc_monetary`, **không** portable) — đừng dùng cột mới. Port `money` → `numeric(19,4)` có chủ đích.
+**Ghi chú:**
 
-Chia `numeric` vs `float` đổi báo cáo tài chính. Literal `1.23e0` là float trên SQL Server nhưng khởi đầu là numeric trên PostgreSQL — [literals.md](literals.md).
+- `money` SQL Server (4 chữ số thập phân, có nguy cơ truncation/rounding trong tính toán) và `money` PostgreSQL (fractional precision phụ thuộc `lc_monetary`, **không** portable) — đừng dùng cột mới. Port `money` → `numeric(19,4)` có chủ đích.
+- **SQL Server `decimal/numeric` scale truncation:** khi phép nhân/chia đẩy precision vượt quá 38, SQL Server **tự động cắt giảm scale** (tối thiểu xuống 6; nếu phần nguyên chiếm > 32 chữ số có thể cắt sâu hơn hoặc tràn) để giữ precision ≤ 38 — ví dụ `numeric(38,6) * numeric(38,6)` hoặc `numeric(38,10) / numeric(38,10)` có thể mất chữ số thập phân bất ngờ.
+- **PostgreSQL `numeric`:** từ **PG 15+**, hỗ trợ scale âm (`numeric(4, -2)` làm tròn hàng trăm) và `scale > precision` (`numeric(2, 4)` lưu số nhỏ kiểu `0.00xx`). Quy tắc làm tròn khi cast/round khác theo kiểu: `numeric` làm tròn **half away from zero** (`2.5 → 3`, `-2.5 → -3`), còn `float8` làm tròn **half to even** (banker's rounding: `2.5::float8::int → 2`, `3.5::float8::int → 4`).
+- Chia `numeric` vs `float` đổi báo cáo tài chính. Literal `1.23e0` là float trên SQL Server nhưng khởi đầu là numeric trên PostgreSQL — [literals.md](literals.md).
 
 ### 2.3 Float, Inf, NaN
 
@@ -215,7 +218,7 @@ SELECT exp(sum(ln(factor))) FROM rates WHERE factor > 0;
 |---|---|---|
 | ASCII/DBCS | `char(n)`, `varchar(n)`, `varchar(max)` | — (mọi text theo encoding DB, thường UTF8) |
 | Unicode | `nchar`, `nvarchar`, `nvarchar(max)` | `char`, `varchar`, `text` |
-| Không giới hạn | `varchar(max)` / `nvarchar(max)` (~2 GB) | `text` (legacy) / `varchar` không `(n)` |
+| Không giới hạn | `varchar(max)` / `nvarchar(max)` (~2 GB) | `text` (chuẩn khuyên dùng, ~1 GB) / `varchar` không `(n)` |
 | Binary | `binary(n)`, `varbinary(n)`, `varbinary(max)` | `bytea` |
 | Deprecated | `text`/`ntext`/`image` | `bpchar` ít dùng tay |
 
@@ -235,13 +238,13 @@ SELECT substring('abcdef' FROM 3);        -- 'cdef'
 SELECT convert_from('\xDEADBEEF'::bytea, 'UTF8'); -- lỗi nếu không phải UTF-8 hợp lệ
 ```
 
-`varchar(n)` SQL Server: `n` là **ký tự** với `varchar`; với `nvarchar` là độ dài UTF-16 (đơn vị 16-bit). Supplementary (emoji) = 2 đơn vị nếu collation **không** SC — cắt giữa surrogate.
+`varchar(n)` SQL Server: `n` là số **BYTE**, không phải số ký tự — bẫy cực hay gặp từ **SQL Server 2019+** khi dùng collation `_UTF8`: chữ tiếng Việt có dấu chiếm 2–3 byte, emoji chiếm 4 byte nên `varchar(10)` có thể chỉ chứa 3–5 ký tự và gây lỗi truncation (`Msg 2628`). Với `nvarchar(n)`, `n` luôn là số **UTF-16 code unit** (mỗi đơn vị 2 byte), không đổi theo cờ `SC`; supplementary character (emoji) luôn chiếm 2 unit (cờ `SC` chỉ giúp hàm như `LEN`/`SUBSTRING` xử lý đúng ký tự thay vì cắt giữa surrogate pair).
 
 PostgreSQL `varchar(n)`: `n` là **ký tự**, không phải byte. `'é'` đếm 1 dù 2 byte UTF-8.
 
 **Ghi chú:**
 
-- `char(n)` pad space: so sánh SQL Server thường bỏ trailing space (`ANSI_PADDING`); PG `bpchar` cũng đặc biệt. Đừng PK `char`.
+- `char(n)` pad space: hành vi bỏ trailing space khi so sánh `=` trên SQL Server là quy chuẩn ANSI, **không** do `ANSI_PADDING` điều khiển (`ANSI_PADDING` chỉ ảnh hưởng lưu trữ trailing space); PG `bpchar` cũng bỏ trailing space khi `=`. Đừng PK `char`.
 - `varchar(max)` vs `varchar(n)`: index key SQL Server không lấy cả max (cần computed/`INCLUDE`/full-text). PG `text` index btree được đến ~1/3 page (~2700 byte) — dài hơn TOAST/hash/GIN.
 - Binary: SQL Server `0xDEAD` literal; PG `bytea` hex `'\xDEAD'::bytea` — [literals.md](literals.md).
 - SQL Server 2025: `BASE64_ENCODE` / `BASE64_DECODE` — hàm, **không** kiểu/`0b` literal. PG: `encode`/`decode`; **19** thêm `base64url` / `base32hex`. Output `varchar`/`text`/`bytea` tùy hàm — neo kiểu tường minh.
@@ -278,7 +281,7 @@ SET TimeZone = 'Asia/Ho_Chi_Minh';
 SELECT now();                            -- cùng instant, display khác
 ```
 
-**Ghi chú:** SQL Server `datetime` làm tròn **3.33 ms** (increment 1/300 s) và không nhận năm trước 1753. Cột mới: `datetime2(n)` hoặc `datetimeoffset(n)`. `timestamp` T-SQL là **`rowversion`**, không phải thời gian — đừng map sang `timestamp` PG.
+**Ghi chú:** SQL Server `datetime` làm tròn **3.33 ms** (increment 1/300 s) và không nhận năm trước 1753. Cột mới: `datetime2(n)` hoặc `datetimeoffset(n)`. **Độ phân giải tối đa khác nhau:** SQL Server `datetime2(7)` / `time(7)` đạt **100 ns** (7 chữ số thập phân), còn PostgreSQL `timestamp(6)` / `timestamptz(6)` / `time(6)` tối đa **1 μs** (6 chữ số) — chuyển dữ liệu từ SS sang PG sẽ làm tròn mất chữ số thứ 7. `timestamp` T-SQL là **`rowversion`**, không phải thời gian — đừng map sang `timestamp` PG.
 
 ### 4.2 Đồng hồ trong transaction
 
@@ -361,11 +364,11 @@ WHERE is_active IS TRUE     -- loại NULL
 WHERE is_active = true
 ```
 
-SQL Server `BIT` arithmetic promote lên `int` (`SUM(bit)` được). PostgreSQL `boolean` không cộng — `COUNT(*) FILTER (WHERE is_active)` hoặc `::int`.
+Cả hai engine đều **không** chạy trực tiếp được `SUM(bit)` / `SUM(boolean)`: SQL Server ném lỗi `Operand data type bit is invalid for sum operator` (phải viết `SUM(CAST(IsActive AS int))`), còn PostgreSQL dùng `COUNT(*) FILTER (WHERE is_active)` hoặc `SUM(is_active::int)`.
 
 `IS TRUE` / `IS FALSE` / `IS UNKNOWN`: PG đầy đủ. SQL Server không có trên `bit`.
 
-**Ghi chú:** Driver ADO `bool` → `bit`. Npgsql `bool` → `boolean`. Port cột `bit` sang PG `boolean` rồi giữ `SUM(IsActive)` = lỗi kiểu.
+**Ghi chú:** Driver ADO `bool` → `bit`. Npgsql `bool` → `boolean`. Trên SQL Server cũng không có `SUM(bit)` — luôn ép `CAST(IsActive AS int)` trước khi cộng (trên PG dùng `COUNT(*) FILTER (WHERE ...)` hoặc `SUM(is_active::int)`).
 
 ---
 
@@ -496,7 +499,7 @@ SELECT VECTORPROPERTY(@q, 'Dimensions');
 | `CREATE EXTERNAL MODEL` / `ALTER` / `DROP` | GA surface | REST embedding, credential **tách** engine |
 | `AI_GENERATE_EMBEDDINGS` / `AI_GENERATE_CHUNKS` | GA surface | Chunk + gọi model đã định nghĩa |
 | `CREATE VECTOR INDEX` (DiskANN), `VECTOR_SEARCH` | **PREVIEW** on-prem và MI policy 2025; **GA** trên Azure SQL Database, Fabric, MI Always-up-to-date | On-prem cần `PREVIEW_FEATURES`; catalog `sys.vector_indexes`. Index mới cho DML; `TRUNCATE` bảng có index này thì không |
-| Hybrid vector + full-text | GA ý |pgvector là extension |
+| Hybrid vector + full-text | **GA** (ghép `VECTOR_DISTANCE` + Full-Text) | `pgvector` là extension (ghép `tsvector` / BM25 extension) |
 
 ```sql
 -- PREVIEW
@@ -543,12 +546,12 @@ T2: cùng DB, query VECTOR_SEARCH — lab OK
 | Geometry | `geometry`, `geography` (SRID) | `geometry` / `geography` (**PostGIS**, extension) |
 | Hierarchy | `hierarchyid` | `ltree` (extension) / recursive CTE |
 | Variant | `sql_variant` (**tránh**) | — |
-| Row version | `rowversion` / `timestamp` (không phải thời gian) | `xmin` / `xmax` system column (MVCC) — [transactions.md](transactions.md), [internal.md](internal.md) |
-| Alias | `sysname` | `name` (catalog, 63 byte) |
+| Row version | `rowversion` / `timestamp` (không phải thời gian) | `xmin` / `xmax` system column (MVCC, **không** thay trực tiếp `rowversion`) — [transactions.md](transactions.md), [internal.md](internal.md) |
+| Tên catalog | `sysname` (alias type của `nvarchar(128)`) | `name` (kiểu catalog 64-byte riêng biệt, không phải alias type; tối đa 63 byte tên + NUL) |
 
 `sql_variant` mất collation/precision khi convert, cấm một số kiểu (`xml`, `geography`, `max`), khó index — đừng cột mới.
 
-`rowversion` tự đổi mỗi update hàng; dùng cho optimistic concurrency, **không** làm thời gian tạo.
+`rowversion` tự đổi mỗi update hàng; dùng cho optimistic concurrency, **không** làm thời gian tạo. Trên PostgreSQL, `xmin` là transaction ID 32-bit bị wraparound và có thể bị `VACUUM` đóng băng (`FrozenTransactionId` = `2` hoặc đánh dấu frozen trong tuple header) — **không** thay trực tiếp `rowversion` cho hàng sống lâu; dùng cột `version bigint` tự tăng qua trigger/app để optimistic locking an toàn.
 
 ---
 
@@ -596,7 +599,7 @@ Precedence SQL Server (rút gọn, cao → thấp): user-defined → `sql_varian
 
 Hệ quả: `'1' + 2` → int 3 (chuỗi convert số); `1 + N'2'` tương tự. `'a' + 2` → lỗi convert. Nối chuỗi: ép `CONVERT(varchar, n)` hoặc `CONCAT`.
 
-PostgreSQL: chọn operator **best match** trong `pg_operator`; thất bại → `operator is not unique` / `cannot resolve`. Cast implicit **ít hơn** SQL Server — `'1' + 2` không thành 3 (không có `text + int`); `'1'::int + 2` hoặc `concat`.
+PostgreSQL: chọn operator **best match** trong `pg_operator`; thất bại → `operator is not unique` / `cannot resolve`. Cast implicit **ít hơn** SQL Server: lưu ý `'1' + 2` **vẫn chạy thành `3`** trên PG vì `'1'` là literal kiểu `unknown` (được neo sang `int`), chỉ `'1'::text + 2` hoặc `text_col + 2` mới **lỗi** (không có toán tử `text + int` — phải ép `'1'::int + 2` hoặc dùng `concat`).
 
 ```sql
 -- PostgreSQL
@@ -685,18 +688,18 @@ T2: INSERT gen_random_uuid() / NEWID()
 ## 17. Bẫy khi review
 
 - Map `datetime` → `timestamp` (PG) hoặc `timestamp` T-SQL → thời gian.
-- Map `bit` → `boolean` rồi `SUM(bit)` trên PG.
+- Gọi `SUM(bit)` trên SQL Server hoặc `SUM(boolean)` trên PG (cả hai đều lỗi kiểu — phải ép `int` hoặc `COUNT(*) FILTER`).
 - `AT TIME ZONE` copy nguyên văn giữa hai engine.
 - `now()` mặc định cột PG trong txn dài — mọi hàng cùng timestamp.
-- `varchar(n)` đếm byte vs ký tự vs UTF-16 unit (emoji).
+- `varchar(n)` đếm byte vs ký tự vs UTF-16 unit (emoji, collation `_UTF8` 2019+).
 - `NaN = NaN` numeric PG trong unique/join.
 - `tinyint` âm; unsigned giả định trên PG.
 - `serial` dump thiếu `OWNED BY` / grant sequence.
 - `sql_variant` / `money` cột mới.
-- `vector` **index** trên prod khi mới `PREVIEW_FEATURES`.
-- JSON INDEX trên heap; scalar JSON cast vào kiểu json SQL Server chỉ nhận object/array.
+- Bật `PREVIEW_FEATURES` cho `CREATE VECTOR INDEX` / `VECTOR_SEARCH` trên production on-prem SQL Server 2025.
+- JSON INDEX trên heap; scalar JSON cast vào kiểu json SQL Server chỉ nhận object/array (mặc định RFC 4627).
 - `json` text PG (giữ key trùng) vs `jsonb` vs SQL Server `json` binary — so sánh `=` khác nhau.
-- Implicit `'1'+2` T-SQL sống sót khi port — PG lỗi lúc chạy.
+- Implicit `varchar_col + 2` trên T-SQL khi port sang `text_col + 2` trên PG bị lỗi kiểu (còn literal `'1' + 2` vẫn chạy trên PG do kiểu `unknown`).
 - `CURRENT_DATE` cột vs hàm sau nâng 2025.
 - `PRODUCT(float)` cho tiền; `exp(sum(ln()))` có zero/âm.
 - `uuidv7` bịa trên T-SQL; `NEWID` làm clustered “cho nhanh”.
@@ -710,9 +713,9 @@ T2: INSERT gen_random_uuid() / NEWID()
 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
-| Kiểu `json` native | **2025 GA** | `json`/`jsonb` lâu (`jsonb` 9.4+) |
-| `JSON_OBJECTAGG` / `JSON_ARRAYAGG` | **2025 GA** | `json_object_agg` lâu |
-| `JSON INDEX` / `JSON_CONTAINS` | **GA** | GIN `@>` |
+| Kiểu `json` native | **2025 GA** (RFC 4627: object/array) | `json`/`jsonb` lâu (`jsonb` 9.4+) |
+| `JSON_OBJECTAGG` / `JSON_ARRAYAGG` | **2025 GA** | SQL/JSON chuẩn **16+** (`json_object_agg` lâu) |
+| `JSON INDEX` / `JSON_CONTAINS` | **2025 GA** | GIN `@>` / `jsonb_path_exists` (**12+**) |
 | `vector(n)` + distance | **2025 GA** | pgvector (extension) |
 | Half-precision vector | **2025 PREVIEW**; float16 cần PREVIEW_FEATURES | pgvector halfvec theo version extension |
 | `VECTOR_SEARCH` / vector index | **2025 PREVIEW** | pgvector IVFFlat/HNSW |

@@ -36,7 +36,8 @@ ORDER BY id;
 -- Native JSON accepts an object/array; JSON_CONTAINS takes a SQL search value.
 DECLARE @doc json = N'{"status":"open","items":[1,2]}';
 SELECT JSON_CONTAINS(@doc, N'open', '$.status') AS has_status; -- 1
-SELECT id FROM (VALUES (1)) AS d(id) WHERE 1 = 0 FOR JSON PATH; -- []
+-- FOR JSON PATH returns no rows (NULL in a scalar subquery) on 0 rows; wrap with ISNULL for [].
+SELECT ISNULL((SELECT id FROM (VALUES (1)) AS d(id) WHERE 1 = 0 FOR JSON PATH), N'[]') AS empty_json_array; -- []
 
 -- CREATE TABLE, ALTER TABLE, CREATE INDEX and TRUNCATE are transactional.
 BEGIN TRY

@@ -27,15 +27,15 @@ Constraint: [constraints.md](constraints.md). Index: [indexes.md](indexes.md). K
 - [10. REPACK vs REBUILD](#10-repack-vs-rebuild)
   - [10.1 REPACK CONCURRENTLY](#101-repack-concurrently)
 - [11. IF EXISTS / CASCADE](#11-if-exists--cascade)
-- [13. Worked examples](#13-worked-examples)
-  - [13.1 Đơn giản — bảng + identity trong txn (PG) vs batch (SS)](#131-đơn-giản--bảng--identity-trong-txn-pg-vs-batch-ss)
-  - [13.2 Trung bình — VIRTUAL + extended stats + index online](#132-trung-bình--virtual--extended-stats--index-online)
-  - [13.3 Thêm partition, đồng bộ sequence và REPACK](#133-thêm-partition-đồng-bộ-sequence-và-repack)
-  - [13.4 Rollback ALTER TABLE trên cả hai engine](#134-rollback-alter-table-trên-cả-hai-engine)
-  - [13.5 VALIDATE vs NOCHECK](#135-validate-vs-nocheck)
-- [14. Best practices & checklist](#14-best-practices--checklist)
-- [15. Bẫy khi review](#15-bẫy-khi-review)
-- [16. Version gates](#16-version-gates)
+- [12. Worked examples](#12-worked-examples)
+  - [12.1 Đơn giản — bảng + identity trong txn (PG) vs batch (SS)](#121-đơn-giản--bảng--identity-trong-txn-pg-vs-batch-ss)
+  - [12.2 Trung bình — VIRTUAL + extended stats + index online](#122-trung-bình--virtual--extended-stats--index-online)
+  - [12.3 Thêm partition, đồng bộ sequence và REPACK](#123-thêm-partition-đồng-bộ-sequence-và-repack)
+  - [12.4 Rollback ALTER TABLE trên cả hai engine](#124-rollback-alter-table-trên-cả-hai-engine)
+  - [12.5 VALIDATE vs NOCHECK](#125-validate-vs-nocheck)
+- [13. Best practices & checklist](#13-best-practices--checklist)
+- [14. Bẫy khi review](#14-bẫy-khi-review)
+- [15. Version gates](#15-version-gates)
 - [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
@@ -170,7 +170,7 @@ ALTER TABLE events SET (fillfactor = 90);   -- hàng mới; REPACK để áp hea
 CREATE INDEX ix ON dbo.Orders (CustomerId) WITH (FILLFACTOR = 90);
 ```
 
-**Ghi chú:** `CREATE TABLE AS SELECT` / `SELECT INTO` (SS) copy dữ liệu, **không** copy index/constraint đủ bộ. Partitioned: PK phải gồm khóa partition (PG declarative) — mục 7.
+**Ghi chú:** `CREATE TABLE AS SELECT` (PG) chỉ copy dữ liệu và kiểu cột — **không** copy `NOT NULL`, `DEFAULT`, `IDENTITY`, index hay constraint; muốn sao chép đủ cấu trúc bảng trên PG hãy dùng `CREATE TABLE new_t (LIKE old_t INCLUDING ALL);`. `SELECT INTO` (SQL Server) chỉ giữ `NOT NULL` và `IDENTITY`, **không** copy `DEFAULT`, index hay constraint. Partitioned: PK phải gồm khóa partition (PG declarative) — mục 7.
 
 ---
 
@@ -178,38 +178,45 @@ CREATE INDEX ix ON dbo.Orders (CustomerId) WITH (FILLFACTOR = 90);
 
 Mục tiêu production: tránh rewrite + tránh `ACCESS EXCLUSIVE` dài.
 
+**Lock queue amplification (PostgreSQL):** Ngay cả `ALTER TABLE` **metadata-only** (rất nhanh) vẫn cần xin `ACCESS EXCLUSIVE`. Nếu có một query/transaction dài đang chạy trên bảng, `ALTER TABLE` phải đứng chờ — và **mọi `SELECT`/`DML` mới đến sau sẽ xếp hàng sau `ALTER TABLE`** khiến toàn bộ bảng treo cứng. Luôn đặt `SET lock_timeout = '2s';` (trong transaction) kết hợp vòng lặp retry khi chạy DDL production (SQL Server có `WAIT_AT_LOW_PRIORITY` cho một số tác vụ online/switch).
+
 ```sql
 ALTER TABLE orders ADD COLUMN note text;
 ALTER TABLE orders DROP COLUMN note;
-ALTER TABLE orders ALTER COLUMN total TYPE numeric(14,2);   -- PG; có thể rewrite
+ALTER TABLE orders ALTER COLUMN total TYPE numeric(14,2);   -- PG 9.2+: giữ scale → metadata-only; đổi scale (vd numeric(14,4)) mới rewrite
 ALTER TABLE dbo.Orders ALTER COLUMN Total decimal(14,2);    -- SQL Server
 ```
 
 | Thao tác | SQL Server | PostgreSQL |
 |---|---|---|
 | Add cột **nullable**, không default volatile | Metadata, nhanh | Metadata |
-| Add cột + **constant** default | Bản gần: metadata | PG 11+: không rewrite |
-| Add cột + `DEFAULT` volatile (`now()`) | Có thể điền / lock | Rewrite hoặc fill |
-| Đổi kiểu binary compatible | Ít đau | Ít đau (`varchar(10)`→`varchar(20)`) |
-| Đổi kiểu không tương thích | Rewrite | Rewrite bảng |
+| Add cột + **constant** hoặc `STABLE` default (`now()`) | Bản gần: metadata (constant) | PG 11+: không rewrite (`now()` là `STABLE` → evaluate 1 lần lúc `ALTER`) |
+| Add cột + `DEFAULT` **`VOLATILE`** (`clock_timestamp()`, `random()`, `gen_random_uuid()`) | Có thể điền / lock | **Rewrite toàn bảng** |
+| Đổi kiểu binary compatible | Ít đau | Ít đau (`varchar(10)`→`varchar(20)`, `numeric(12,2)`→`numeric(14,2)` giữ scale từ PG 9.2+) |
+| Đổi kiểu không tương thích / đổi scale `numeric` | Rewrite | Rewrite bảng |
 | Add FK / CHECK | Scan + lock | `NOT VALID` rồi `VALIDATE CONSTRAINT` |
-| `SET NOT NULL` | Scan | Scan; có thể dựa CHECK đã valid (bản gần) |
+| `SET NOT NULL` | Scan | Scan; PG 18+: `ADD NOT NULL col NOT VALID` + `VALIDATE CONSTRAINT` (hoặc dựa CHECK `IS NOT NULL` đã valid) |
 | Add index | `ONLINE = ON` (edition) | `CREATE INDEX CONCURRENTLY` (ngoài txn) |
 
 ```sql
 -- PostgreSQL: FK hai bước — ADD nhanh, VALIDATE scan SHARE UPDATE EXCLUSIVE
+SET lock_timeout = '2s';
 ALTER TABLE orders
     ADD CONSTRAINT orders_customer_fk
     FOREIGN KEY (customer_id) REFERENCES customers (id) NOT VALID;
 
 ALTER TABLE orders VALIDATE CONSTRAINT orders_customer_fk;
+
+-- PostgreSQL 18+: NOT NULL hai bước không khóa dài
+ALTER TABLE orders ADD CONSTRAINT orders_note_nn NOT NULL note NOT VALID;
+ALTER TABLE orders VALIDATE CONSTRAINT orders_note_nn;
 ```
 
-`NOT VALID` vẫn kiểm tra **hàng mới**; hàng cũ validate sau. CHECK tương tự — [constraints.md](constraints.md). PG 19: `ALTER … CONSTRAINT … [NOT] ENFORCED` cho **CHECK** (trước chỉ FK).
+`NOT VALID` vẫn kiểm tra **hàng mới**; hàng cũ validate sau. CHECK và `NOT NULL` (PG 18+) tương tự — [constraints.md](constraints.md). PG 19: `ALTER … CONSTRAINT … [NOT] ENFORCED` cho **CHECK** (trước chỉ FK).
 
 SQL Server: `WITH CHECK CHECK CONSTRAINT` vs `NOCHECK` — `NOCHECK` **không** tương đương `NOT VALID` (hàng mới cũng có thể không kiểm nếu disable). Đừng disable FK lâu trên OLTP.
 
-Đổi tên cột / `DROP COLUMN`: view, proc, client bind vỡ. PG `DROP COLUMN` nhanh (metadata); disk thu hồi sau rewrite/`REPACK`. SS: cột lớn + compression — đo.
+Đổi tên cột / `DROP COLUMN`: view, proc, client bind vỡ. PG `DROP COLUMN` nhanh (metadata, đánh dấu `attisdropped`); disk chỉ thu hồi sau rewrite/`REPACK` — và **không giải phóng giới hạn 1600 cột/bảng** (cột đã drop vẫn chiếm slot đến khi tạo bảng mới / dump-restore). SS: cột lớn + compression — đo.
 
 **Ghi chú:** `ALTER TYPE` enum `ADD VALUE` (PG) từng không transaction-safe. Session khác cache plan / prepared statement: SS đổi schema → recompile; PG: `DISCARD PLANS` hiếm khi cần nếu search_path ổn. `CREATE SCHEMA` 19 được tạo thêm loại object trong schema mới; **không** reorder (FK vẫn cuối).
 
@@ -239,7 +246,7 @@ ALTER TABLE invoice
 
 Index:
 
-- SQL Server: index trên computed cần **PERSISTED**, deterministic, session `SET` (ANSI_NULLS, QUOTED_IDENTIFIER, …) đúng — indexed view cùng luật.
+- SQL Server: index trên computed chỉ cần **deterministic + precise** (không bắt buộc `PERSISTED`; chỉ cần `PERSISTED` khi biểu thức imprecise như `float`/`real`), kèm session `SET` (`ANSI_NULLS`, `QUOTED_IDENTIFIER`, …) đúng — indexed view cùng luật.
 - PostgreSQL: index cột `STORED`; hoặc **expression index** trên biểu thức / cột `VIRTUAL`.
 
 `GENERATED ALWAYS AS IDENTITY` (mục 4, [dml.md](dml.md)) khác generated **cột tính**: identity là sequence, không phải `(qty * price)`.
@@ -297,7 +304,7 @@ CREATE TABLE events_2026_09 PARTITION OF events
     FOR VALUES FROM ('2026-09-01 00:00:00+00') TO ('2026-10-01 00:00:00+00');
 ```
 
-PK/UNIQUE của bảng partitioned phải chứa mọi cột khóa partition (và khóa partition không được là biểu thức đối với ràng buộc đó). Dùng mốc có timezone rõ ràng với `timestamptz`. Đổi biên: `DETACH` / `ATTACH PARTITION` (kế hoạch khóa và đối soát số hàng). `DETACH PARTITION CONCURRENTLY` không chạy trong transaction block.
+PK/UNIQUE của bảng partitioned phải chứa mọi cột khóa partition (và khóa partition không được là biểu thức đối với ràng buộc đó). Dùng mốc có timezone rõ ràng với `timestamptz`. Đổi biên: `DETACH` / `ATTACH PARTITION` (kế hoạch khóa và đối soát số hàng; tính năng `SPLIT`/`MERGE PARTITION` đã bị revert khỏi cả PG 17 lẫn PG 19 nên vẫn dùng `DETACH`/`ATTACH`). `DETACH PARTITION CONCURRENTLY` không chạy trong transaction block.
 
 ---
 
@@ -357,7 +364,7 @@ CREATE UNIQUE INDEX mv_daily_d ON mv_daily (d);
 REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily;   -- cần unique index
 ```
 
-`REFRESH` không `CONCURRENTLY`: khóa đọc. `CONCURRENTLY`: cho phép đọc, cần unique, **không trong txn block**.
+`REFRESH` không `CONCURRENTLY`: khóa đọc (`ACCESS EXCLUSIVE`). `CONCURRENTLY`: cho phép đọc song song, cần unique index, và **chạy được trong transaction block** (khác `CREATE INDEX CONCURRENTLY`).
 
 ```sql
 -- SQL Server indexed view (không có CREATE MATERIALIZED VIEW)
@@ -415,8 +422,8 @@ SQL Server sequence không đi logical replication kiểu PG; AG/identity: mỗi
 ```sql
 -- Publisher 19
 CREATE PUBLICATION pub_all
-    FOR ALL TABLES
-    ALL SEQUENCES;
+    FOR ALL TABLES,
+        ALL SEQUENCES;
 
 -- Hoặc ALTER PUBLICATION pub_all ADD ALL SEQUENCES;  -- đối chiếu cú pháp docs 19
 
@@ -484,7 +491,7 @@ So lệnh compact:
 | `CLUSTER` | có | **một lần** | không |
 | `REPACK` | có (mặc định) | nếu `USING INDEX` — một lần | không |
 | `REPACK (CONCURRENTLY)` | chỉ lúc **swap** | nếu `USING INDEX` — một lần | không |
-| SS `REBUILD ONLINE` | ngắn hơn offline | clustered **duy trì** | không như INSERT |
+| SS `REBUILD ONLINE` | ngắn hơn offline | clustered **duy trì** | `ONLINE` chạy được trong txn; `RESUMABLE` thì không |
 
 `USING INDEX` không biến heap PG thành clustered index SQL Server: insert sau **không** giữ thứ tự. [indexes.md](indexes.md).
 
@@ -548,9 +555,9 @@ CASCADE PostgreSQL có thể xóa view, FK, sequence OWNED BY và materialized v
 
 ---
 
-## 13. Worked examples
+## 12. Worked examples
 
-### 13.1 Đơn giản — bảng + identity trong txn (PG) vs batch (SS)
+### 12.1 Đơn giản — bảng + identity trong txn (PG) vs batch (SS)
 
 ```sql
 -- PostgreSQL: một txn, ROLLBACK được
@@ -574,7 +581,7 @@ ALTER TABLE orders VALIDATE CONSTRAINT orders_customer_fk;
 
 SQL Server: tách `GO`; FK `WITH CHECK` lúc thấp điểm; **không** gói `CREATE DATABASE` cùng txn app. CREATE INDEX thường trong BEGIN TRAN rollback được; RESUMABLE là ngoại lệ.
 
-### 13.2 Trung bình — VIRTUAL + extended stats + index online
+### 12.2 Trung bình — VIRTUAL + extended stats + index online
 
 ```sql
 -- PG 18+ cột; 19 stats
@@ -588,15 +595,15 @@ CREATE STATISTICS st_inv_cust_total (dependencies)
     ON customer_id, total FROM invoice;
 ANALYZE invoice;
 
--- SQL Server
-ALTER TABLE dbo.Invoice ADD Total AS (Qty * Price) PERSISTED;
+-- SQL Server: không bắt buộc PERSISTED nếu biểu thức deterministic + precise (int/decimal)
+ALTER TABLE dbo.Invoice ADD Total AS (Qty * Price);
 CREATE INDEX ix_invoice_total ON dbo.Invoice (Total)
     WITH (ONLINE = ON);
 ```
 
-`VIRTUAL` không lưu; seek theo `total` = expression index (PG) hoặc `PERSISTED` (SS). Stats 19 giúp CE, không seek.
+`VIRTUAL` không lưu; seek theo `total` = expression index (PG) hoặc index trực tiếp trên computed column deterministic + precise (SS; chỉ bắt buộc `PERSISTED` khi imprecise như `float`/`real`). Stats 19 giúp CE, không seek.
 
-### 13.3 Thêm partition, đồng bộ sequence và REPACK
+### 12.3 Thêm partition, đồng bộ sequence và REPACK
 
 ```sql
 -- PostgreSQL: partition mới, mốc UTC rõ ràng
@@ -615,7 +622,7 @@ Ba bước thuộc các tác vụ vận hành riêng; không gói tất cả và
 
 ---
 
-### 13.4 Rollback ALTER TABLE trên cả hai engine
+### 12.4 Rollback ALTER TABLE trên cả hai engine
 
 DDL thông thường có thể rollback. Tạo cột rồi dùng cột trong SQL Server nên tách batch để tránh lỗi bind tên cột trước khi DDL chạy:
 
@@ -640,7 +647,7 @@ Bảng Orders phải tồn tại và chưa có cột tmp. Không nhầm `GO` v�
 
 ---
 
-### 13.5 VALIDATE vs NOCHECK
+### 12.5 VALIDATE vs NOCHECK
 
 ```sql
 -- PG: hàng mới đã kiểm từ ADD NOT VALID; VALIDATE quét cũ
@@ -654,13 +661,14 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 
 ---
 
-## 14. Best practices & checklist
+## 13. Best practices & checklist
 
-- PG: DDL trong txn trừ `CONCURRENTLY`/`REPACK`/`VACUUM`/`REFRESH CONCURRENTLY`.
+- PG: DDL trong txn trừ `CONCURRENTLY` (index / `REINDEX` / `DETACH`) / `REPACK` / `VACUUM` (riêng `REFRESH MATERIALIZED VIEW CONCURRENTLY` chạy được trong txn).
+- PG `ALTER TABLE` production: luôn đặt `lock_timeout` + retry để tránh **lock queue amplification**.
 - Cả hai: phân biệt DDL rollback được và lệnh cấm transaction; giữ batch/transaction vừa đủ để kiểm soát khóa.
-- Add FK/CHECK: `NOT VALID` + `VALIDATE` (PG); không `NOCHECK` lâu (SS).
-- Generated: `VIRTUAL` khi chỉ đọc; `STORED`/`PERSISTED` khi index/filter nặng; stats 19 trên VIRTUAL.
-- Partition: PK gồm khóa; `SPLIT`/`MERGE` trên bản sao trước; SS `NEXT USED`.
+- Add FK/CHECK/`NOT NULL` (PG 18+): `NOT VALID` + `VALIDATE` (PG); không `NOCHECK` lâu (SS).
+- Generated: `VIRTUAL` khi chỉ đọc; `STORED`/`PERSISTED` khi cần lưu sẵn (trên SS chỉ bắt buộc `PERSISTED` để index nếu biểu thức imprecise); stats 19 trên `VIRTUAL`.
+- Partition: PK gồm khóa; `SPLIT`/`MERGE` trên bản sao trước (SS `NEXT USED`); PG dùng `DETACH`/`ATTACH`.
 - View: liệt kê cột; indexed view / matview chọn đúng mô hình.
 - Sequence: chấp nhận lỗ; PG 19 `ALL SEQUENCES` + `REFRESH SEQUENCES` sau failover/object mới.
 - Bloat: autovacuum trước; `REPACK (CONCURRENTLY)` có chủ đích (slot/WAL/swap, snapshot cũ có thể thấy bảng rỗng).
@@ -668,10 +676,10 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 - `PREVIEW_FEATURES` (vector index, CES, half-precision) không lặng lẽ lên prod. PostgreSQL 19 đã GA.
 
 ```text
-□ Lock_timeout khi ALTER production
-□ PG CONCURRENTLY/REPACK và SS RESUMABLE ngoài txn; ONLINE thường có thể trong txn
+□ lock_timeout + retry khi ALTER production (tránh lock queue amplification)
+□ PG CONCURRENTLY (index/REINDEX/DETACH)/REPACK và SS RESUMABLE ngoài txn; ONLINE và REFRESH CONCURRENTLY chạy được trong txn
 □ Không rewrite kiểu cột lớn giờ cao điểm
-□ VALIDATE CONSTRAINT sau NOT VALID
+□ VALIDATE CONSTRAINT sau NOT VALID (FK, CHECK, NOT NULL PG 18+)
 □ SPLIT có filegroup / partition đích; cửa sổ khóa
 □ REFRESH PUBLICATION rồi REFRESH SEQUENCES
 □ REPACK CONCURRENTLY đo WAL + swap
@@ -680,18 +688,19 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 
 ---
 
-## 15. Bẫy khi review
+## 14. Bẫy khi review
 
 - SQL Server DDL trong transaction dài giữ schema lock và log đến COMMIT/ROLLBACK.
-- PG `CREATE INDEX CONCURRENTLY` / `REPACK` / `REFRESH CONCURRENTLY` *trong* `BEGIN`.
-- `ALTER COLUMN TYPE` trên TEXT lớn không ước lượng rewrite.
-- `ADD COLUMN … DEFAULT now()` tưởng metadata-only.
+- PG `ALTER TABLE` metadata-only không đặt `lock_timeout` — bị query dài chặn rồi kéo sập toàn bộ truy vấn mới (lock queue amplification).
+- PG `CREATE INDEX CONCURRENTLY` / `REPACK` / `DETACH PARTITION CONCURRENTLY` *trong* `BEGIN`.
+- `ALTER COLUMN TYPE` trên TEXT lớn hoặc đổi scale `numeric` không ước lượng rewrite.
+- `ADD COLUMN … DEFAULT gen_random_uuid()` / `clock_timestamp()` / `random()` tưởng metadata-only (hàm `VOLATILE` gây rewrite trên PG; riêng `now()` là `STABLE` nên PG 11+ metadata-only).
 - FK `NOCHECK` (SS) tưởng như `NOT VALID`.
 - Indexed view thiếu `COUNT_BIG` / `SCHEMABINDING`.
 - `REFRESH MATERIALIZED VIEW` (không concurrent) giờ cao điểm.
 - `SELECT *` view, rồi `ALTER TABLE ADD` tin API tự có cột.
 - `NATURAL`/tên cột generated đổi silently.
-- `DROP TABLE CASCADE` nuốt view và object phụ thuộc.
+- `DROP TABLE CASCADE` nuốt view và object phụ thuộc; PG `DROP COLUMN` nhiều lần chạm giới hạn 1600 cột.
 - `REPACK` trên unlogged/partitioned không đọc hạn chế.
 - `VACUUM FULL` thay `REPACK (CONCURRENTLY)` trên OLTP chưa đo exclusive.
 - `CLUSTER` cron = `REPACK CONCURRENTLY` chưa test slot.
@@ -702,23 +711,23 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 
 ---
 
-## 16. Version gates
+## 15. Version gates
 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
 | DDL transactional | DDL thường dùng có; ngoại lệ mục 2 | hầu hết; ngoại lệ mục 2 |
 | `CREATE INDEX ONLINE` | edition / phiên bản | `CONCURRENTLY` (ngoài txn) |
-| Default constant không rewrite | có (bản gần) | **11+** |
+| Default constant / `STABLE` không rewrite | có (constant, bản gần) | **11+** (không rewrite trừ `VOLATILE`) |
 | Generated `VIRTUAL` | computed non-persisted | **18+** `VIRTUAL` |
-| Generated `PERSISTED`/`STORED` | lâu | `STORED` lâu |
+| Generated `PERSISTED`/`STORED` | lâu (index không cần `PERSISTED` nếu precise) | `STORED` lâu |
 | Extended stats trên VIRTUAL | stats computed (khác API) | **19** |
 | `pg_clear_extended_stats` | — | **19** |
-| `NOT VALID` FK/CHECK | `NOCHECK` khác ngữ nghĩa | lâu |
-| CHECK `[NOT] ENFORCED` | — | **19** |
+| `NOT VALID` FK / CHECK / `NOT NULL` | `NOCHECK` khác ngữ nghĩa | lâu (FK/CHECK); **18+** (`NOT NULL`) |
+| CHECK `[NOT] ENFORCED` | — | **18+** (`CREATE`/`ADD`); **19** (`ALTER CONSTRAINT`) |
 | Declarative `PARTITION BY` | function/scheme | lâu |
-| `SPLIT`/`MERGE` partition function | `ALTER PARTITION FUNCTION` | SQL Server |
+| `SPLIT`/`MERGE` partition | `ALTER PARTITION FUNCTION` | — (bị revert khỏi PG 17 & 19; dùng `DETACH`/`ATTACH`) |
 | `DETACH CONCURRENTLY` | `SWITCH` | **14+** |
-| `CREATE MATERIALIZED VIEW` | indexed view | lâu |
+| `CREATE MATERIALIZED VIEW` | indexed view | lâu (`REFRESH CONCURRENTLY` chạy được trong txn) |
 | Sequence logical replication | — | **19** `ALL SEQUENCES` / `REFRESH SEQUENCES` |
 | `REPACK` / `REPACK (CONCURRENTLY)` | `ALTER INDEX REBUILD` | **19 GA** |
 | `CREATE OR ALTER` | proc/view một số object | `CREATE OR REPLACE` |
@@ -726,7 +735,7 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 | Compat 170 / `PREVIEW_FEATURES` | **2025** | — |
 | JIT default off | — | **19** |
 
-DML sau đổi schema (`OVERRIDING`, `TRUNCATE`, bulk và chia khoảng application-time): [dml.md](dml.md). Join PK/FK mới: [joins.md](joins.md).Vacuum/WAL: [internal.md](internal.md).
+DML sau đổi schema (`OVERRIDING`, `TRUNCATE`, bulk và chia khoảng application-time): [dml.md](dml.md). Join PK/FK mới: [joins.md](joins.md). Vacuum/WAL: [internal.md](internal.md).
 
 ---
 

@@ -113,30 +113,32 @@ CREATE INDEX CONCURRENTLY ix_orders_customer_created
     ON orders (customer_id, created_at DESC);
 ```
 
-`CONCURRENTLY` / `ONLINE` **không** trong transaction block (PG). Fail giữa chừng PG: index `INVALID` — `DROP` rồi tạo lại. SS `ONLINE`: edition — Standard Developer **không** giả EE; kiểm SKU staging = prod.
+PG `CONCURRENTLY` **không** chạy trong transaction block; fail giữa chừng để lại index `INVALID` — `REINDEX` hoặc `DROP INDEX CONCURRENTLY` rồi tạo lại. SQL Server `ONLINE = ON` **chạy được** trong explicit transaction (chỉ `RESUMABLE = ON` mới cấm nằm trong explicit transaction); `ONLINE` phụ thuộc edition — kiểm SKU staging khớp prod (tránh test `ONLINE` trên **Enterprise Developer** rồi deploy lên prod **Standard**).
 
 ### 2.1 Equality trước, range sau
 
 Khóa `(a, b, c)` seek tốt khi predicate là `a = ?` rồi `b = ?` rồi range/`ORDER BY` trên `c`. Range sớm phá seek các cột sau.
 
 ```sql
--- WHERE customer_id = @id AND created_at >= @from
+-- WHERE customer_id = $1 AND created_at >= $2
 -- Tốt:  (customer_id, created_at)
 -- Kém:  (created_at, customer_id)  — range created_at rồi mới lọc customer
 
--- WHERE a = @a AND b > @b ORDER BY c
+-- WHERE a = $1 AND b > $2 ORDER BY c
 -- Ứng viên: (a, b) hoặc (a, c) INCLUDE (b) tùy selectivity + sort
 ```
 
 Cột equality **không** bắt buộc “selective nhất trước” nếu query luôn lọc `tenant_id` trước — đặt tenant đầu vì mọi câu đều có. Selective giúp histogram, không thay rule equality-then-range.
 
-`DESC` trên khóa khớp `ORDER BY … DESC` tránh sort. Hai engine đều hỗ trợ chiều per-column.
+`DESC` trên khóa khớp `ORDER BY … DESC` tránh sort. Hai engine đều hỗ trợ chiều per-column, nhưng **thứ tự sort `NULL` trong B-tree khác nhau**:
+- **SQL Server:** coi `NULL` nhỏ nhất (`ASC` xếp `NULL` ở đầu, `DESC` xếp `NULL` ở cuối) và **không** hỗ trợ `NULLS FIRST`/`NULLS LAST`.
+- **PostgreSQL:** coi `NULL` lớn nhất (`ASC` mặc định `NULLS LAST`, `DESC` mặc định `NULLS FIRST`) và cho phép chỉ định `CREATE INDEX ... (created_at DESC NULLS LAST)` để khớp chính xác `ORDER BY`.
 
 ### 2.2 Prefix & chồng index
 
 `(a, b)` phục vụ `WHERE a = ?`. Index `(a)` thường **thừa** nếu `(a, b)` đã có — trừ khi `(a, b)` quá rộng, lookup đắt, hoặc uniqueness khác.
 
-`(b, a)` **không** là prefix của `(a, b)`. Query chỉ `WHERE b = ?` không seek `(a, b)`.
+`(b, a)` **không** là prefix của `(a, b)`. Trên SQL Server (và PG ≤ 17), query chỉ `WHERE b = ?` không seek trực tiếp `(a, b)`. Từ **PostgreSQL 18+**, **B-tree Skip Scan** cho phép planner nhảy qua các giá trị phân biệt của `a` để dùng `(a, b)` khi `WHERE b = ?` nếu cột dẫn đầu `a` có NDV thấp (vd `status`, `region`) — vẫn kém hơn index dẫn đầu `b` khi `a` có NDV cao.
 
 **Ghi chú:** Duplicate index (cùng khóa, khác tên) = ghi đôi. Review `sys.indexes` / `pg_indexes` trước khi thêm “cho chắc”. `SELECT *` phá covering dù khóa đúng.
 
@@ -186,11 +188,15 @@ CREATE INDEX ix_orders_cover
     INCLUDE (total, status);
 ```
 
-Index-only scan: query không đụng heap/clustered nếu mọi cột nằm khóa + INCLUDE. Cập nhật cột INCLUDE **vẫn** bảo trì index — INCLUDE không “miễn phí khi ghi”. PG: index-only cần visibility map all-visible — VACUUM / scan 19 đánh dấu all-visible; bloat + xmin horizon phá lợi ích.
+Index-only scan: query không đụng heap/clustered nếu mọi cột nằm khóa + INCLUDE. Cập nhật cột INCLUDE **vẫn** bảo trì index — đặc biệt trên **PostgreSQL, cập nhật cột `INCLUDE` vẫn phá HOT update** (vẫn phải chèn index tuple mới và tăng bloat). PG: index-only cần visibility map all-visible — VACUUM / scan 19 đánh dấu all-visible; bloat + xmin horizon phá lợi ích.
+
+**Key Lookup & Tipping Point (SQL Server) vs Bitmap Index Scan (PostgreSQL):** Khi nonclustered index không cover (`SELECT` lấy thêm cột ngoài index), SQL Server phải **Key Lookup** về clustered/heap cho từng hàng; vượt **tipping point** (thường ~25–33% số trang bảng), optimizer bỏ seek và chuyển sang full scan — thêm `INCLUDE` giúp tránh Key Lookup. PostgreSQL xử lý dải selectivity trung bình bằng **Bitmap Index Scan + Bitmap Heap Scan** (gom TID rồi đọc heap tuần tự theo page, đồng thời có thể `BitmapAnd`/`BitmapOr` nhiều index).
+
+**Giới hạn key size:** SQL Server giới hạn key tối đa **900 bytes** (clustered) / **1700 bytes** (nonclustered — vượt quá gây cảnh báo/lỗi runtime `Msg 1946`; cột `INCLUDE` không tính vào giới hạn này). PostgreSQL B-tree giới hạn ~**2704 bytes** (~1/3 page 8 KB).
 
 Unique index = constraint unique (cả hai tạo unique index đứng sau PK/UNIQUE). NULL trong unique: [constraints.md](constraints.md).
 
-SQL Server: unique filtered `WHERE col IS NOT NULL` ≈ cấm *nhiều hàng non-null trùng*, vẫn cho nhiều NULL trừ khi filtered `IS NOT NULL` (khi đó chỉ index hàng non-null → nhiều NULL được vì không vào index). Muốn một email NULL duy nhất: filtered unique **không** giới hạn số NULL.
+SQL Server: `UNIQUE` mặc định (unfiltered) **chỉ cho phép tối đa 1 `NULL`** (chèn `NULL` thứ 2 báo lỗi `2627`/`2601`). Muốn **cho phép nhiều `NULL`** như chuẩn ANSI / PostgreSQL mặc định, tạo filtered unique `CREATE UNIQUE INDEX ... WHERE col IS NOT NULL` (chỉ index phần non-null). Chi tiết: [constraints.md](constraints.md) §3.
 
 **Ghi chú:** Covering rộng trên bảng OLTP = insert chậm. Đo `writes` vs `reads` trên `sys.dm_db_index_usage_stats` / `pg_stat_user_indexes`. Keyset pagination cần khóa khớp `ORDER BY` — [select.md](select.md).
 
@@ -229,13 +235,14 @@ Query phải **khớp biểu thức** (hoặc cột computed) mới seek.
 CREATE INDEX ix_users_email_lower ON users (lower(email));
 CREATE INDEX ix_doc_status ON doc ((payload->>'status'));   -- jsonb → text
 
--- SQL Server: computed persisted rồi index (expression index trực tiếp hạn chế)
+-- SQL Server: computed column deterministic + precise đánh index trực tiếp được
+-- (không bắt buộc PERSISTED; chỉ cần PERSISTED nếu biểu thức imprecise như float/real)
 ALTER TABLE dbo.Users
-    ADD EmailLower AS (LOWER(Email)) PERSISTED;
+    ADD EmailLower AS (LOWER(Email));
 CREATE INDEX ix_users_email_lower ON dbo.Users (EmailLower);
 ```
 
-`WHERE lower(email) = lower(@e)` dùng index PG. `WHERE email = @e` **không** dùng `lower(email)` trừ citext / collation case-insensitive.
+`WHERE lower(email) = lower($1)` dùng index PG. `WHERE email = $1` **không** dùng `lower(email)` trừ citext / collation case-insensitive.
 
 SQL Server: `WHERE LOWER(Email) = …` trên cột gốc **không** dùng index `Email`. Phải lọc `EmailLower` hoặc computed match.
 
@@ -283,7 +290,7 @@ PostgreSQL access method — SQL Server không có GIN/GiST/BRIN. XML / spatial 
 |---|---|
 | `btree` | Mặc định, `<` `≤` `=` `≥` `>` `BETWEEN` `ORDER BY` |
 | `hash` | Chỉ `=`. WAL-logged từ PG 10; ít dùng hơn btree |
-| `gin` | `jsonb`, array, FTS, một số `pgvector` opclass |
+| `gin` | `jsonb`, array, FTS, `pg_trgm` (`pgvector` dùng access method `hnsw` / `ivfflat`, không dùng `gin`) |
 | `gist` | range, geometry (PostGIS), `EXCLUDE`, `btree_gist` |
 | `brin` | Bảng lớn, cột tương quan vật lý (append-only time) |
 | `spgist` | Cây không cân, một số kiểu |
@@ -293,9 +300,14 @@ CREATE INDEX ON posts USING gin (tags);
 CREATE INDEX ON doc USING gin (payload jsonb_path_ops);   -- chỉ @>
 CREATE INDEX ON events USING gist (during);
 CREATE INDEX ON events USING brin (ts);
+
+-- PG pattern matching: LIKE 'abc%' dưới collation non-"C" cần text_pattern_ops; LIKE '%abc%' dùng pg_trgm
+CREATE INDEX ix_users_email_prefix ON users (email text_pattern_ops);
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX ix_users_name_trgm ON users USING gin (name gin_trgm_ops);
 ```
 
-`jsonb_path_ops` nhỏ hơn `jsonb_ops`, **chỉ** containment `@>`. BRIN rẻ; sai khi update random phá correlation — lúc đó btree/`REPACK`.
+`jsonb_path_ops` nhỏ hơn `jsonb_ops`, **chỉ** containment `@>`. **GIN `fastupdate` / pending list:** mặc định `fastupdate = on` gom thay đổi vào pending list (`gin_pending_list_limit`, mặc định 4 MB) rồi mới gộp vào cây GIN — nhanh lúc ghi nhưng có thể gây **latency spike** đột biến cho truy vấn bất ngờ phải dọn pending list đầy; bảng nhạy latency có thể đặt `WITH (fastupdate = off)` hoặc giữ `gin_pending_list_limit` nhỏ + `VACUUM` định kỳ. BRIN rẻ; sai khi update random phá correlation — lúc đó btree/`REPACK`.
 
 SQL Server spatial / XML / full-text: không map 1-1 sang GiST/GIN. Vector: mục 9. `EXCLUDE` GiST: [constraints.md](constraints.md).
 
@@ -324,7 +336,8 @@ Computed + btree trên `JSON_VALUE` vẫn valid trên `nvarchar`; cách này kh�
 
 ```sql
 ALTER DATABASE SCOPED CONFIGURATION SET PREVIEW_FEATURES = ON;
-CREATE VECTOR INDEX vix ON dbo.Doc (Embedding);    -- DiskANN, PREVIEW
+CREATE VECTOR INDEX vix ON dbo.Doc (Embedding)
+    WITH (METRIC = 'cosine');                      -- DiskANN, PREVIEW (METRIC bắt buộc)
 -- VECTOR_SEARCH (ANN) — PREVIEW; catalog sys.vector_indexes
 ```
 
@@ -353,6 +366,13 @@ pgvector: `hnsw` / `ivfflat` — không copy operator `<->` sang T-SQL. `PREVIEW
 -- SQL Server
 ALTER INDEX ix_orders_customer ON dbo.Orders REBUILD
     WITH (ONLINE = ON, MAXDOP = 4);
+-- Resumable online build/rebuild (không chạy trong explicit txn; dừng/tiếp tục được)
+ALTER INDEX ix_orders_customer ON dbo.Orders REBUILD
+    WITH (ONLINE = ON, RESUMABLE = ON, MAX_DURATION = 15 MINUTES);
+-- ALTER INDEX ix_orders_customer ON dbo.Orders PAUSE;  -- hoặc RESUME / ABORT
+-- Nén index/bảng giảm I/O & buffer pool (Standard từ 2016 SP1+)
+ALTER INDEX ix_orders_customer ON dbo.Orders REBUILD
+    WITH (ONLINE = ON, DATA_COMPRESSION = PAGE);       -- ROW hoặc PAGE
 ALTER INDEX ix_orders_customer ON dbo.Orders REORGANIZE;
 ALTER INDEX ALL ON dbo.Orders REBUILD;
 UPDATE STATISTICS dbo.Orders;
@@ -497,12 +517,13 @@ Hai hàng xóa mềm cùng email: được. Hai hàng active trùng: lỗi uniqu
 ### 13.3 JSON path vs GIN vs JSON INDEX
 
 ```sql
--- SQL Server PREVIEW on-prem — clustered PK bắt buộc
+-- SQL Server 2025 GA — clustered PK và cột kiểu json bắt buộc
 CREATE JSON INDEX jix ON dbo.Doc (Payload) FOR ('$.status');
 
--- An toàn hơn khi chưa chấp nhận preview: computed
+-- Thay thế cho cột nvarchar(max) hoặc bảng không có clustered PK: computed + B-tree
+-- (JSON_VALUE trả nvarchar(4000) > 1700B key limit → CAST hẹp; không bắt buộc PERSISTED vì precise)
 ALTER TABLE dbo.Doc
-    ADD Status AS (JSON_VALUE(Payload, '$.status')) PERSISTED;
+    ADD Status AS (CAST(JSON_VALUE(Payload, '$.status') AS nvarchar(50)));
 CREATE INDEX ix_doc_status ON dbo.Doc (Status);
 
 -- PostgreSQL: equality một key → btree expression rẻ hơn GIN
@@ -607,12 +628,11 @@ Hai pha CIC: (1) build, (2) validate — txn dài mở trước pha 2 chặn ho�
 - `CREATE INDEX` không `CONCURRENTLY`/`ONLINE` trên bảng live.
 - Port clustered PK sang PG rồi tin `CLUSTER` duy trì.
 - `VACUUM FULL` đêm thay vì `VACUUM` / `REPACK (CONCURRENTLY)` đã test.
-- JSON INDEX path chồng (`$.a`, `$.a.b`); JSON INDEX trên heap.
+- JSON INDEX trên heap, cột không phải kiểu `json`, hoặc path chồng (`$.a`, `$.a.b`).
 - Vector index prod on-prem khi mới `PREVIEW_FEATURES` (kéo CES, `VECTOR_SEARCH`, half-precision). Fuzzy từ CU11 không cần flag này.
-- Dùng JSON INDEX mà chưa kiểm clustered PK, kiểu cột json và path chồng nhau.
 - Rebuild 30% frag trên bảng 200 page.
 - Giữ `btree_gist` inet đến cutover 19.
-- Standard Developer test `ONLINE` rồi prod Standard.
+- Test `ONLINE` trên **Enterprise Developer** rồi deploy lên prod **Standard** (lỗi edition).
 - Stash advice quên compute_query_id / query id đổi do cấu trúc, object hoặc major version.
 
 ---
@@ -621,8 +641,11 @@ Hai pha CIC: (1) build, (2) validate — txn dài mở trước pha 2 chặn ho�
 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
-| Covering `INCLUDE` | lâu | 11+ btree |
+| Covering `INCLUDE` | lâu | 11+ btree (cập nhật cột `INCLUDE` vẫn phá HOT) |
+| B-tree Skip Scan | — | **18+** (khi cột đầu NDV thấp) |
 | Partial / filtered | lâu | lâu |
+| Resumable index (`RESUMABLE = ON`) | **2017+** (rebuild) / **2019+** (create) | — |
+| `DATA_COMPRESSION = ROW \| PAGE` | **2016 SP1+** (gồm Standard) | TOAST / `pglz` / `lz4` |
 | Ordered NCCI + CS online | **2025 GA** | — |
 | JSON INDEX / `JSON_CONTAINS` | **2025 GA** | GIN `jsonb` |
 | Kiểu `vector` + distance | **2025 GA** | pgvector ext |
@@ -653,7 +676,7 @@ WHERE email = N'ada@x.com'                 -- collation CI
 WHERE customer_id = 42
 ```
 
-Hàm trên **cột** phá seek; hàm trên **hằng/tham số** thường ổn. JSON: `payload->>'status' = 'open'` cần expression index PG; SS: computed / JSON INDEX path. LIKE `'abc%'` thường seek; `'%abc'` không (trừ FTS/trigram).
+Hàm trên **cột** phá seek; hàm trên **hằng/tham số** thường ổn. JSON: `payload->>'status' = 'open'` cần expression index PG; SS: computed / JSON INDEX path. `LIKE 'abc%'` trên SQL Server seek B-tree bình thường; trên **PostgreSQL với collation non-`"C"`** (mặc định UTF-8 locale), `LIKE 'abc%'` **không seek** B-tree thường mà cần operator class `text_pattern_ops` / `varchar_pattern_ops`; còn `LIKE '%abc%'` cần `pg_trgm` (GIN/GiST) hoặc FTS.
 
 **Ghi chú:** Implicit convert (SS: varchar vs nvarchar, PG: numeric vs text) có thể scan. Parameter sniffing không sửa bằng thêm index trùng.
 
@@ -661,7 +684,7 @@ Hàm trên **cột** phá seek; hàm trên **hằng/tham số** thường ổn. 
 
 ## Phụ lục B. Heap forwarding & fillfactor
 
-SQL Server heap: `UPDATE` rộng hơn chỗ → **forwarding record** (lookup 2 hop). `ALTER TABLE … REBUILD` / clustered hóa. PG: HOT update cùng page nếu fillfactor chừa chỗ và không đụng cột index; hết chỗ = heap mới + dead tuple.
+SQL Server heap: `UPDATE` rộng hơn chỗ → **forwarding record** (lookup 2 hop). `ALTER TABLE … REBUILD` / clustered hóa. PG: HOT update cùng page nếu fillfactor chừa chỗ và không đụng **bất kỳ cột nào nằm trong index (kể cả cột `INCLUDE`)**; hết chỗ hoặc đụng cột index = non-HOT update + index tuple mới + dead tuple.
 
 `FILLFACTOR 90` (SS) / `fillfactor = 90` (PG) trên index/bảng ghi random. Clustered sequential: 100 (mặc định) thường đúng. UUID PK: fillfactor thấp không chữa split — đổi khóa.
 
@@ -670,11 +693,20 @@ SQL Server heap: `UPDATE` rộng hơn chỗ → **forwarding record** (lookup 2 
 ## Phụ lục C. Unused index
 
 ```sql
--- SQL Server (reset khi restart instance — đọc cẩn thận)
-SELECT i.name, s.user_seeks, s.user_scans, s.user_updates
-FROM sys.dm_db_index_usage_stats AS s
-JOIN sys.indexes AS i ON i.object_id = s.object_id AND i.index_id = s.index_id
-WHERE s.database_id = DB_ID() AND i.object_id = OBJECT_ID(N'dbo.Orders');
+-- SQL Server (reset khi restart instance — PHẢI dùng LEFT JOIN từ sys.indexes
+-- để không ẩn mất các index chưa từng được chạm tới!)
+SELECT
+    i.name,
+    COALESCE(s.user_seeks, 0)   AS user_seeks,
+    COALESCE(s.user_scans, 0)   AS user_scans,
+    COALESCE(s.user_updates, 0) AS user_updates
+FROM sys.indexes AS i
+LEFT JOIN sys.dm_db_index_usage_stats AS s
+    ON s.object_id = i.object_id
+   AND s.index_id = i.index_id
+   AND s.database_id = DB_ID()
+WHERE i.object_id = OBJECT_ID(N'dbo.Orders')
+  AND i.index_id > 0;  -- bỏ heap (0)
 
 -- PostgreSQL
 SELECT indexrelid::regclass, idx_scan, idx_tup_read, idx_tup_fetch
@@ -690,9 +722,9 @@ WHERE relid = 'orders'::regclass;
 
 ```sql
 -- SS 2025: kiểu vector GA; index ANN PREVIEW
--- CREATE VECTOR INDEX …  (DiskANN); VECTOR_SEARCH
--- PREVIEW_FEATURES ON; catalog sys.vector_indexes
--- Hybrid = vector + full-text,
+-- CREATE VECTOR INDEX vix ON dbo.Doc (Embedding) WITH (METRIC = 'cosine'); -- DiskANN
+-- VECTOR_SEARCH; PREVIEW_FEATURES ON; catalog sys.vector_indexes
+-- Hybrid = vector + full-text
 
 -- PG: CREATE EXTENSION vector;
 -- INDEX USING hnsw (embedding vector_cosine_ops)
@@ -713,7 +745,7 @@ REPACK (CONCURRENTLY)
   SHARE UPDATE EXCLUSIVE  → copy heap + logical decode DML vào stash
   ACCESS EXCLUSIVE        → swap file; deadlock upgrade nếu session khác nâng lock
   max_repack_replication_slots  → hết slot = fail, không “giống VACUUM”
-Không trong BEGIN. `CONCURRENTLY` cấm partitioned, unlogged, catalog/TOAST, và bảng không có PK hoặc replica identity. Snapshot cũ có thể thấy bảng rỗng sau commit. `max_repack_replication_slots` mặc định 5.
+Không trong BEGIN. CONCURRENTLY cấm partitioned, unlogged, catalog/TOAST, và bảng không có PK hoặc replica identity. Snapshot cũ có thể thấy bảng rỗng sau commit. max_repack_replication_slots mặc định 5.
 Sau swap: ANALYZE nếu không (ANALYZE) trong lệnh. Autovacuum scoring không thay REPACK.
 ```
 
@@ -748,7 +780,8 @@ Parameter sniffing ≠ thiếu index. OPPO/PSPO 2025 tăng plan cache — đo, k
 
 ```text
 SS ONLINE
-  Sch-S ngắn → copy → Sch-M ngắn lúc cuối
+  Sch-S ngắn → copy → Sch-M ngắn lúc cuối (ONLINE chạy được trong txn)
+  RESUMABLE = ON: ngoài explicit txn; hỗ trợ PAUSE / RESUME / ABORT + MAX_DURATION
   Edition: EE / Enterprise Developer; Standard historically không ONLINE
   Ordered CS ONLINE + MAXDOP 1: tempdb; 1138
 
@@ -760,16 +793,6 @@ Txn dài (idle in transaction) chặn pha cuối cả hai máy
 ```
 
 `CREATE INDEX` chặn ghi (PG `SHARE`) trên bảng live = incident. Review PR: bắt `CONCURRENTLY`/`ONLINE`.
-
-btree_gist inet: gỡ **trước** `pg_upgrade` — không phải job REPACK đêm cutover. Ordered NCCI: `ORDER (CreatedAt)` cho range; point PK vẫn B-tree. JSON INDEX GA: clustered PK, cột json và path không chồng; kiểm build và nền tảng khi triển khai.
-
-`pg_plan_advice` / `pg_stash_advice` = contrib 19, query id + `EXPLAIN (PLAN_ADVICE)`. Không hint T-SQL. Stash DSM; `compute_query_id`. Vector ANN DiskANN PREVIEW; pgvector hnsw/ivfflat GA extension — không copy `<->`.
-
-Fillfactor UUID clustered không chữa split. Covering INCLUDE vẫn ghi khi cột INCLUDE đổi. BRIN cần correlation; `REPACK USING INDEX` nếu heap lộn.
-
-Missing index DMV SS gợi ý — cân nhắc ghi trước khi CREATE. Duplicate `(a)` và `(a,b)`: đo seeks. `CREATE INDEX CONCURRENTLY` fail → `INVALID`, DROP CONCURRENTLY rồi tạo lại. Ordered NCCI delta store: segment elimination trên group nén.
-
-Persisted stats secondary 2025 = I/O ghi replica + Query Store secondary ON mặc định. `btree_gist` inet/cidr: `pg_upgrade` **chặn**. JSON INDEX GA; CREATE VECTOR INDEX vẫn PREVIEW. `REPACK` 19 ≠ `REBUILD` ≠ `REORGANIZE` ≠ `VACUUM`.
 
 ---
 

@@ -76,26 +76,35 @@ SELECT '1' + '2';             -- SQL Server: '12' (varchar+varchar)
 
 **Hình dung.** SQL không phải C#: `NOT` và `AND` dễ đọc nhầm, PostgreSQL `^` là **lũy thừa** (rất chặt) trong khi SQL Server `^` là **XOR**. `2 ^ 3 + 1` trên PG = 9, không phải bit. Nghi ngờ thì ngoặc — rẻ hơn debug.
 
-Rút gọn (cao → thấp), gần ANSI + dialect:
+Rút gọn (cao → thấp) — **tách theo engine** vì nhiều mức khác nhau hẳn:
 
-1. `.` `[]` `::` (PG cast) `()`
-2. Unary `+` `-` `~`
-3. `*` `/` `%` — PostgreSQL `^` (lũy thừa) **rất chặt**, gần mức này
-4. `+` `-` (binary)
-5. `&` `^` `|` (bit; SQL Server — `^` là XOR)
-6. So sánh: `=` `<>` `!=` `<` `>` `<=` `>=`
-7. `IS [NOT]`, `IN`, `BETWEEN`, `LIKE`, `OVERLAPS`
-8. `NOT`
-9. `AND`
-10. `OR`
+| Mức | SQL Server | PostgreSQL |
+|---|---|---|
+| 1 | `~` (bitwise NOT) | `.` (truy cập thành phần) |
+| 2 | `*` `/` `%` | `::` (PG cast), `[]` (subscript) |
+| 3 | Unary `+` `-`, binary `+` `-`, **bitwise `&` `^` `\|`** *(cùng mức, trái → phải!)* | `^` (lũy thừa — **cao hơn cả unary `-`**) |
+| 4 | So sánh: `=` `>` `<` `>=` `<=` `<>` `!=` `!>` `!<` | Unary `+` `-` |
+| 5 | `NOT` | `*` `/` `%` |
+| 6 | `AND` | `+` `-` (binary) |
+| 7 | `ALL` `ANY` `BETWEEN` `IN` `LIKE` `OR` `SOME` | Toán tử khác (gồm bitwise `&` `\|` `#` `~` `<<` `>>`, `\|\|`, `@>`, regex `~`, ...) |
+| 8 | `=` `+=` `-=` ... (gán) | `BETWEEN` `IN` `LIKE` `ILIKE` `SIMILAR TO` → `<` `>` `=` `<=` `>=` `<>` → `IS` (`IS NULL`, `IS DISTINCT FROM`) → `NOT` → `AND` → `OR` |
 
-**Khác biệt:** PostgreSQL `::` chặt hơn hầu hết. `NOT` T-SQL dễ đọc sai: `WHERE NOT a = b AND c` = `(NOT (a = b)) AND c` hay khác — **luôn ngoặc**.
+**Khác biệt chí mạng:**
+
+- **PG `^` cao hơn `* / %` và unary `-`:** `-2 ^ 2` trên PG là `-(2 ^ 2) = -4` (không phải `4`); `2 ^ 3 + 1 = 9`.
+- **SQL Server bitwise `& ^ |` cùng mức với `+ -` (trái → phải):** `1 | 2 + 1` trên SQL Server = `(1 | 2) + 1 = 4`, còn trên PG = `1 | (2 + 1) = 3`!
+- **`NOT` dễ đọc sai:** `WHERE NOT a = b AND c` — **luôn dùng ngoặc**: `WHERE NOT (a = b) AND c = 1;`.
 
 ```sql
 WHERE NOT (a = b) AND c = 1;
 
--- PostgreSQL: 2^3+1
-SELECT 2 ^ 3 + 1;             -- (2^3)+1 = 9  — ^ cao hơn +
+-- PostgreSQL
+SELECT -2 ^ 2;                -- -4 (vì ^ chặt hơn unary -; muốn 4 viết (-2) ^ 2)
+SELECT 2 ^ 3 + 1;             -- (2^3)+1 = 9
+SELECT 1 | 2 + 1;             -- 3: + chặt hơn | trên PG
+
+-- SQL Server
+SELECT 1 | 2 + 1;             -- 4: | và + cùng mức, tính trái → phải: (1 | 2) + 1
 ```
 
 SQL Server không có `^` lũy thừa (dùng `POWER()`). `^` T-SQL = XOR bit, mức bitwise.
@@ -111,7 +120,7 @@ SQL Server không có `^` lũy thừa (dùng `POWER()`). `^` T-SQL = XOR bit, m�
 ```sql
 SELECT 7 / 2;                 -- cả hai: 3 (integer)
 SELECT 7.0 / 2;               -- numeric
-SELECT 7 / 2.0;               -- numeric hoặc float tùy engine/literal
+SELECT 7 / 2.0;               -- numeric ở cả hai engine (2.0 là numeric, không phải float)
 ```
 
 | | SQL Server | PostgreSQL |
@@ -155,7 +164,7 @@ SELECT 1 ^ 3;                 -- XOR = 2
 -- SELECT 2 ^ 10;             -- XOR, không phải 1024
 ```
 
-**Ghi chú:** Port `^` từ PG sang T-SQL đổi thành XOR im lặng nếu không review. `POWER` trả float → tiền tệ dùng `numeric` nhân lặp / `POWER` rồi `CAST`.
+**Ghi chú:** Port `^` từ PG sang T-SQL đổi thành XOR im lặng nếu không review. Trên SQL Server, `POWER(a, b)` trả về **cùng kiểu với tham số thứ nhất** (`POWER(2, 10)` trả `int` — rất dễ tràn `int`, vd `POWER(2, 31)` lỗi overflow; chỉ trả `float` khi tham số 1 là `float`). Trên PostgreSQL, `^` / `power(int, int)` trả `double precision`, còn `power(numeric, numeric)` trả `numeric`. Tiền tệ nên ép `numeric` trước khi tính.
 
 ### 3.3 `PRODUCT()`
 
@@ -179,19 +188,21 @@ Overflow / `numeric` theo kiểu đầu vào. Zero/âm phá `ln()`. NULL: aggreg
 
 `!=` alias `<>` trên cả hai; `<>` là dạng chuẩn. So sánh chuỗi: collation — [dialects.md](dialects.md). `NULL = NULL` → `UNKNOWN`, không phải `TRUE`.
 
+**Row-value comparison (PostgreSQL):** PG hỗ trợ so sánh tuple theo thứ tự từ điển trái → phải: `WHERE (created_at, id) > ($1, $2)` (rất gọn cho keyset pagination — [select.md](select.md), dùng được composite B-tree index). SQL Server **không** hỗ trợ so sánh tuple trực tiếp — phải viết tường minh `WHERE created_at > @t OR (created_at = @t AND id > @id)`.
+
 ### 4.1 `BETWEEN`, `IN`
 
 ```sql
 WHERE x BETWEEN 1 AND 10;                -- 1 ≤ x ≤ 10 (đóng hai đầu)
 WHERE x BETWEEN 10 AND 1;                -- luôn sai nếu 10 > 1 (không tự đảo)
 WHERE x IN (1, 2, 3);
-WHERE x IN (SELECT id FROM t);           -- NULL trong list/subquery → UNKNOWN cho hàng đó
+WHERE x IN (SELECT id FROM t);           -- NULL trong list/subquery chỉ thành UNKNOWN khi x không khớp phần tử non-NULL nào
 ```
 
 ```sql
 -- Bẫy IN + NULL
 WHERE status IN ('open', NULL);          -- ≡ status = 'open' OR status = NULL
-                                         -- nhánh NULL không bao giờ TRUE → không lấy status IS NULL
+                                         -- nếu status = 'open' → vẫn TRUE; không khớp mới thành UNKNOWN (không lấy status IS NULL)
 ```
 
 `NOT IN (SELECT …)` khi subquery có **một** NULL → cả predicate `UNKNOWN` → **zero row**. PG **19**: `NOT IN` **không NULL** có thể rewrite ANTI JOIN — vẫn giữ bẫy NULL. Optimizer đổi plan, không cứu `NOT IN (SELECT nullable)`.
@@ -210,7 +221,7 @@ WHERE x = ANY (SELECT v FROM t);         -- ≡ IN
 WHERE x = SOME (SELECT v FROM t);        -- ≡ ANY
 ```
 
-Empty subquery: `> ALL ()` = TRUE; `> ANY ()` = FALSE (chuẩn). Test khi port.
+**Tập rỗng (empty subquery):** `x > ALL (empty)` luôn trả **`TRUE`** và `x > ANY (empty)` luôn trả **`FALSE`** theo chuẩn SQL — **kể cả khi `x` là `NULL`** (`NULL > ALL (empty)` = `TRUE`, `NULL > ANY (empty)` = `FALSE`, vì không có phần tử nào để phản chứng / thỏa mãn). Test kỹ khi subquery có thể rỗng.
 
 
 ---
@@ -244,7 +255,7 @@ Short-circuit **không được chuẩn hóa**. Optimizer reorder. Hàm user / c
 WHERE @flag = 1 AND dbo.Expensive(@id) = 1
 ```
 
-`CASE` / `IIF` (SQL Server) có thứ tự đánh giá chặt hơn predicate `AND` — vẫn không dùng UDF có side effect trong `SELECT` list nếu có thể.
+`CASE` / `IIF` (SQL Server) có thứ tự đánh giá chặt hơn `AND`, nhưng **vẫn không đảm bảo short-circuit tuyệt đối** trên cả hai engine: biểu thức **aggregate** trong nhánh `THEN` được tính trước (`CASE WHEN 1 = 0 THEN SUM(1 / 0) END` vẫn lỗi chia 0) và **constant folding / expression simplification** lúc biên dịch có thể evaluate biểu thức hằng trong nhánh không được chọn (`CASE WHEN 1 = 0 THEN 1 / 0 END` dễ lỗi). Tránh dựa vào side effect UDF trong `SELECT`/`CASE`.
 
 PostgreSQL `WHERE is_active` (boolean). T-SQL `WHERE IsActive` **không** đủ — `bit` không phải predicate: `WHERE IsActive = 1`.
 
@@ -258,7 +269,7 @@ PG 19: nhiều `LEFT JOIN` có thể rewrite ANTI; hash join NULL key — plan, 
 -- Nối
 SELECT 'a' + 'b';                        -- SQL Server (NULL + x = NULL khi CONCAT_NULL_YIELDS_NULL ON)
 SELECT 'a' || 'b';                       -- PostgreSQL; SQL Server **2025**
-SELECT CONCAT('a', NULL, 'b');           -- 'ab' trên cả hai (bỏ/treate NULL như '')
+SELECT CONCAT('a', NULL, 'b');           -- 'ab' trên cả hai (bỏ/treat NULL như '')
 ```
 
 | Biểu thức | SQL Server (ANSI ON) | PostgreSQL |
@@ -292,11 +303,16 @@ WHERE name LIKE 'A\%' ESCAPE '\';        -- % literal
 |---|---|---|
 | `[A-Z]` | Character class | `[` **ký tự thường** |
 | Case | Theo collation (CI/CS) | Case-sensitive (dùng `ILIKE` hoặc collation) |
-| Escape | `ESCAPE` | `ESCAPE` |
+| Escape mặc định | **Không có** (`\` là ký tự thường; chỉ escape khi ghi `ESCAPE '...'`) | **`\` là ký tự escape mặc định** (kể cả khi `standard_conforming_strings = on`; muốn tắt ghi `ESCAPE ''`) |
 
 ```sql
 -- SQL Server CI: 'abc' LIKE '[A-Z]%'     — có thể TRUE (class + CI)
 -- PostgreSQL:     'abc' LIKE '[A-Z]%'     — TRUE chỉ nếu name bắt đầu bằng '['
+
+-- Bẫy backslash trong LIKE (đường dẫn Windows / chuỗi có '\'):
+-- SQL Server: 'C:\temp' LIKE 'C:\t%'      → TRUE (không có escape mặc định)
+-- PostgreSQL: 'C:\temp' LIKE 'C:\t%'      → FALSE! ('\t' bị LIKE escape thành chữ 't' thường → tìm 'C:t%')
+--             'C:\temp' LIKE 'C:\\t%'     → TRUE (hoặc: 'C:\temp' LIKE 'C:\t%' ESCAPE '')
 
 -- PostgreSQL
 WHERE name ILIKE 'a%';                   -- case-insensitive
@@ -312,17 +328,17 @@ SELECT REGEXP_REPLACE(Phone, N'[^0-9]', N'');
 SELECT REGEXP_SUBSTR(s, pattern);
 SELECT REGEXP_INSTR(s, pattern);
 SELECT REGEXP_COUNT(s, pattern);
--- REGEXP_MATCHES, REGEXP_SPLIT_TO_TABLE — table-valued
+-- REGEXP_MATCHES, REGEXP_SPLIT_TO_TABLE — table-valued (dùng với CROSS APPLY khi áp lên cột)
 ```
 
 **`REGEXP_LIKE` vs `~`**
 
 | | SQL Server 2025 | PostgreSQL |
 |---|---|---|
-| Predicate | `REGEXP_LIKE(expr, pattern [, flags])` | `expr ~ pattern` / `~*` |
+| Predicate | `REGEXP_LIKE(expr, pattern [, flags])` | `expr ~ pattern` / `~*`; `regexp_like(expr, pattern [, flags])` (**15+**) |
 | Replace | `REGEXP_REPLACE` | `regexp_replace` |
-| Extract | `REGEXP_SUBSTR` / `REGEXP_INSTR` | `substring(… from pattern)` / `regexp_match` |
-| Split / set | `REGEXP_SPLIT_TO_TABLE`, `REGEXP_MATCHES` | `regexp_split_to_table`, `regexp_matches` |
+| Extract / count | `REGEXP_SUBSTR` / `REGEXP_INSTR` / `REGEXP_COUNT` | `substring(… from pattern)` / `regexp_match`; `regexp_substr` / `regexp_instr` / `regexp_count` (**15+**) |
+| Split / set | `REGEXP_SPLIT_TO_TABLE`, `REGEXP_MATCHES` (TVF + `CROSS APPLY`) | `regexp_split_to_table`, `regexp_matches` |
 | Infix `~` | **Không** (bit `~` unary) | POSIX |
 | `SIMILAR TO` | Không | SQL regex |
 | `LIKE` class `[ ]` | Có | Không |
@@ -333,7 +349,7 @@ Literal pattern: PG 19 `'…'` không escape `\` — pattern `'\\d+'` vs `E'\\d+
 
 **Ghi chú:** `LIKE '%x'` không sargable; `LIKE 'x%'` thường dùng index. POSIX `~` không dùng index trừ trigram (`pg_trgm`) / regex index riêng. Regex SS **không** biến `LIKE '%x'` thành seek. Index: computed persisted / full-text — không bịa regex index native.
 
-`SIMILAR TO` dùng `%` `_` như `LIKE` **cộng** `\|()[]` SQL regex — không phải POSIX `~`. Port `~` → `SIMILAR TO` sai.
+`SIMILAR TO` dùng `%` `_` như `LIKE` **cộng** `|()[]` SQL regex — không phải POSIX `~`. Port `~` → `SIMILAR TO` sai.
 
 ---
 
@@ -366,7 +382,15 @@ WHERE k IS DISTINCT FROM NULL;           -- fold → IS NOT NULL
 WHERE k IS NOT NULL;
 ```
 
-`COALESCE(a,b)` / `IFNULL` (T-SQL) / `NULLIF(a,b)`: hàm, không phải toán tử infix. `COALESCE` dừng ở đối số đầu không NULL (được định nghĩa hơn `AND`).
+`COALESCE(a, b, ...)` / `ISNULL(a, b)` (T-SQL) / `NULLIF(a, b)`: hàm, không phải toán tử infix.
+
+**SQL Server `ISNULL` vs `COALESCE` — ba khác biệt thực chiến:**
+
+| Trục | `ISNULL(a, b)` (T-SQL) | `COALESCE(a, b, ...)` (ANSI) |
+|---|---|---|
+| Kiểu trả về | Ép về kiểu của **tham số đầu `a`** (`ISNULL(CAST(NULL AS varchar(3)), 'abcdef')` bị cắt thành `'abc'`) | Chọn kiểu theo **data type precedence** cao nhất (trả `'abcdef'`) |
+| Nullability metadata | `NOT NULL` nếu fallback khác `NULL` (dùng được làm PK/computed `NOT NULL`) | Luôn đánh dấu **nullable** trong metadata `SELECT INTO` / view / computed column |
+| Đánh giá biểu thức | Đánh giá `a` **1 lần** | Rewrite thành `CASE WHEN a IS NOT NULL THEN a ELSE b END` → **đánh giá `a` 2 lần**! Với subquery hoặc hàm non-deterministic (`NEWID()`, `NEXT VALUE FOR`), có thể chạy 2 lần và thậm chí vẫn trả `NULL` |
 
 `IGNORE NULLS` trên `LAG` **không** phải `IS DISTINCT FROM`. Window bỏ NULL khi offset — [window-functions.md](window-functions.md). Viết `a IGNORE NULLS b` = không parse.
 
@@ -421,10 +445,15 @@ SELECT doc ->> 'name';                   -- text
 SELECT doc -> 'items' -> 0;
 SELECT doc #> '{user,name}';
 SELECT doc #>> '{user,name}';
-SELECT doc @> '{"ok": true}'::jsonb;
+SELECT doc @> '{"ok": true}'::jsonb;     -- containment
 SELECT doc ? 'name';                     -- key tồn tại
-SELECT doc ?| ARRAY['a','b'];
-SELECT doc || '{"x":1}'::jsonb;          -- merge (jsonb)
+SELECT doc ?| ARRAY['a','b'];            -- tồn tại ÍT NHẤT 1 key
+SELECT doc ?& ARRAY['a','b'];            -- tồn tại TẤT CẢ các key
+SELECT doc || '{"x":1}'::jsonb;          -- merge (shallow, top-level)
+SELECT doc - 'temp';                     -- xóa key (hoặc xóa phần tử mảng theo index int)
+SELECT doc #- '{user,temp}';             -- xóa theo path lồng nhau
+SELECT doc @? '$.items[*] ? (@.qty > 5)';-- JSONPath có ít nhất 1 phần tử khớp (PG 12+)
+SELECT doc @@ '$.ok == true';            -- JSONPath predicate trả boolean (PG 12+)
 ```
 
 ### `JSON_CONTAINS` (SQL Server 2025, **GA**)
@@ -432,10 +461,10 @@ SELECT doc || '{"x":1}'::jsonb;          -- merge (jsonb)
 Hàm containment, không operator `@>`. Tối ưu khi có **JSON INDEX** (cũng **GA**, clustered PK). Wildcard path ANSI — [json.md](json.md).
 
 ```sql
--- PREVIEW on-prem — đối chiếu Learn cú pháp path
+-- SQL Server 2025 (GA) — đối chiếu Learn cú pháp path (trả int 1/0/NULL)
 SELECT *
 FROM dbo.Doc
-WHERE JSON_CONTAINS(Payload, N'open', '$.status');  -- hình thức: docs 2025
+WHERE JSON_CONTAINS(Payload, N'open', '$.status') = 1;
 ```
 
 Không copy `WHERE doc @> '{"status":"open"}'` sang T-SQL. Không copy `JSON_CONTAINS` sang PG — dùng `@>` / `jsonb_path_ops` GIN.
@@ -473,7 +502,8 @@ Array index **1-based**. `tags[0]` → `NULL` không lỗi.
 ```sql
 -- SQL Server
 SELECT 1 & 3, 1 | 2, 1 ^ 3, ~1;
--- Không có << >> trong T-SQL; dịch bit bằng nhân/chia lũy thừa 2 hoặc hàm riêng
+-- Không có toán tử infix << >> trong T-SQL; từ SQL Server 2022+ có hàm bit built-in:
+SELECT LEFT_SHIFT(1, 3), RIGHT_SHIFT(8, 2), BIT_COUNT(7), GET_BIT(5, 2), SET_BIT(5, 1, 1);
 
 -- PostgreSQL
 SELECT 1 & 3, 1 | 2, 1 # 3, ~1;          -- XOR là #
@@ -640,15 +670,16 @@ T2: CASE WHEN denom <> 0 THEN num/denom END > 1
 - `NOT IN (SELECT nullable)` — kể cả sau PG 19 ANTI rewrite docs.
 - `denom <> 0 AND num/denom` như C.
 - `'a' + 1` T-SQL vs PG.
-- `LIKE '[0-9]%'` copy sang PG.
-- `2 ^ 8` “bit shift” trên PG (thành 256.0).
+- `LIKE '[0-9]%'` copy sang PG; hoặc `LIKE 'C:\t%'` trên PG quên rằng `\` là ký tự escape mặc định.
+- `2 ^ 8` “bit shift” trên PG (thành `256.0`); hoặc `-2 ^ 2` trên PG tưởng bằng `4` (thực tế `-4`); hoặc `1 | 2 + 1` trên SQL Server tưởng bằng `3` (thực tế `4`).
 - `INTERSECT ALL` trong SQL “chuẩn” trên SQL Server.
-- Short-circuit UDF / `RAISERROR` trong `AND`.
+- Short-circuit UDF / `RAISERROR` trong `AND`, hoặc đặt aggregate / biểu thức hằng chia 0 trong `CASE` mong short-circuit.
+- `COALESCE(subquery, 0)` trên SQL Server đánh giá subquery 2 lần (hoặc `ISNULL` cắt ngắn chuỗi theo độ dài tham số đầu).
 - `JSON_VALUE` lấy object.
 - `JSON_CONTAINS` / `@>` copy chéo dialect.
 - `tags[0]` mong phần tử đầu PG.
 - `SET ANSI` `CONCAT_NULL_YIELDS_NULL OFF` làm `+` nuốt NULL — [dialects.md](dialects.md).
-- Fuzzy distance trên prod khi chưa chấp nhận **PREVIEW**.
+- Dùng hàm fuzzy (`EDIT_DISTANCE`, `JARO_WINKLER_*`) trên SQL Server 2025 RTM–CU10 mà quên rằng bản trước CU11 cần `PREVIEW_FEATURES` (từ CU11 đã GA).
 - `name ~ pattern` trên T-SQL (thành bit `~` / lỗi).
 - `IGNORE NULLS` trong `WHERE` / trên `SUM` SS.
 - Mix `<=>` pgvector với `VECTOR_DISTANCE`.
@@ -664,18 +695,18 @@ T2: CASE WHEN denom <> 0 THEN num/denom END > 1
 | `IS [NOT] DISTINCT FROM` | **2022+** | lõi |
 | Fold `IS DISTINCT FROM NULL` | — | **19** (optimizer) |
 | `NOT IN` → ANTI JOIN (không NULL) | tùy CE | **19** |
-| `REGEXP_LIKE` / `REGEXP_*` | **2025 GA** | `~` `SIMILAR TO` lâu |
+| `REGEXP_LIKE` / `REGEXP_*` | **2025 GA** | `~` / `SIMILAR TO` lâu; `regexp_like`/`count`/`instr`/`substr` **15+** |
 | Fuzzy `EDIT_DISTANCE` / `JARO_WINKLER_*` | **GA từ CU11** | `fuzzystrmatch` ext |
-| `JSON_CONTAINS` / JSON INDEX | **GA** | `@>` GIN lâu |
+| `JSON_CONTAINS` / JSON INDEX | **2025 GA** | `@>` GIN lâu; `@?` / `@@` **12+** |
 | `VECTOR_DISTANCE` | **2025 GA** | pgvector `<->` / `<=>` |
 | `VECTOR_SEARCH` | **2025 PREVIEW** | pgvector ANN index |
 | `PRODUCT()` | **2025** | — |
 | `+=` compound | lõi T-SQL | PL `:=` / `qty = qty + 1` |
-| `<<` `>>` integer | — | lõi |
+| `<<` `>>` dịch bit | **2022+** hàm `LEFT_SHIFT`/`RIGHT_SHIFT`/`BIT_COUNT`/`GET_BIT`/`SET_BIT` | lõi (`<<` `>>`) |
 | `^` lũy thừa | `POWER()` | lõi |
 | `#` XOR | `^` | lõi |
 | `INTERSECT ALL` | — | lõi |
-| `IGNORE NULLS` window | — (không toán tử) | **19** — [window-functions.md](window-functions.md) |
+| `IGNORE NULLS` window | **2022+** (không toán tử) | **19** — [window-functions.md](window-functions.md) |
 
 Join / `APPLY`: [joins.md](joins.md). Window `FILTER`: [window-functions.md](window-functions.md). Keyword `LIKE`/`AND`: [keywords.md](keywords.md). Kiến trúc overload/index AM: [internal.md](internal.md).
 
@@ -687,16 +718,17 @@ SQL Server 2025 **GA**: họ `REGEXP_*` là hàm (một số TVF). PostgreSQL: i
 
 ```sql
 -- SQL Server: đối chiếu Learn từng tham số (start, occurrence, return_option, flags)
-SELECT REGEXP_INSTR(Body, N'error', 1, 1, 0, N'i');
-SELECT REGEXP_REPLACE(Phone, N'[^0-9]', N'');
-SELECT * FROM REGEXP_MATCHES(Body, N'(\w+)=(\w+)');
-SELECT * FROM REGEXP_SPLIT_TO_TABLE(Csv, N',');
+SELECT REGEXP_INSTR(Body, N'error', 1, 1, 0, N'i') FROM dbo.Doc;
+SELECT REGEXP_REPLACE(Phone, N'[^0-9]', N'') FROM dbo.Doc;
+SELECT d.Id, m.* FROM dbo.Doc AS d CROSS APPLY REGEXP_MATCHES(d.Body, N'(\w+)=(\w+)') AS m;
+SELECT d.Id, s.* FROM dbo.Doc AS d CROSS APPLY REGEXP_SPLIT_TO_TABLE(d.Csv, N',') AS s;
 
--- PostgreSQL
-SELECT regexp_match(body, '(\w+)=(\w+)');
-SELECT * FROM regexp_matches(body, '(\w+)=(\w+)', 'g');
-SELECT regexp_replace(phone, '[^0-9]', '', 'g');
-SELECT * FROM regexp_split_to_table(csv, ',');
+-- PostgreSQL (15+ có thêm regexp_like, regexp_count, regexp_instr, regexp_substr)
+SELECT regexp_like(body, 'error', 'i'), regexp_count(body, 'error', 1, 'i') FROM doc;
+SELECT regexp_match(body, '(\w+)=(\w+)') FROM doc;
+SELECT d.id, m FROM doc AS d CROSS JOIN LATERAL regexp_matches(d.body, '(\w+)=(\w+)', 'g') AS m;
+SELECT regexp_replace(phone, '[^0-9]', '', 'g') FROM doc;
+SELECT d.id, s FROM doc AS d CROSS JOIN LATERAL regexp_split_to_table(d.csv, ',') AS s;
 ```
 
 **Ghi chú:** Flag `'g'` PG (global) không copy mù thành tham số SS. `REGEXP_LIKE` trả predicate (dùng `WHERE`); `~` trả boolean. `REGEXP_LIKE` không thay `LIKE` sargable prefix. Tiếng Việt / Unicode: test collation — regex không tự CI như `LIKE` trên DB CI.
@@ -706,10 +738,10 @@ Hai session — CI `LIKE` vs regex:
 ```text
 T1 (SS CI): WHERE name LIKE 'a%'           -- 'Ada' khớp
 T2 (SS):    WHERE REGEXP_LIKE(name, N'^a') -- có thể CS tùy flag — thêm N'i' nếu cần
-T2 (PG):    WHERE name ~ '^a'              -- CS; ~* hoặc ILIKE cho CI
+T2 (PG):    WHERE name ~ '^a'              -- CS; ~* hoặc regexp_like(name, '^a', 'i') cho CI
 ```
 
-Không có `REGEXP_LIKE` trên PG. Không có `~` regex trên T-SQL (`~` = bit NOT).
+PostgreSQL **15+ đã có** bộ hàm chuẩn `regexp_like`, `regexp_count`, `regexp_instr`, `regexp_substr` (bên cạnh `~`/`~*`). Ngược lại, T-SQL không có toán tử infix `~` regex (`~` là bitwise NOT).
 
 ---
 
@@ -722,16 +754,15 @@ Cùng ý “document có mảnh này?” — ba surface.
 WHERE doc @> '{"status":"open"}'::jsonb
 WHERE doc ->> 'status' = 'open'              -- text, dễ lệch kiểu số/bool
 
--- SQL Server
+-- SQL Server 2025 (GA)
 WHERE JSON_VALUE(Payload, '$.status') = N'open'          -- GA, lax miss → NULL
--- PREVIEW on-prem:
--- WHERE JSON_CONTAINS(Payload, …)                        -- containment + JSON INDEX
+WHERE JSON_CONTAINS(Payload, N'open', '$.status') = 1    -- GA, containment + JSON INDEX
 ```
 
 | | Sargable khi |
 |---|---|
 | `@>` jsonb | GIN `jsonb_path_ops` / `jsonb_ops` |
-| `JSON_VALUE` = hằng | computed persisted / JSON INDEX **GA** |
+| `JSON_VALUE` = hằng | computed (deterministic) / JSON INDEX **GA** |
 | `JSON_CONTAINS` | JSON INDEX **GA**; clustered PK |
 
 Path `$.a` đệ quy SS (gồm `$.a.b`) **không** cùng `@>` (object chứa key/value ở mức containment). Port máy = sai hàng.
@@ -752,10 +783,12 @@ T1 (SS): LIKE 'A[B]%'                     -- class: A rồi B
 T2 (PG): LIKE 'A[B]%'                     -- A rồi '[' rồi 'B' rồi ']' …
 T1 (SS CI): LIKE '[A-Z]%'                 -- chữ cái
 T2 (PG):     LIKE '[A-Z]%'                -- không class
-            LIKE 'A\%' ESCAPE '\'         -- A + %
+T1 (SS):     LIKE 'C:\t%'                 -- khớp 'C:\temp' (SS không có escape mặc định)
+T2 (PG):     LIKE 'C:\t%'                 -- KHÔNG khớp 'C:\temp' (PG mặc định '\' là escape → dùng 'C:\\t%' hoặc ESCAPE '')
+             LIKE 'A\%' ESCAPE '\'        -- A + %
 ```
 
-PG 19: `ESCAPE '\'` — trong `'…'` một `\`. Dump 18 `off`: `'ESCAPE '''` / `E'\\' ` lệch. Dollar `ESCAPE $$\$$$` đọc khó — giữ `'\'` + conforming on.
+PG 19: `ESCAPE '\'` — trong `'…'` một `\`; lưu ý trên PG `\` vốn đã là ký tự escape **mặc định** của `LIKE` (dùng `ESCAPE ''` để tắt). Dump 18 `off`: `'ESCAPE '''` / `E'\\'` lệch. Dollar `ESCAPE $$\$$` đọc khó — giữ `'\'` + conforming on.
 
 `ESCAPE` không biến `%` đầu thành sargable. `LIKE '\%x'` vẫn scan.
 
@@ -776,9 +809,9 @@ PG 19: `ESCAPE '\'` — trong `'…'` một `\`. Dump 18 `off`: `'ESCAPE '''` / 
 -- WHERE VECTOR_DISTANCE('cosine', …)    -- PG core: không có
 ```
 
-Metric `'cosine'` là **chuỗi literal** tới hàm SS — sai chính tả = lỗi runtime, không phải toán tử. Half vs float32: § typesystem phụ lục C.
+Metric `'cosine'` là **chuỗi literal** tới hàm SS — sai chính tả = lỗi runtime, không phải toán tử. Half vs float32: [typesystem.md — Phụ lục C](typesystem.md#phụ-lục-c-half-precision-vector--dung-lượng).
 
-Fuzzy **PREVIEW** (`EDIT_DISTANCE`) là chuỗi ký tự, không vector. Không `IGNORE NULLS` trên `VECTOR_DISTANCE`.
+Fuzzy (**GA từ CU11**, `EDIT_DISTANCE`) là so sánh chuỗi ký tự, không phải vector. Không `IGNORE NULLS` trên `VECTOR_DISTANCE`.
 
 ---
 

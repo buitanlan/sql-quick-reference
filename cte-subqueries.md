@@ -107,6 +107,25 @@ WHERE EXISTS (
 
 PG 19: `NOT IN` *chứng minh không NULL* có thể rewrite ANTI JOIN — ngữ nghĩa NULL **vẫn** bẫy nếu cột nullable có NULL thật.
 
+**Bẫy Correlated Subquery — Silent Column Capture (Outer Scope Resolution):** Khi cột trong subquery **không** được qualify alias và tình cờ bảng trong không có cột tên đó (vd cột thật tên là `uid` thay vì `user_id`), parser **không báo lỗi** mà âm thầm **bắt cột cùng tên từ bảng ngoài**!
+
+```sql
+-- BẪY CHẾT NGƯỜI: bảng blacklist không có cột user_id → parser lấy u.user_id từ bảng ngoài!
+-- WHERE u.user_id IN (SELECT u.user_id FROM blacklist) → TRUE với mọi u.user_id NOT NULL → XÓA SẠCH BẢNG!
+DELETE FROM users
+WHERE user_id IN (SELECT user_id FROM blacklist);
+
+-- Đúng: LUÔN qualify alias cho mọi cột trong subquery (lỗi biên dịch ngay nếu sai tên cột)
+DELETE FROM users AS u
+WHERE u.user_id IN (SELECT b.user_id FROM blacklist AS b);
+```
+
+**Toán tử `ANY` / `SOME` / `ALL` với subquery:**
+
+- `x = ANY (subquery)` ≡ `x IN (subquery)` (`SOME` là bí danh của `ANY`).
+- `x <> ALL (subquery)` ≡ `x NOT IN (subquery)` — dính **đúng bẫy `NULL`**: chỉ cần 1 giá trị `NULL` trong subquery là điều kiện `ALL` không bao giờ `TRUE` (rơi về `UNKNOWN`).
+- **Tập rỗng (0 hàng):** `x op ANY (∅)` luôn là **`FALSE`**; ngược lại `x op ALL (∅)` luôn là **`TRUE`** (*vacuous truth* — vd `WHERE price > ALL (SELECT price FROM promos WHERE ...)` sẽ trả **mọi hàng** nếu subquery rỗng!).
+
 **Ghi chú:** `WHERE id = (SELECT …)` là scalar, không phải `IN`. 0 hàng → `id = NULL` → loại hàng; >1 → lỗi.
 
 ---
@@ -123,7 +142,7 @@ FROM (
 WHERE s.revenue > 1000;
 ```
 
-Alias bảng **bắt buộc** trên SQL Server (`Incorrect syntax near ')'` nếu thiếu). PostgreSQL cũng nên đặt alias (bắt buộc ở hầu hết phiên bản cho subquery `FROM`).
+Alias bảng **bắt buộc** trên SQL Server (`Incorrect syntax near ')'` nếu thiếu). Trên PostgreSQL, từ **PG 16+** alias cho derived table trong `FROM` là **optional** (PG < 16 bắt buộc) — tuy nhiên vẫn nên đặt alias rõ ràng để tham chiếu cột và portable.
 
 Derived table không tương quan — không tham chiếu `FROM` bên trái trừ khi `LATERAL` / `APPLY` (§12).
 
@@ -149,7 +168,7 @@ Nhiều CTE cách nhau bằng dấu phẩy. SQL Server yêu cầu CTE được t
 
 `WITH` đứng **đầu** statement (`SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MERGE`; PG thêm được CTE *là* DML — §11).
 
-Cột: `WITH t (a, b) AS (SELECT …)` đặt tên; số cột phải khớp. `SELECT *` trong CTE **đóng băng** danh sách lúc parse — thêm cột bảng gốc **không** tự xuất hiện ở caller đã liệt kê tên.
+Cột: `WITH t (a, b) AS (SELECT …)` đặt tên tường minh; số cột phải khớp. Khác với View, CTE **không** đóng băng metadata trong catalog mà được parse lại theo từng statement — nếu viết `WITH t (a, b) AS (SELECT * FROM tbl)` rồi bảng `tbl` được `ALTER TABLE ADD COLUMN`, câu truy vấn sẽ **lỗi ngay** do lệch số cột; không dùng `SELECT *` trong CTE có danh sách cột.
 
 ### 5.1 Bẫy `;WITH`
 
@@ -223,9 +242,11 @@ OPTION (MAXRECURSION 100);
 | Từ khóa | `WITH RECURSIVE` (thiếu = CTE thường, lỗi tự tham chiếu) | không có `RECURSIVE` |
 | Recursive ↔ anchor | `UNION` hoặc `UNION ALL` | `UNION ALL` **bắt buộc** giữa anchor cuối và recursive |
 | Tham chiếu CTE trong recursive | **một** lần trong `FROM` | **một** lần |
-| `LEFT`/`RIGHT`/`FULL JOIN` CTE | hạn chế (cẩn thận vòng) | **cấm** trên recursive member (`INNER JOIN` được) |
-| `GROUP BY` / `DISTINCT` / `TOP` / subquery trong recursive member | hạn chế tùy dạng | **cấm** (list Learn: không `GROUP BY`, `HAVING`, `DISTINCT`, `TOP`, subquery, `PIVOT`, scalar aggregate) |
-| Cột | cùng số/kiểu | cùng số; kiểu recursive = kiểu anchor; **mọi cột kết quả nullable** |
+| `LEFT`/`RIGHT`/`FULL JOIN` CTE | **cấm** self-reference ở phía **nullable** của outer join (phải của `LEFT`, trái của `RIGHT`, cả hai phía `FULL`); **cho phép** bên trái `LEFT JOIN` (`walk LEFT JOIN org`) | **cấm** hoàn toàn `LEFT`/`RIGHT`/`FULL` trên recursive member (`INNER JOIN` được) |
+| `GROUP BY` / `DISTINCT` / `TOP` / subquery trong recursive member | **cấm** `GROUP BY`, `HAVING`, aggregate, window, `LIMIT`/`OFFSET`, `ORDER BY`, và cấm self-ref trong subquery | **cấm** (list Learn: không `GROUP BY`, `HAVING`, `DISTINCT`, `TOP`, subquery, `PIVOT`, scalar aggregate) |
+| Cột & kiểu | cùng số/kiểu (PG ép kiểu chung) | cùng số; kiểu + độ dài/precision recursive phải **khớp chính xác** anchor (lệch → **Error 240**); cột từ biểu thức thường thành nullable |
+
+**SQL Server Error 240** (`Types don't match between the anchor and the recursive part`): rất hay gặp khi nối chuỗi `Path` (`varchar(20)` ở anchor vs `varchar(max)` ở recursive) hoặc `int` vs `bigint`. Luôn `CAST(...)` sang kiểu đích ngay ở **anchor** (vd `CAST(Name AS nvarchar(max))`).
 
 `UNION` (distinct) có thể chặn vòng khi cả hàng trùng; **không** đủ nếu cột `depth` đổi. Luôn điều kiện dừng (`depth < n`) hoặc `CYCLE` / `MAXRECURSION`.
 
@@ -259,7 +280,7 @@ CYCLE id SET is_cycle USING path_arr
 SELECT * FROM walk WHERE NOT is_cycle;
 ```
 
-`CYCLE col … SET mark USING path`: thêm cột `mark` (`TRUE` khi bước này đóng vòng) và `path` (array đã đi). Recursive **dừng mở rộng** khi phát hiện cycle. Mặc định mark `TRUE`/`FALSE`; có thể `SET is_cycle TO 'Y' DEFAULT 'N'` — hai giá trị phải so sánh được (`<>`).
+`CYCLE col … SET mark USING path`: thêm cột `mark` (`TRUE` khi bước này đóng vòng) và `path` (kiểu **`record[]`** — mảng các composite record đại diện cho cột khóa đã đi, không phải `int[]`/`text[]`). Recursive **dừng mở rộng** nhánh khi phát hiện cycle, nhưng **bản thân hàng đóng vòng (`is_cycle = TRUE`) vẫn xuất hiện trong kết quả CTE** → caller **bắt buộc** tự lọc `WHERE NOT is_cycle` nếu không muốn bản ghi lặp. Mặc định mark `TRUE`/`FALSE`; có thể `SET is_cycle TO 'Y' DEFAULT 'N'` — hai giá trị phải so sánh được (`<>`).
 
 Nhiều cột khóa: `CYCLE id, version SET …`. Cột `mark` và `path` **thêm** vào output CTE (sau cột `SEARCH` nếu có cả hai).
 
@@ -353,7 +374,7 @@ UNION ALL
 SELECT * FROM t WHERE id = 2;
 ```
 
-`NOT MATERIALIZED` **bị bỏ qua** nếu CTE recursive hoặc có side-effect (volatile / DML).
+`AS NOT MATERIALIZED` trên PostgreSQL **vẫn ép inline kể cả khi CTE chứa hàm `VOLATILE`** (như `random()`, `nextval()`), nên có thể làm hàm `VOLATILE` chạy nhiều lần! Nó **chỉ bị bỏ qua** đối với **recursive CTE** hoặc **data-modifying CTE** (chứa `INSERT`/`UPDATE`/`DELETE`/`MERGE`). (Khác với chế độ mặc định không ghi hint, nơi PG tránh tự inline CTE có hàm `VOLATILE`.)
 
 SQL Server: không hint `MATERIALIZED` trên CTE. Cần một lần tính + index: `#temp` / table variable (thống kê kém) / temp table + `CREATE INDEX`. View indexed / persisted không áp cho CTE.
 
@@ -403,7 +424,7 @@ SET Score = Score + 1;
 DELETE FROM dead;
 ```
 
-`DELETE FROM cte` không xóa “biến CTE” — xóa hàng base. View/CTE không updatable (join/aggregate) → lỗi. `OUTPUT deleted.* INTO …` trên `DELETE`/`UPDATE` CTE được, giống DML thường — [dml.md](dml.md).
+`DELETE FROM cte` không xóa “biến CTE” — xóa hàng base table. Trên SQL Server, CTE có `JOIN` **vẫn `UPDATE` được** miễn câu `UPDATE` chỉ sửa các cột thuộc **một bảng gốc duy nhất** (ngược lại, không thể `DELETE` qua CTE có nhiều bảng gốc, hoặc sửa cột của nhiều bảng cùng lúc, hay có `GROUP BY`/aggregate/`DISTINCT`). `OUTPUT deleted.* INTO …` trên `DELETE`/`UPDATE` CTE được, giống DML thường — [dml.md](dml.md).
 
 **PostgreSQL:** hai kiểu.
 
@@ -457,7 +478,7 @@ USING d
 WHERE n.part_id = d.id;
 ```
 
-Data-modifying CTE chỉ ở `WITH` **top-level**. Các nhánh DML trong cùng statement chạy **cùng snapshot**, thứ tự ghi **không** đảm bảo; giao tiếp duy nhất = `RETURNING`. A xóa hàng X, B không thấy hiệu ứng A trên bảng — chỉ thấy hàng `RETURNING`.
+Data-modifying CTE chỉ ở `WITH` **top-level** và **luôn chạy hoàn tất (run to completion) ngay cả khi câu chính không tham chiếu tới nó** (hoặc chỉ đọc `LIMIT 1` từ nó). Các nhánh DML trong cùng statement chạy **cùng snapshot**, thứ tự ghi **không** đảm bảo; giao tiếp duy nhất = `RETURNING`. A xóa hàng X, B không thấy hiệu ứng A trên bảng — chỉ thấy hàng `RETURNING`. **Bẫy 2 nhánh DML sửa cùng 1 hàng:** nếu hai CTE DML trong cùng câu `WITH` cùng `UPDATE`/`DELETE` một hàng thì kết quả **không xác định** (nhánh sau có thể im lặng bỏ qua hàng đã bị nhánh trước sửa/xóa) — tuyệt đối không nhắm cùng một hàng ở hai nhánh DML.
 
 SQL Server không có DML-trong-`WITH` kiểu PG. Chuỗi xóa-rồi-insert: `DELETE … OUTPUT deleted.* INTO archive` hoặc hai statement một txn.
 
@@ -496,11 +517,27 @@ OUTER APPLY (
 
 `CROSS JOIN LATERAL` / `CROSS APPLY`: 0 hàng phải → **loại** hàng trái. Enrich nullable: `LEFT JOIN LATERAL … ON TRUE` / `OUTER APPLY`.
 
-PostgreSQL quên `LATERAL` khi cột trái dùng trong subquery `FROM` → `invalid reference to FROM-clause entry`. Hàm `FROM fn(u.id)` cần `LATERAL` nếu `u` đứng trước.
+PostgreSQL quên `LATERAL` khi cột trái dùng trong **subquery `FROM`** → `invalid reference to FROM-clause entry`. Còn với **hàm / SRF** (`FROM users u, fn(u.id)`), PG 9.3+ có **`LATERAL` ngầm** (không bắt buộc ghi từ khóa `LATERAL`, nhưng viết tường minh dễ đọc hơn).
 
 Scalar correlated ≡ `LEFT JOIN LATERAL` một cột. Top-N per group: `LATERAL` + index thường rõ plan hơn window trên cả bảng.
 
-**Ghi chú:** `ON` khác `TRUE` vừa lateral vừa lọc — hàng trái mất như inner. Điều kiện tương quan để *trong* subquery; `ON TRUE` cho `LEFT`.
+**Tái sử dụng biểu thức trung gian bằng `APPLY` / `LATERAL (VALUES (...))`:** Thay thế sạch sẽ cho lateral column alias (không có trên cả hai engine) và dùng được ở cả `SELECT`, `WHERE`, `ORDER BY`:
+
+```sql
+-- SQL Server
+SELECT o.Id, v.WithTax, v.WithTax * 0.05 AS Fee
+FROM dbo.Orders AS o
+CROSS APPLY (VALUES (o.Total * 1.1)) AS v(WithTax)
+WHERE v.WithTax > 100;
+
+-- PostgreSQL
+SELECT o.id, v.with_tax, v.with_tax * 0.05 AS fee
+FROM orders AS o
+CROSS JOIN LATERAL (VALUES (o.total * 1.1)) AS v(with_tax)
+WHERE v.with_tax > 100;
+```
+
+**Ghi chú:** Với `LEFT JOIN LATERAL (...) AS p ON <cond>`, khi `<cond>` là `FALSE`, hàng bên trái **vẫn được giữ lại với các cột `p.*` là `NULL`** (không bị loại như `INNER JOIN`). **Bẫy thật** xảy ra khi subquery bên trong có `LIMIT 1`: `LIMIT 1` chạy **trước** mệnh đề `ON`, nên nếu hàng duy nhất trả về không thỏa `<cond>` ở `ON`, kết quả cho `NULL` thay vì tiếp tục lấy hàng hợp lệ kế tiếp. Do đó luôn đặt điều kiện tương quan/lọc **bên trong** subquery và dùng `ON TRUE` cho `LEFT JOIN LATERAL`.
 
 ---
 
@@ -513,7 +550,7 @@ Scalar correlated ≡ `LEFT JOIN LATERAL` một cột. Top-N per group: `LATERAL
 WITH RECURSIVE walk AS (
     SELECT id, parent_id, name, 1 AS depth
     FROM org
-    WHERE id = @root
+    WHERE id = $1
     UNION ALL
     SELECT c.id, c.parent_id, c.name, w.depth + 1
     FROM org c
@@ -532,11 +569,11 @@ ORDER BY path;
     WHERE Id = @root
     UNION ALL
     SELECT c.Id, c.ParentId, c.Name, w.Depth + 1,
-           CAST(w.Path + N'/' + CAST(c.Id AS varchar(20)) AS varchar(max))
+           CAST(w.Path + '/' + CAST(c.Id AS varchar(20)) AS varchar(max))
     FROM dbo.Org AS c
     INNER JOIN walk AS w ON c.ParentId = w.Id
     WHERE w.Depth < 50
-      AND CHARINDEX(N'/' + CAST(c.Id AS varchar(20)) + N'/', N'/' + w.Path + N'/') = 0
+      AND CHARINDEX('/' + CAST(c.Id AS varchar(20)) + '/', '/' + w.Path + '/') = 0
 )
 SELECT * FROM walk
 OPTION (MAXRECURSION 50);
@@ -603,7 +640,7 @@ SELECT * FROM walk WHERE NOT is_cycle;
 
 SQL Server: cùng hình, `UNION ALL` giữa các anchor rồi `UNION ALL` recursive; `OPTION (MAXRECURSION)` ngoài. Trùng hàng nếu hai gốc chung hậu duệ — `DISTINCT` **cấm** trên recursive member SS: lọc ngoài hoặc mang cờ nguồn.
 
-Đi **lên** (tổ tiên): đảo join — `JOIN walk w ON c.id = w.parent_id` (con → cha). Trần `depth` vẫn bắt buộc. PGQ `MATCH` một cạnh không thay chuỗi tổ tiên độ dài không biết.
+Đi **lên** (tổ tiên): đảo join — `JOIN walk w ON c.id = w.parent_id` (con → cha). Trần `depth` vẫn bắt buộc.
 
 ```sql
 -- Tổ tiên của @id (SS)
@@ -708,17 +745,20 @@ CTE + `INSERT…SELECT` SS: `IDENTITY` / `OUTPUT` trên câu `INSERT` ngoài, kh
 - Tin `max_recursion_depth` GUC (không có).
 - `SEARCH` như “engine duyệt DFS” (chỉ cột sort).
 - CTE hai lần = “chạy một lần” trên SS.
-- `NOT MATERIALIZED` trên CTE recursive (bị ignore).
+- `NOT MATERIALIZED` trên CTE recursive/DML bị bỏ qua — nhưng trên CTE chứa hàm `VOLATILE` lại **vẫn ép inline** (hàm chạy lại nhiều lần).
 - `DELETE FROM cte` nghĩ xóa biến.
-- Data-modifying CTE PG đọc bảng vừa sửa ở nhánh song song.
+- Data-modifying CTE PG đọc bảng vừa sửa ở nhánh song song, hoặc 2 nhánh DML cùng sửa 1 hàng, hoặc tưởng CTE không được tham chiếu thì không chạy.
 - Nested `WITH` trong CTE (SS).
 - `ORDER BY` trong CTE không `TOP` rồi `FETCH` ngoài như đã sắp.
-- `SELECT *` CTE + `ALTER TABLE ADD` — caller không thấy cột mới nếu đã list cột.
+- `WITH t (a, b) AS (SELECT * FROM tbl)` + `ALTER TABLE ADD COLUMN` — lỗi lệch số cột (CTE không đóng băng metadata như view).
+- Correlated subquery quên qualify alias (Silent Column Capture xóa sạch bảng).
+- `> ALL (subquery rỗng)` trả `TRUE` (vacuous truth) hoặc `ALL` dính `NULL`.
+- Lệch kiểu/độ dài cột anchor vs recursive trên SQL Server (**Error 240**).
+- Dùng PG `CYCLE` nhưng quên lọc `WHERE NOT is_cycle`.
 - Scalar >1 hàng chỉ vỡ production.
-- `IN (SELECT col)` col nullable + `NOT IN`.
+- `NOT IN (SELECT col)` khi `col` nullable.
 - `CROSS APPLY` nuốt hàng trái.
-- `OFFSET` phân trang trong CTE thay keyset — [window-functions.md](window-functions.md).
-- SQL Graph SS `MATCH` copy sang PGQ.
+- `OFFSET` phân trang trong CTE thay keyset — [select.md](select.md).
 - `MERGE` + CTE như snapshot dưới RC.
 - `DISTINCT` trên recursive member SS.
 - Đi lên cây nhưng join vẫn `parent_id = walk.id` (sai hướng).

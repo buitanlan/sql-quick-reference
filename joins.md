@@ -75,7 +75,7 @@ Nguyên tắc:
 
 `JOIN` không từ khóa = `INNER JOIN`. `RIGHT` = `LEFT` đảo nguồn — ưu tiên `LEFT` cho dễ đọc.
 
-Trên plan: SQL Server hiện `Left Anti Semi Join` / `Left Semi Join`. PostgreSQL 19 hiện `Anti Join` / `Semi Join` sau rewrite (mục 7.2, 10). Tên node **không** phải cú pháp viết tay.
+Trên plan: SQL Server hiện `Left Anti Semi Join` / `Left Semi Join`. PostgreSQL đã có node `Anti Join` / `Semi Join` từ lâu; **PG 19** mở rộng thêm các quy tắc rewrite (như `NOT IN` chứng minh không `NULL` và chuỗi `LEFT JOIN` + anti predicate) sang `Anti Join` (mục 7.2, 10). Tên node **không** phải cú pháp viết tay.
 
 ---
 
@@ -100,13 +100,13 @@ ON a.id = b.id AND a.tenant_id = b.tenant_id
 USING (id, tenant_id)     -- gộp cột trùng trong SELECT *
 ```
 
-`OR` trong `ON` (`a.id = b.id OR a.code = b.code`) phá hash equality — thường nested loop kém. `UNION` hai join equality thường rõ hơn.
+`OR` trong `ON` (`a.id = b.id OR a.code = b.code`) phá hash equality — thường nested loop kém. `UNION ALL` hai join equality (kèm `IS DISTINCT FROM` ở nhánh sau — mục 9) thường rõ và nhanh hơn.
 
 Kiểu lệch (`int` ⋈ `bigint`, `varchar` ⋈ `nvarchar`) → implicit convert, mất index. Sửa schema hoặc convert **phía tham số/nguồn nhỏ**.
 
 SQL Server: FK **trusted** (`is_not_trusted = 0`) cho *join elimination* — optimizer có thể bỏ join khi chỉ cần cột phía con và FK trusted chứng minh mỗi hàng con có đúng một hàng cha; không thể bỏ cha nếu cần cột cha không suy ra được. `NOCHECK` / disable FK → mất elimination, plan nặng hơn, *và* dữ liệu mồ côi. `WITH CHECK CHECK CONSTRAINT` sau ETL. PostgreSQL không cùng “trusted” catalog; `NOT VALID` vẫn kiểm hàng mới, planner không giả mọi hàng cũ hợp lệ cho elimination kiểu SS. [constraints.md](constraints.md), [ddl.md](ddl.md) §5.
 
-**Ghi chú:** `FROM a, b WHERE a.id = b.id` cũ tương đương `INNER` nếu `WHERE` đủ. Thiếu điều kiện = `CROSS`. SQL Server `INNER JOIN` **bắt buộc** `ON`/`USING`; thiếu → lỗi parse, không im lặng thành cross. T-SQL **không** có `USING` — mục 12.
+**Ghi chú:** `FROM a, b WHERE a.id = b.id` cũ tương đương `INNER` nếu `WHERE` đủ. Thiếu điều kiện = `CROSS`. SQL Server `INNER JOIN` **bắt buộc** `ON` (T-SQL **không** có `USING` — mục 12); PostgreSQL bắt buộc `ON` hoặc `USING`; thiếu → lỗi parse, không im lặng thành cross.
 
 ---
 
@@ -118,22 +118,29 @@ FROM customers AS c
 LEFT JOIN orders AS o ON o.customer_id = c.id;
 ```
 
-Hàng không khớp: cột phía không khớp = `NULL` (mọi cột, kể cả PK phải). `COUNT(o.id)` bỏ khách không đơn; `COUNT(*)` đếm cả khách trống.
+Hàng không khớp: cột phía không khớp = `NULL` (mọi cột, kể cả PK phải). Với `GROUP BY c.id`, `COUNT(o.id)` bỏ qua `NULL` nên khách không đơn ra **`0`**, còn `COUNT(*)` đếm cả hàng outer thành `1` (làm sai báo cáo "số đơn mỗi khách").
 
 `FULL OUTER JOIN`: giữ cả hai phía. SQL Server và PostgreSQL đều hỗ trợ.
 
 `RIGHT JOIN` ít dùng: viết lại `LEFT` với bảng lớn/nguồn “giữ hàng” bên trái.
 
-Outer join **không** giao hoán. `(A LEFT B) LEFT C` khác `A LEFT (B JOIN C)` — ngoặc / derived table khi chuỗi outer.
+Outer join **không** giao hoán. `(A LEFT B) LEFT C` khác `A LEFT (B JOIN C)` — ngoặc / derived table khi chuỗi outer. **Bẫy chuỗi `LEFT JOIN` theo sau bởi `INNER JOIN`:** viết `FROM a LEFT JOIN b ON b.a_id = a.id INNER JOIN c ON c.b_id = b.id` sẽ khiến mọi hàng không khớp `b` (`b.id IS NULL`) bị `INNER JOIN c` loại bỏ — **âm thầm biến `LEFT JOIN b` thành `INNER`**! Để giữ hàng của `a`, đổi sang `LEFT JOIN c` hoặc dùng cú pháp **nested join** `LEFT JOIN (b INNER JOIN c ON ...) ON ...` (chuẩn ANSI, chạy trên cả hai engine):
 
 ```sql
--- Khác nghĩa: C lọc trước khi outer với A, vs A left B rồi left C
+-- PostgreSQL (SQL Server: dùng c.active = 1 thay cho boolean c.active)
+-- 1) Chuỗi LEFT: giữ a, giữ b kể cả khi c không khớp
 SELECT …
 FROM a
 LEFT JOIN b ON b.a_id = a.id
 LEFT JOIN c ON c.b_id = b.id AND c.active;   -- active trên ON của C
 
--- vs derived: chỉ b+c active, rồi left vào a
+-- 2) Nested join (cả hai engine): chỉ lấy cặp (b, c) khớp nhau rồi LEFT JOIN vào a
+SELECT a.id, b.id AS b_id, c.id AS c_id
+FROM a
+LEFT JOIN (b INNER JOIN c ON c.b_id = b.id AND c.active)
+    ON b.a_id = a.id;
+
+-- 3) Tương đương bằng derived table
 SELECT …
 FROM a
 LEFT JOIN (
@@ -161,7 +168,7 @@ Nhầm `CROSS` trên bảng lớn = incident. Review mọi `FROM a CROSS JOIN b`
 
 **Ghi chú:** `CROSS JOIN LATERAL` (PG) / `CROSS APPLY` (SS) **không** phải tích vô điều kiện: phía phải phụ thuộc trái — mục 8.
 
-`FULL OUTER JOIN` hai bảng không khóa chung sạch: `SELECT COALESCE(a.id, b.id)` — thiếu `COALESCE` thì PK “lạc” NULL một phía. `COUNT(*)` sau full outer ≠ `|A| + |B|` (trừ khi không khớp nào). Dùng khi đối soát hai nguồn (file vs bảng), không phải “LEFT cho chắc”.
+`FULL OUTER JOIN` hai bảng không khóa chung sạch: `SELECT COALESCE(a.id, b.id)` — thiếu `COALESCE` thì PK “lạc” NULL một phía. Trên **PostgreSQL**, `FULL OUTER JOIN b USING (id)` tự động `COALESCE(a.id, b.id)` cho cột `id` (nhưng không portable sang SQL Server vì T-SQL không có `USING`). `COUNT(*)` sau full outer ≠ `|A| + |B|` (trừ khi không khớp nào). Dùng khi đối soát hai nguồn (file vs bảng), không phải “LEFT cho chắc”.
 
 ---
 
@@ -244,7 +251,7 @@ LEFT JOIN customers AS p ON p.id = c.parent_id;
 
 **Hình dung.** Join thường **nhân hàng** (một khách 3 đơn → 3 hàng). Semi = câu hỏi có/không: “khách này *có* đơn không?” — trả khách **một lần**. Anti = “khách này *không* có đơn”.
 
-`EXISTS` / `NOT EXISTS` đọc đúng câu hỏi đó. `IN` gần semi *nếu không NULL*. `NOT IN` với một `NULL` trong danh sách = hỏi “x khác mọi phần tử, kể cả *không biết*?” — logic ba giá trị trả **UNKNOWN**, `WHERE` loại hết. Không phải bug engine.
+`EXISTS` / `NOT EXISTS` đọc đúng câu hỏi đó. Trong `WHERE`, `IN (SELECT ...)` **luôn tương đương semi-join (`EXISTS`) kể cả khi subquery chứa `NULL`** (vì `x = NULL` là `UNKNOWN`: nếu có giá trị khớp `TRUE OR UNKNOWN → TRUE`; nếu không khớp `FALSE OR UNKNOWN → UNKNOWN` bị `WHERE` loại). **Chỉ `NOT IN`** với một `NULL` trong danh sách mới hỏng = hỏi “x khác mọi phần tử, kể cả *không biết*?” — logic ba giá trị trả **UNKNOWN**, `WHERE` loại hết. Không phải bug engine.
 
 **Semi:** “trái có ít nhất một phải” — mỗi hàng trái **một lần**, dù nhiều con.
 
@@ -256,7 +263,7 @@ WHERE EXISTS (
 );
 ```
 
-`IN (SELECT customer_id FROM orders)` tương đương semi **nếu** cột subquery không `NULL` (hoặc `WHERE customer_id IS NOT NULL`). `INNER JOIN` + `DISTINCT`/`GROUP BY` làm việc tương tự nhưng dễ fan-out trước khi gộp — đắt và dễ sai `SUM`.
+`IN (SELECT customer_id FROM orders)` trong `WHERE` **luôn** tương đương semi-join `EXISTS` kể cả khi `customer_id` có `NULL` (ngược lại, chỉ **`NOT IN`** mới mất tương đương với `NOT EXISTS` khi có `NULL` — mục 7.1). `INNER JOIN` + `DISTINCT`/`GROUP BY` làm việc tương tự nhưng dễ fan-out trước khi gộp — đắt và dễ sai `SUM`.
 
 **Anti:** không có khớp. **Ưu tiên `NOT EXISTS`** (NULL-safe):
 
@@ -312,7 +319,7 @@ PostgreSQL **19** (GA 19/11/2026):
 
 - `NOT IN (SELECT …)` khi planner **chứng minh subquery không NULL** → rewrite **ANTI JOIN** (hash/nested loop anti), thường rẻ hơn `<> ALL` naively.
 - Nhiều `LEFT JOIN` + predicate kiểu anti (`IS NULL` trên khóa phải) → **ANTI JOIN**.
-- **Memoize** cho ANTI khi inner unique (nhớ kết quả lookup, giống Memoize nested loop).
+- **Memoize** mở rộng cho ANTI join (cache lookup khi khóa phía **outer lặp nhiều**, giống Memoize nested loop — mục 10.2).
 
 Chứng minh không NULL: cột `NOT NULL`, hoặc subquery có `WHERE col IS NOT NULL`, hoặc constraint. **Nullable + NULL thật → bẫy logic mục 7.1 vẫn còn.** Optimizer không biến `NOT IN (nullable)` thành `NOT EXISTS`.
 
@@ -406,11 +413,11 @@ FROM customers AS c
 CROSS JOIN LATERAL unnest(c.tags) AS u(tag);
 ```
 
-Multi-statement TVF (SQL Server) tối ưu kém hơn inline. PostgreSQL function `RETURNS SETOF` trong `FROM` cần `LATERAL` nếu tham số là cột trái; `SELECT func(c.id)` trong list là SRF trong target (ngữ nghĩa hàng nhân — cẩn thận).
+Multi-statement TVF (SQL Server) tối ưu kém hơn inline. Trên PostgreSQL (9.3+), function `RETURNS SETOF` (SRF) trong `FROM` có **`LATERAL` ngầm** khi tham chiếu cột bảng đứng trước (không bắt buộc ghi từ khóa `LATERAL`, dù viết tường minh `CROSS JOIN LATERAL` / `LEFT JOIN LATERAL` giúp rõ nghĩa hơn; chỉ **subquery** trong `FROM` mới bắt buộc `LATERAL`); `SELECT func(c.id)` trong target list là SRF trong projection (nhân hàng — cẩn thận).
 
 Index `(customer_id, total DESC, id DESC)` biến `APPLY`/`LATERAL` + `TOP`/`LIMIT` thành seek lặp — thường thắng `ROW_NUMBER` toàn bảng: [select.md](select.md) §10.
 
-**Ghi chú:** `CROSS APPLY` với TVF trả 0 hàng **loại** hàng trái. Bug hay gặp khi “enrich” mà không `OUTER APPLY`. PostgreSQL quên `LATERAL`: lỗi “invalid reference to FROM-clause entry”.
+**Ghi chú:** `CROSS APPLY` với TVF trả 0 hàng **loại** hàng trái. Bug hay gặp khi “enrich” mà không `OUTER APPLY`. PostgreSQL quên `LATERAL` cho subquery tương quan: lỗi “invalid reference to FROM-clause entry”.
 
 ---
 
@@ -427,10 +434,12 @@ Optimizer chọn theo **ước lượng số hàng**. Thống kê cũ → chọn
 | Thuật toán | Khi nào | Rủi ro |
 |---|---|---|
 | Nested loop | Outer nhỏ-vừa, inner **seek** tốt (index = khóa) | Outer lớn + inner scan = thảm họa |
-| Hash join | Equality, không cần thứ tự, bộ nhớ đủ | Spill `tempdb` / `work_mem`; build lớn |
-| Merge join | Hai input đã sort / index theo khóa | Sort đắt nếu chưa thứ tự; `OR`/`<>` không merge |
+| Hash join | Equality, không cần thứ tự, bộ nhớ đủ; chọn nhánh nhỏ làm **build**, nhánh lớn làm **probe** | Ước lượng build sai → **spill** `tempdb` (SS) / `Batches > 1` (PG) |
+| Merge join | Hai input đã sort / index theo khóa | Sort đắt nếu chưa thứ tự; pure inequality / `OR` / `<>` không merge |
 | Adaptive (SQL Server) | Chọn loop/hash lúc chạy (batch, rồi row mode dần) | Vẫn phụ thuộc CE |
-| Memoize (PostgreSQL) | Cache lookup nested loop / anti unique inner (**19** ANTI) | Ước lượng cache sai; `EXPLAIN` hiện hits |
+| Memoize (PostgreSQL) | Cache lookup nested loop khi khóa **outer lặp nhiều** (**19** mở cho ANTI) | Khóa outer unique/NDV cao → cache hit 0%, tốn `work_mem` |
+
+**Hash Join build/probe, spill & Batch Mode on Rowstore (SS 2019+):** Hash Join luôn nạp nhánh ước lượng nhỏ hơn làm **build input** vào RAM (`work_mem` trên PG; Memory Grant trên SS) rồi quét nhánh kia làm **probe input**. Nếu CE ước lượng build quá thấp, hash table tràn xuống đĩa (spill `tempdb` trên SS; `Batches > 1` trên PG `EXPLAIN (ANALYZE)`). Từ **SQL Server 2019+** (compat 150+, cả Standard lẫn Enterprise), engine tự kích hoạt **Batch Mode on Rowstore** cho các Hash Join / aggregate phân tích lớn mà không cần columnstore index — xử lý theo lô ~900 hàng giảm mạnh CPU.
 
 ```sql
 -- Gợi ý — lock-in, chỉ sau khi đo
@@ -449,26 +458,27 @@ SELECT …
 
 Thống kê cũ → CE sai → hash khi nên loop (hoặc ngược). SQL Server 2025: CE feedback cho **expression**, OPPO (optional parameter), **DOP feedback mặc định** — mục 10.4, [select.md](select.md) §14. Không thay index thiếu.
 
-Join không-equality (`ON a.ts BETWEEN b.start_at AND b.end_at`) → loop hoặc merge đặc biệt; interval: SQL Server không GiST; PostgreSQL GiST/`daterange` — [indexes.md](indexes.md).
+Join thuần bất đẳng thức (`ON a.ts BETWEEN b.start_at AND b.end_at`, không có equality predicate) **không** dùng được Hash Join lẫn Merge Join trên cả hai engine — bắt buộc Nested Loop. Interval: SQL Server không có GiST; PostgreSQL có GiST/`daterange` — [indexes.md](indexes.md).
 
 ```sql
--- Inequality: không hash. Index (start_at, end_at) / GiST daterange giúp loop
+-- Inequality: không hash/merge. Index (start_at, end_at) / GiST daterange giúp loop
 SELECT e.id, s.slot
 FROM events AS e
 JOIN slots AS s
   ON e.ts >= s.start_at AND e.ts < s.end_at;
 ```
 
-`OR` hai equality (`ON a.id = b.id OR a.code = b.code`): `UNION` hai inner join thường ổn định hơn một nested loop kép.
+`OR` hai equality (`ON a.id = b.id OR a.code = b.code`): tách thành **`UNION ALL`** hai inner join kèm điều kiện loại trừ **`IS DISTINCT FROM`** (có trên cả PG và SQL Server **2022+**) vừa tránh sort/hash khử trùng của `UNION` (và không làm mất hàng trùng hợp lệ) vừa tránh bẫy `NULL` của `a.id <> b.id`:
 
 ```sql
 SELECT a.id, b.val
 FROM a
 JOIN b ON a.id = b.id
-UNION
+UNION ALL
 SELECT a.id, b.val
 FROM a
-JOIN b ON a.code = b.code AND a.id <> b.id;  -- tránh trùng nếu cả hai khớp
+JOIN b ON a.code = b.code
+      AND a.id IS DISTINCT FROM b.id;  -- NULL-safe; SS < 2022 dùng NOT (a.id = b.id) xử lý NULL
 ```
 
 (Điều kiện chống trùng tùy khóa — đừng copy mù.)
@@ -495,9 +505,11 @@ Ghi PG 19 **GA** — đối chiếu [release notes 19](https://www.postgresql.or
 
 `EXPLAIN (ANALYZE, IO)` async I/O; `EXPLAIN (ANALYZE, WAL)` FPI bytes; Memoize estimates. JIT **tắt mặc định** trên 19 — analytical join lớn có thể chậm hơn 18 nếu quên bật.
 
+**Giới hạn reorder join trên PostgreSQL (`join_collapse_limit`, `from_collapse_limit`, GEQO):** Planner chỉ tìm thứ tự join tối ưu toàn cục khi số nguồn trong một nhóm `JOIN` ≤ **`join_collapse_limit`** (mặc định **8**; tương tự `from_collapse_limit = 8` cho subquery gộp vào `FROM`). Khi vượt 8 bảng, thứ tự `JOIN` viết tường minh bắt đầu khóa cứng thứ tự lập kế hoạch; khi vượt **`geqo_threshold`** (mặc định **12**), PG chuyển sang thuật toán di truyền **GEQO**, khiến plan có thể đổi ngẫu nhiên giữa các lần lập kế hoạch.
+
 ### 10.2 Memoize & aggregate trước join
 
-**Memoize:** cache kết quả inner lookup theo khóa join trong nested loop. 19 mở ANTI unique inner. `EXPLAIN (ANALYZE)`: `Cache Hits` / `Misses`. Unique FK → hit cao. Khóa không unique / NDV cao → cache vô ích, tốn `work_mem`.
+**Memoize:** cache kết quả inner lookup theo giá trị khóa join đến từ phía **outer** trong Nested Loop (PG 14+; PG 19 mở rộng cho ANTI join). `EXPLAIN (ANALYZE)` hiện `Cache Hits` / `Misses`. Cache hit cao khi khóa phía **outer lặp lại nhiều** (NDV thấp / nhiều hàng outer dùng chung một khóa — vd fact `orders.customer_id` lặp nhiều probe vào PK `customers.id`). Ngược lại, nếu khóa phía **outer là unique** (hoặc NDV rất cao), mỗi khóa chỉ xuất hiện 1 lần → **cache hit = 0%**, Memoize vô ích và tốn `work_mem`.
 
 **Aggregate trước join:** planner 19 có thể gộp phía nhiều hàng *trước* khi join nếu kết quả logic tương đương (không đổi `SUM` sau Cartesian viết tay — SQL sai vẫn sai).
 
@@ -602,14 +614,14 @@ Ba nhánh (items, payments, refunds): ba subquery gộp, không một join phẳ
 
 ORM “include” hai collection rồi `Sum()` phía SQL = cùng bệnh. Query bảng cạnh quan hệ có nhiều nhánh 1-n cũng gặp fan-out này.
 
-Fan-out *ba* nhánh — đếm hàng join trước khi `SUM`:
+Fan-out *hai* nhánh — đếm hàng join trước khi `SUM`:
 
 ```sql
 -- Probe cardinality (cả hai engine)
 SELECT
     COUNT(*) AS join_rows,
     COUNT(DISTINCT o.id) AS orders,
-    COUNT(*) / NULLIF(COUNT(DISTINCT o.id), 0) AS avg_fanout
+    COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT o.id), 0) AS avg_fanout  -- * 1.0 tránh integer division (3 / 2 = 1)
 FROM orders AS o
 JOIN order_items AS i ON i.order_id = o.id
 JOIN payments AS p ON p.order_id = o.id;
@@ -741,7 +753,7 @@ SQL Server: `CROSS APPLY` + `SELECT TOP (2) … ORDER BY`, `OUTER APPLY` nếu k
 
 | Cách viết | `SUM(o.total)` | `COUNT(items)` | `SUM(pay)` |
 |---|---|---|---|
-| Join phẳng 3 bảng rồi `GROUP BY o.id` | 400 (100×2×2) | 4 | 200×2 |
+| Join phẳng 3 bảng rồi `GROUP BY o.id` | 400 (100×2×2) | 4 | 200 (100×2) |
 | Agg từng nhánh rồi `LEFT JOIN` | 100 (cột `o.total`) | 2 | 100 |
 
 ```sql
@@ -811,7 +823,7 @@ INNER JOIN staging_b AS b ON a.ext_id = b.ext_id;
 -- Hàng ext_id NULL hai phía: KHÔNG ra kết quả (NULL = NULL → UNKNOWN)
 ```
 
-PG 19 hash “NULL key tốt hơn” không ghép hai NULL. Muốn “cả hai NULL là khớp”: `ON a.ext_id IS NOT DISTINCT FROM b.ext_id` (PG) / `ON (a.ext_id = b.ext_id OR (a.ext_id IS NULL AND b.ext_id IS NULL))` — khác equality thường, plan khác, **đừng** làm mặc định PK.
+PG 19 hash “NULL key tốt hơn” không ghép hai NULL. Muốn “cả hai NULL là khớp”: `ON a.ext_id IS NOT DISTINCT FROM b.ext_id` (hỗ trợ trên cả PostgreSQL lẫn **SQL Server 2022+**; bản SS cũ hơn dùng `ON (a.ext_id = b.ext_id OR (a.ext_id IS NULL AND b.ext_id IS NULL))`) — khác equality thường, plan khác, **đừng** làm mặc định PK.
 
 ---
 
@@ -824,7 +836,6 @@ PG 19 hash “NULL key tốt hơn” không ghép hai NULL. Muốn “cả hai N
 - Khóa join cùng kiểu/collation; index FK.
 - Cấm `NATURAL JOIN`; tránh `USING` trên API đa dialect.
 - Hint join / `pg_plan_advice` / Query Store force chỉ sau `EXPLAIN` / actual plan và thống kê mới.
-- Graph PG 19: index như join thường.
 - Compat 170: baseline Query Store trước OPPO/DOP.
 
 ```text
@@ -876,6 +887,8 @@ PG 19 hash “NULL key tốt hơn” không ghép hai NULL. Muốn “cả hai N
 | CE expression / OPPO / PSPO / DOP feedback | **2025** | generic/custom |
 | `pg_plan_advice` / `pg_stash_advice` | Query Store force | **19** contrib |
 | `GENERATE_SERIES` | 2022+ | lâu |
+| `IS [NOT] DISTINCT FROM` | **2022+** | lõi |
+| Batch Mode on Rowstore | **2019+** (compat 150+) | — |
 | JIT default off | — | **19** |
 
 Logical processing `FROM`/`ON`/`WHERE`: [select.md](select.md) §3. Isolation khi join rồi ghi: [transactions.md](transactions.md). IQP trên `SELECT`: [select.md](select.md) §14.

@@ -122,9 +122,11 @@ SELECT unnest(string_to_array('a,b,c', ','));
 SELECT string_agg(name, ',' ORDER BY name);
 ```
 
-`STRING_SPLIT` không bảo đảm thứ tự hàng kể cả khi có enable_ordinal; phải ORDER BY ordinal. `string_to_array` giữ thứ tự. Gộp có `ORDER BY` tường minh — thiếu thì thứ tự **không xác định**.
+`STRING_SPLIT` không bảo đảm thứ tự hàng kể cả khi có `enable_ordinal`; phải `ORDER BY ordinal`. `string_to_array` giữ thứ tự. Gộp có `ORDER BY` tường minh — thiếu thì thứ tự **không xác định**.
 
-Delimiter regex: SS `REGEXP_SPLIT_TO_TABLE` (§3); PG `regexp_split_to_table`. `STRING_SPLIT` chỉ nhận separator một ký tự; enable_ordinal không thay giới hạn này. Dùng REGEXP_SPLIT_TO_TABLE khi cần pattern.
+SQL Server `STRING_AGG` có giới hạn **8000 byte** cho kết quả nếu đầu vào là `varchar(n)`/`nvarchar(n)` không phải `max` — vượt ngưỡng ném lỗi **`Msg 9829`**. Gộp chuỗi dài phải ép sang `max`: `STRING_AGG(CAST(name AS nvarchar(max)), N',') WITHIN GROUP (ORDER BY name)`.
+
+Delimiter regex: SS `REGEXP_SPLIT_TO_TABLE` (§3); PG `regexp_split_to_table`. `STRING_SPLIT` chỉ nhận separator một ký tự; `enable_ordinal` không thay giới hạn này. Dùng `REGEXP_SPLIT_TO_TABLE` khi cần pattern.
 
 **Ghi chú:** `CONCAT` nuốt NULL; `||` / `+` (ANSI NULL) **không**. Review “sao mất đoạn giữa” thường là NULL cột, không phải bug `CONCAT`.
 
@@ -134,8 +136,9 @@ SQL Server **2025**: chuyển escape Unicode trong chuỗi thành ký tự. Esca
 
 ```sql
 -- SQL Server 2025
-SELECT UNISTR(N'Hello! \D83D\DE00');          -- UTF-16 code units
-SELECT UNISTR(N'Hello! \+01F603');            -- codepoint Unicode (\+xxxxxx)
+SELECT UNISTR(N'Hello! \D83D\DE00');          -- UTF-16 surrogate pair → 😀 (U+1F600)
+SELECT UNISTR(N'Hello! \+01F600');            -- codepoint Unicode (\+xxxxxx) → cùng 😀 (U+1F600)
+SELECT UNISTR(N'Hello! \+01F603');            -- codepoint khác → 😃 (U+1F603)
 SELECT UNISTR(N'ABC#00C0#0181#0187', N'#');   -- escape tùy chọn '#'
 SELECT N'Hello! ' + NCHAR(0xd83d) + NCHAR(0xde00);  -- từng code unit — dài hơn
 ```
@@ -145,14 +148,14 @@ SELECT N'Hello! ' + NCHAR(0xd83d) + NCHAR(0xde00);  -- từng code unit — dài
 PostgreSQL **không** có `UNISTR`. Literal Unicode:
 
 ```sql
-SELECT U&'Hello! \+01F603';                   -- escape U& standard
+SELECT U&'Hello! \+01F600';                   -- escape U& standard → 😀
 SELECT U&'d!00E9j!00E0' UESCAPE '!';          -- UESCAPE đổi dấu (mặc định \)
-SELECT chr(128515);                           -- codepoint → text
+SELECT chr(128512);                           -- codepoint → text (😀)
 ```
 
-Đừng bịa `unistr()` trên PG 19. E-string PostgreSQL hỗ trợ `\uXXXX` và `\UXXXXXXXX` độc lập với standard_conforming_strings; literal thường giữ backslash khi setting on.
+Đừng bịa `unistr()` trên PG 19. E-string PostgreSQL hỗ trợ `\uXXXX` và `\UXXXXXXXX` độc lập với `standard_conforming_strings`; literal thường giữ backslash khi setting on.
 
-**Ghi chú:** `\xxxx` = UTF-16; `\+xxxxxx` = codepoint. Surrogate pair (`\D83D\DE00`) ≠ một `\+01F600` cùng glyph — test fixture, đừng mix mù.
+**Ghi chú:** `\xxxx` = một UTF-16 code unit; `\+xxxxxx` = một Unicode codepoint. `\D83D\DE00` chính là UTF-16 surrogate pair của `\+01F600` (cho **cùng** giá trị chuỗi sau `UNISTR()`), còn `\+01F603` là ký tự khác — ưu tiên `\+xxxxxx` cho dễ đọc và dễ đối chiếu với PG `U&'\+xxxxxx'`.
 
 ### 2.4 Base64
 
@@ -211,8 +214,8 @@ SELECT REGEXP_SUBSTR(s, N'(\d+)', 1, 1, N'c', 1);               -- start, occurr
 -- không khớp → NULL
 
 SELECT REGEXP_INSTR(s, N'[0-9]+');                              -- vị trí 1-based; 0 nếu không khớp
-SELECT REGEXP_INSTR(s, N'a', 1, 3, 0, N'i');                   -- lần 3, return_option 0 = đầu
-SELECT REGEXP_INSTR(s, N't.*?e', 1, 1, 1);                      -- return_option 1 = vị trí *cuối* khớp
+SELECT REGEXP_INSTR(s, N'a', 1, 3, 0, N'i');                   -- lần 3, return_option 0 = vị trí bắt đầu khớp
+SELECT REGEXP_INSTR(s, N't.*?e', 1, 1, 1);                      -- return_option 1 = vị trí *ngay sau* khớp (end + 1)
 SELECT REGEXP_COUNT(s, N'\w+');
 
 SELECT * FROM REGEXP_MATCHES(N'Learning #AzureSQL #AzureSQLDB', N'#([A-Za-z0-9_]+)');
@@ -222,7 +225,7 @@ SELECT * FROM REGEXP_SPLIT_TO_TABLE(N'the quick brown fox', N'\s+');
 -- value, ordinal (bigint, 1-based)
 ```
 
-`REGEXP_INSTR`: `start ≥ 1`; `start` vượt độ dài → `0`. `return_option` chỉ `0` (đầu) hoặc `1` (cuối). `group` mặc định `0` = cả pattern; `group` lớn hơn số capture → `0`.
+`REGEXP_INSTR`: `start ≥ 1`; `start` vượt độ dài → `0`. `return_option` chỉ `0` (vị trí đầu khớp) hoặc `1` (vị trí ký tự **ngay sau** khớp, tức `end + 1` — giống Oracle/PG). `group` mặc định `0` = cả pattern; `group` lớn hơn số capture → `0`.
 
 `REGEXP_MATCHES` không khớp → **không hàng** (không một hàng NULL). `substring_matches` là JSON mô tả từng capture (`value`, `start`, `length`).
 
@@ -250,20 +253,20 @@ SELECT regexp_substr(s, '(\d+)', 1, 1, 'i', 1);
 SELECT regexp_instr(s, '[0-9]+');
 ```
 
-Flag PG quen: `g` (global), `i`, `m`/`n` (newline — dialect POSIX PG, **không** giống hệt `s`/`m` SS). `regexp_replace` **bắt buộc** `'g'` nếu muốn thay hết — mặc định một lần.
+Flag PG quen: `g` (global), `i`, `m`/`n` (newline-sensitive — bí danh của nhau trong POSIX ARE), `p` (partial), `w` (inverse partial). `regexp_replace` **bắt buộc** `'g'` nếu muốn thay hết — mặc định một lần.
 
 `regexp_matches` thiếu `'g'` → một hàng dù chuỗi có nhiều khớp. `REGEXP_MATCHES` SS luôn trả mọi lần (không flag `g`).
 
 ### 3.3 Port flag & RE2
 
-| Ý | SQL Server 2025 | PostgreSQL |
+| Ý | SQL Server 2025 (RE2) | PostgreSQL (POSIX ARE) |
 |---|---|---|
 | Thay mọi lần | `REGEXP_REPLACE` occurrence `0` (mặc định) | flag `'g'` |
 | Flag `g` | **lỗi** “not valid flags” | bắt buộc nếu muốn global |
 | Case-insensitive | `i` | `i` / `~*` |
-| `.` khớp newline | `s` | tùy flavor (`n` / `s` — đọc docs `regexp`) |
-| `^` `$` theo dòng | `m` | `m` |
-| Backref / lookaround | **không** (RE2) | POSIX ARE: backref được; lookaround hạn chế theo phiên bản |
+| `.` khớp `\n` | flag `s` (mặc định tắt) | **mặc định bật** (`s` là mặc định; `m`/`n`/`p` **tắt** `.` khớp `\n`) |
+| `^` `$` theo dòng | `m` (và `ms` nếu vẫn muốn `.` khớp `\n`) | `m` (= bí danh `n`, tắt `.` khớp `\n`); tương đương RE2 `ms` là **`w`** |
+| Backref / lookaround | **không** (RE2) | POSIX ARE: backref được; lookahead có lâu; **lookbehind từ PG 14+** |
 | TVF mọi khớp | `REGEXP_MATCHES` | `regexp_matches(..., 'g')` |
 
 **Ghi chú:** Port `regexp_replace` PG (`'g'`) sang SS: *đừng* thêm flag `g`. Port ngược: *phải* `'g'` nếu muốn thay hết. Unicode property / `\w` / newline **không** portable — test fixture tiếng Việt.
@@ -304,7 +307,7 @@ Kiểu: [typesystem.md](typesystem.md). `datetime` vs `timestamptz` vs `datetime
 | Việc | SQL Server | PostgreSQL |
 |---|---|---|
 | Instant local | `SYSDATETIME()`, `GETDATE()` | `clock_timestamp()` / `now()` — **xem §11** |
-| UTC | `SYSUTCDATETIME()`, `GETUTCDATE()` | `now() AT TIME ZONE 'UTC'` (sau khi hiểu session TZ) |
+| UTC | `SYSUTCDATETIME()`, `GETUTCDATE()` | `now() AT TIME ZONE 'UTC'` (trả `timestamp` UTC, **không** phụ thuộc session TZ) |
 | Chỉ ngày | `CURRENT_DATE` (**2025**, kiểu `date`) | `CURRENT_DATE` |
 | Cộng | `DATEADD(part, n, d)` — `n` **bigint** (2025) | `d + interval '1 day'` |
 | Hiệu | `DATEDIFF` / `DATEDIFF_BIG` | trừ `timestamp` → `interval`; `age()` |
@@ -336,26 +339,32 @@ SELECT timeofday();                          -- text, wall clock
 
 ### 5.2 Cộng trừ & trunc — `DATEADD` bigint
 
-Trước 2025, `DATEADD` *number* là **`int`**. `86400 * 10000` giây overflow. **2025** (và Azure SQL / Fabric theo moniker Learn): *number* **`bigint`**.
+Trước 2025, `DATEADD` *number* là **`int`** (tối đa `2,147,483,647` ≈ `24,855` ngày theo giây). Ví dụ `30,000` ngày (`2,592,000,000` giây > `INT_MAX`) sẽ overflow trên bản cũ. **2025** (và Azure SQL / Fabric theo moniker Learn): *number* **`bigint`**. Lưu ý bẫy: nếu viết `DATEADD(second, 86400 * 30000, ...)`, phép nhân `int * int` **vẫn tràn ngay trước khi truyền vào `DATEADD`** — bắt buộc ép ít nhất một toán hạng sang `bigint`.
 
 ```sql
--- SQL Server 2025: number là bigint
-SELECT DATEADD(second, CAST(86400 AS bigint) * 10000, SYSUTCDATETIME());
+-- SQL Server 2025: number là bigint (ép bigint trước khi nhân!)
+SELECT DATEADD(second, CAST(86400 AS bigint) * 30000, SYSUTCDATETIME());
 SELECT DATEADD(nanosecond, CAST(9000000000000 AS bigint), SYSUTCDATETIME());
 SELECT DATETRUNC(month, OrderDate);
-SELECT DATEDIFF_BIG(second, '2000-01-01', SYSUTCDATETIME());
+SELECT DATE_BUCKET(minute, 15, OrderDate);                         -- gom nhóm từng khung 15 phút (2022+)
+SELECT DATEDIFF_BIG(second, CAST('2000-01-01' AS datetime2), SYSUTCDATETIME());
 
--- Tháng ngắn: 31/08 + 1 month → 30/09 (kẹp ngày)
-SELECT DATEADD(month, 1, '2024-08-31');
+-- Bẫy DATEDIFF: chỉ đếm số *ranh giới* đã vượt, KHÔNG đo khoảng thời gian thực
+SELECT DATEDIFF(year, '20251231', '20260101');                     -- 1 (dù cách nhau 1 ngày!)
+
+-- Tháng ngắn: 31/08 + 1 month → 30/09 (kẹp ngày; dùng 'YYYYMMDD' hoặc CAST AS date tránh bẫy DATEFORMAT)
+SELECT DATEADD(month, 1, CAST('2024-08-31' AS date));
 
 -- PostgreSQL
-SELECT timestamp '2024-08-31' + interval '1 month';   -- 2024-09-30
+SELECT date '2024-08-31' + interval '1 month';                     -- 2024-09-30 00:00:00
 SELECT date_trunc('month', now());
-SELECT extract(epoch FROM (now() - ts));              -- giây, double
-SELECT now() + make_interval(secs => 864000000);
+SELECT date_bin('15 minutes', created_at, timestamptz '2000-01-01 00:00+00');  -- PG 14+
+SELECT extract(epoch FROM (now() - ts));                           -- giây, kiểu numeric (PG 14+)
+SELECT age(date '2026-01-01', date '2025-12-31');                  -- '1 day' (khoảng lịch thực, khác DATEDIFF)
+SELECT now() + make_interval(secs => 2592000000);
 ```
 
-`DATEADD` **cắt** phần thập phân của `number`, không làm tròn. `nanosecond` trên `datetime2` bước **100 ns**. `datepart` là token (`year`,`month`,`second`,…), **không** biến. Không cộng timezone offset bằng `DATEADD`.
+`DATEADD` **cắt** phần thập phân của `number`, không làm tròn. `nanosecond` trên `datetime2` bước **100 ns**. `datepart` là token (`year`,`month`,`second`,…), **không** biến. Không cộng timezone offset bằng `DATEADD`. `DATEDIFF` SQL Server đếm số lần băng qua ranh giới đơn vị (nửa đêm / đầu tháng / đầu năm); cần tuổi hoặc thời lượng thực phải so ngày cụ thể hoặc tính bằng giây/ngày rồi đổi, còn PG `age()` trả `interval` theo lịch thực.
 
 Port vòng lặp “cộng N giây lớn” từ SS 2019: đổi kiểu `int` → `bigint` *và* engine 2025; giữ compat 160 trên 2025 vẫn nhận `bigint` `DATEADD` (đây là parser/engine, không phải IQP 170).
 
@@ -395,7 +404,11 @@ SELECT AVG(n) FROM (VALUES (1), (2), (NULL)) AS t(n); -- PostgreSQL: 1.5; SQL Se
 -- AVG bỏ NULL; CAST n sang decimal nếu cần phần lẻ trên SQL Server.
 ```
 
-`AVG` integer SS: chia nguyên rồi lên kiểu kết quả — `AVG` của `int` có thể **cắt**. PG `avg(int)` → `numeric`. Tiền tệ: `AVG(CAST(n AS decimal(19,4)))`.
+`AVG(int)` trên SQL Server trả về **`int`** (chia nguyên, **cắt** phần thập phân; cộng dồn nội bộ có thể tràn `int` nếu không ép `bigint`). PG `avg(int)` → `numeric`. Tiền tệ: `AVG(CAST(n AS decimal(19,4)))`.
+
+Một số aggregate thực chiến theo engine:
+- **SQL Server:** `APPROX_COUNT_DISTINCT(col)` (2019+, HyperLogLog — sai số tối đa ~2% với độ tin cậy 97%, tiêu tốn rất ít bộ nhớ so với `COUNT(DISTINCT)` trên bảng lớn).
+- **PostgreSQL:** `bool_and(cond)` / `bool_or(cond)` (gộp logic boolean theo nhóm; SS dùng `MIN`/`MAX` trên `CASE`), và `array_agg(col ORDER BY ...)` (gom mảng giữ thứ tự — lưu ý `array_agg` **giữ cả `NULL`** trừ khi thêm `FILTER (WHERE col IS NOT NULL)`).
 
 `STRING_AGG` / `string_agg`: §2. Ordered-set PG:
 
@@ -468,9 +481,8 @@ COUNT(CASE WHEN total > 100 THEN 1 END)
 ## 7. Điều kiện
 
 ```sql
-COALESCE(a, b, c)            -- đối số đầu không NULL; dừng (không eval phần sau — trên lý thuyết SQL;
-                             -- UDF trong đối số sau vẫn có thể được gọi tùy optimizer)
-NULLIF(a, b)                 -- a = b → NULL; else a. NULL = NULL → UNKNOWN → không thành NULL
+COALESCE(a, b, c)            -- đối số đầu không NULL; tương đương CASE WHEN a IS NOT NULL THEN a ...
+NULLIF(a, b)                 -- ≡ CASE WHEN a = b THEN NULL ELSE a END (NULLIF(NULL, NULL) vẫn trả NULL)
 GREATEST(a, b, c)            -- SS 2022+ (≤254 đối số); PG lâu
 LEAST(a, b, c)
 
@@ -478,13 +490,22 @@ CASE WHEN x > 0 THEN 1 WHEN x = 0 THEN 0 ELSE -1 END     -- searched
 CASE x WHEN 1 THEN 'a' ELSE 'b' END                      -- simple; x = NULL không khớp WHEN NULL
 
 -- SQL Server
+ISNULL(a, b)                 -- lấy kiểu & độ dài của *a*; chỉ đánh giá a đúng 1 lần
 IIF(x > 0, 1, 0)             -- ≡ CASE WHEN x > 0 THEN 1 ELSE 0 END
 CHOOSE(2, 'a', 'b', 'c')     -- 'b'
 ```
 
-`GREATEST` / `LEAST` **bỏ NULL** trên *cả hai* engine; tất cả NULL → `NULL`. Đây **lệch SQL standard** (standard: một NULL → NULL, kiểu Oracle). Port từ Oracle phải viết `CASE`.
+`GREATEST` / `LEAST` **không thuộc chuẩn ISO SQL**; trên *cả hai* engine chúng **bỏ qua `NULL`** và chỉ trả `NULL` khi mọi đối số đều `NULL` (khác Oracle: một đối số `NULL` là cả hàm trả `NULL` — port từ Oracle phải viết `CASE`).
 
-Kiểu kết quả `COALESCE` = precedence / type conversion chung — `COALESCE(int, decimal)` lên decimal. Lẫn `datetime` / `varchar` → lỗi hoặc ép bất ngờ.
+**SQL Server `ISNULL` vs `COALESCE`:**
+
+| Tiêu chí | `ISNULL(a, b)` (T-SQL riêng) | `COALESCE(a, b, ...)` (chuẩn ANSI) |
+|---|---|---|
+| Kiểu & độ dài trả về | Theo tham số đầu **`a`** (dễ **cắt chuỗi** nếu `a` là `varchar(3)` còn `b` là `'unknown'`) | Theo data type precedence chuẩn (`int` + `decimal` → `decimal`; chuỗi lấy độ dài lớn hơn) |
+| Nullability (metadata) | `NOT NULL` nếu `b` không null (hữu ích khi làm computed column cho PK/NOT NULL) | `NOT NULL` chỉ khi có tham số `NOT NULL` |
+| Số lần đánh giá `a` | **1 lần** | Viết lại thành `CASE WHEN a IS NOT NULL THEN a ELSE b END` → **`a` bị đánh giá 2 lần**! |
+
+**Bẫy double-evaluation của `COALESCE`:** nếu đặt subquery hoặc biểu thức không deterministic (`COALESCE((SELECT ...), 0)` hay `COALESCE(NEXT VALUE FOR ..., 0)`) làm đối số đầu trên SQL Server, engine chạy nó **hai lần** (lần 1 kiểm tra `IS NOT NULL`, lần 2 lấy giá trị — có thể khác nhau hoặc thành `NULL` nếu dữ liệu thay đổi giữa hai lần đọc).
 
 **Ghi chú:** `NULLIF(x, 0)` trước chia. `COALESCE(x, y)` không thay `IS DISTINCT FROM` khi cần phân biệt NULL với giá trị. Simple `CASE` không viết `WHEN NULL`.
 
@@ -525,6 +546,8 @@ END;
 
 `CONVERT` style **không** portable. ISO: `CAST` + kiểu `date`/`timestamptz`. `varchar` không length trên PG; SS `varchar` không length = `varchar(1)` (bẫy cổ) — [typesystem.md](typesystem.md).
 
+**Hiệu năng parse / format:** trên SQL Server, `PARSE` / `TRY_PARSE` và `FORMAT` chạy qua **.NET CLR** (chậm hơn `CONVERT` / `TRY_CONVERT` nhiều lần và tốn CPU/memory grant) — tránh gọi trên hàng triệu dòng; ưu tiên `TRY_CONVERT` / `CONVERT` với style chuẩn hoặc format ở tầng app. Trên PostgreSQL, `to_char(ts, 'YYYY-MM-DD')` và `to_timestamp(s, 'DD/MM/YYYY')` viết bằng C native nên rất nhanh (lưu ý `to_timestamp` trả `timestamptz` theo session TZ).
+
 **Ghi chú:** `TRY_CAST` nuốt dữ liệu bẩn thành NULL — báo cáo “mất hàng” thường là convert fail, không phải `WHERE`. Log `WHERE TRY_CAST(s AS int) IS NULL AND s IS NOT NULL`.
 
 ---
@@ -536,7 +559,7 @@ SQL Server **2025** kiểu `vector(n)` mặc định float32, tối đa **1998**
 ### 9.1 `VECTOR_DISTANCE` / `NORM` / `NORMALIZE` / `PROPERTY`
 
 ```sql
-DECLARE @q vector(1536) = '[0.1, 0.2, 0.3]';   -- literal JSON array
+DECLARE @q vector(3) = '[0.1, 0.2, 0.3]';       -- literal JSON array (khớp đúng số chiều 3)
 DECLARE @a vector(2) = '[1, 1]';
 DECLARE @b vector(2) = '[-1, -1]';
 
@@ -636,7 +659,7 @@ SELECT xmin, xmax, ctid FROM t LIMIT 1;
 SELECT pg_current_xact_id_if_assigned();               -- NULL nếu chưa xin xid
 ```
 
-`@@ROWCOUNT` = số hàng statement **vừa xong** — `SET NOCOUNT ON` không xóa `@@ROWCOUNT`, chỉ thôi gửi DONE client. Gọi hàm scalar giữa chừng có thể đổi `@@ROWCOUNT`. PG không có `@@ROWCOUNT`; `GET DIAGNOSTICS … ROW_COUNT` trong PL/pgSQL.
+`@@ROWCOUNT` = số hàng statement **vừa xong** — `SET NOCOUNT ON` không xóa `@@ROWCOUNT`, chỉ thôi gửi DONE client. Bất kỳ câu lệnh T-SQL nào chen trước đó (`IF`, `SET`, `PRINT`, `SELECT`…) đều ghi đè `@@ROWCOUNT` — phải gán ngay `DECLARE @rc int = @@ROWCOUNT;` ở dòng kế tiếp (gọi hàm scalar bên trong cùng `SELECT` không phá `@@ROWCOUNT` của `SELECT` đó). PG không có `@@ROWCOUNT`; `GET DIAGNOSTICS … ROW_COUNT` trong PL/pgSQL.
 
 `SCOPE_IDENTITY()` vs `@@IDENTITY` vs `IDENT_CURRENT`: trigger chèn bảng khác làm `@@IDENTITY` lệch — dùng `SCOPE_IDENTITY()` hoặc `OUTPUT`. PG: `RETURNING id` / `lastval()` / `currval(seq)` — `lastval` session-wide.
 
@@ -662,7 +685,7 @@ Hàm **nondeterministic** không dùng trong persisted computed, expression inde
 |---|---|---|---|
 | PG `now()` / `CURRENT_TIMESTAMP` / `transaction_timestamp()` | **có** — mốc **bắt đầu txn** | có | `STABLE` |
 | PG `CURRENT_DATE` / `CURRENT_TIME` | có (cùng mốc txn) | có | `STABLE` |
-| PG `statement_timestamp()` | không (đổi mỗi statement) | có | `STABLE` theo statement |
+| PG `statement_timestamp()` | không (đổi mỗi statement) | có | `STABLE` (trong `pg_proc`) |
 | PG `clock_timestamp()` | không | **không** — đổi giữa các hàng / vòng lặp PL | `VOLATILE` |
 | PG `timeofday()` | không | không | `VOLATILE`, trả `text` |
 | PG `random()` / `gen_random_uuid()` | không | không | `VOLATILE` |
@@ -707,12 +730,14 @@ Expression index PG bắt `IMMUTABLE`. Gắn `IMMUTABLE` lên hàm gọi `now()`
 -- SQL Server 2025
 SELECT
     REGEXP_REPLACE(phone, N'[^0-9]', N'') AS digits,
-    BASE64_ENCODE(HASHBYTES('SHA2_256', CAST(email AS varbinary(4000))), 1) AS tok;
+    BASE64_ENCODE(HASHBYTES('SHA2_256', CAST(email AS varchar(4000))), 1) AS tok;
+    -- Lưu ý encoding: nếu email là nvarchar (UTF-16LE), HASHBYTES cho kết quả KHÁC UTF-8 của PG;
+    -- muốn khớp cross-engine phải ép sang UTF-8 (collation *_UTF8 trên varchar) trước khi băm.
 
--- PostgreSQL 19
+-- PostgreSQL 19 (PG 11+ có sẵn sha256(bytea) trong core, không cần pgcrypto)
 SELECT
     regexp_replace(phone, '[^0-9]', '', 'g') AS digits,
-    encode(digest(email, 'sha256'), 'base64url') AS tok;   -- digest: pgcrypto
+    encode(sha256(convert_to(email, 'UTF8')), 'base64url') AS tok;
 ```
 
 **Compounded return**
@@ -754,7 +779,7 @@ Chuẩn hóa query nếu model không L2-normalize. Cột đã normalize: cosine
 - Scalar trên cột trong `WHERE` → computed persisted / cột gốc / `LIKE` sargable.
 - Nối: `CONCAT` / `CONCAT_WS` / `||`; đừng `+` T-SQL với số.
 - Regex: flag `g` chỉ PG; SS RE2 không backref; compat 170 cho `REGEXP_LIKE` / TVF.
-- Fuzzy / vector index / `VECTOR_SEARCH`: PREVIEW — lab.
+- Vector index / `VECTOR_SEARCH` / `float16`: PREVIEW — lab (fuzzy `EDIT_DISTANCE`/`JARO_WINKLER` đã GA từ CU11).
 - Thời gian: lưu UTC (`datetimeoffset` / `timestamptz`); `CURRENT_DATE` chỉ khi đúng nghĩa “ngày session”.
 - `DATEADD` 2025 mới nhận `bigint` — port vòng lặp giây lớn từ `int`.
 - Aggregate NULL: biết `SUM` = NULL vs `COALESCE(SUM(x),0)`.
@@ -789,7 +814,11 @@ Chuẩn hóa query nếu model không L2-normalize. Cột đã normalize: cosine
 - Flag `g` trên `REGEXP_REPLACE` SS.
 - `REGEXP_LIKE` / `REGEXP_MATCHES` trên DB compat < 170.
 - Pattern lookaround/backref (RE2).
-- `DATEADD(second, 86400*20000, …)` overflow `int` trước 2025.
+- `DATEADD(second, 86400 * 30000, …)` tràn `int` ngay ở phép nhân `int * int` (phải `CAST(86400 AS bigint) * 30000` trên 2025; trước 2025 vẫn overflow `int`).
+- `STRING_AGG` vượt 8000 byte trên SQL Server (`Msg 9829`) vì không ép sang `nvarchar(max)`.
+- `DATEDIFF(year, '20251231', '20260101') = 1` (đếm ranh giới, không phải 1 năm thực).
+- `COALESCE((SELECT ...), 0)` trên SQL Server đánh giá subquery 2 lần; `ISNULL(varchar(3), 'unknown')` cắt chuỗi.
+- `FORMAT` / `TRY_PARSE` (CLR) gọi hàng loạt trên bảng lớn gây nghẽn CPU SQL Server.
 - `AT TIME ZONE` copy nguyên giữa hai engine.
 - `AVG(int)` cắt trên SS.
 - `PRODUCT` giả trên PostgreSQL.
@@ -816,7 +845,7 @@ Chuẩn hóa query nếu model không L2-normalize. Cột đã normalize: cosine
 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
-| `REGEXP_*` native (RE2) | **2025** (`LIKE` TVF / `REGEXP_LIKE`: compat **170**) | `~` lâu; `regexp_like` **15+** |
+| `REGEXP_*` native (RE2) | **2025** (`REGEXP_LIKE` / TVF: compat **170**) | `~` lâu; `regexp_like` **15+** |
 | Fuzzy `EDIT_DISTANCE`… | **GA từ CU11** (12/11/2026) | `fuzzystrmatch` ext |
 | `SUBSTRING` length optional | **2025** | lâu (`FROM n`) |
 | `CURRENT_DATE` | **2025** | lõi |
@@ -845,7 +874,7 @@ Hàm trên **cột** trong `WHERE`/`JOIN` thường phá index seek: `WHERE YEAR
 
 Computed persisted + index (SS) / expression index `IMMUTABLE` (PG) khi phải giữ hàm. `REGEXP_LIKE` không sargable — không có regex index native SS. PG `~` dùng index trigram (`pg_trgm`) hoặc không — đo `EXPLAIN`.
 
-Collation: `LIKE` / `=` / `UPPER` theo collation cột. `UNISTR` trên `varchar` cần UTF-8 collation. Fuzzy preview **không** honor collation — so byte/logic riêng, test tiếng Việt.
+Collation: `LIKE` / `=` / `UPPER` theo collation cột. `UNISTR` trên `varchar` cần UTF-8 collation. Các hàm fuzzy (`EDIT_DISTANCE`, `JARO_WINKLER_*`) **không** honor collation — so byte/logic riêng, test tiếng Việt.
 
 `CAST(col AS date)` trên `datetime` SS có thể vẫn seek tùy convert; `CONVERT(varchar, d, 23) = '2026-09-13'` thì không. PG `ts::date` phá index `timestamptz` trừ khi range tường minh.
 

@@ -30,6 +30,7 @@ Sargable, phân trang, khóa hàng: [indexes.md](indexes.md), [joins.md](joins.m
 - [9. Keyset pagination](#9-keyset-pagination)
 - [10. DISTINCT & DISTINCT ON vs ROW_NUMBER](#10-distinct--distinct-on-vs-row_number)
 - [11. TABLESAMPLE](#11-tablesample)
+- [12. Set operations: `UNION` / `INTERSECT` / `EXCEPT`](#12-set-operations-union--intersect--except)
 - [13. FOR UPDATE — con trỏ khóa](#13-for-update--con-trỏ-khóa)
 - [14. Plan SELECT: IQP 2025 & PG 19](#14-plan-select-iqp-2025--pg-19)
   - [14.1 DOP feedback](#141-dop-feedback)
@@ -113,7 +114,9 @@ Mỗi câu `SELECT` là một **dây chuyền**. Khối sau chỉ được dùng
        ↓
   WINDOW        →  đánh số / cộng dồn *trên tập còn lại* (không gộp mất hàng)
        ↓
-  SELECT list   →  đặt tên cột, DISTINCT, biểu thức
+  SELECT list   →  biểu thức, đặt tên alias cột
+       ↓
+  DISTINCT      →  khử trùng hàng kết quả (sau SELECT / WINDOW)
        ↓
   ORDER BY      →  sắp (được alias SELECT)
        ↓
@@ -130,7 +133,7 @@ FROM payments          -- 1. mọi payment
 WHERE status = 'ok'    -- 2. loại failed (không dùng SUM)
 GROUP BY department    -- 3. mỗi phòng một nhóm
 HAVING SUM(amount) > 0 -- 4. loại phòng tổng ≤ 0
-ORDER BY total DESC;   -- 7. alias total đã có sau bước 6
+ORDER BY total DESC;   -- 8. alias total đã có sau bước 6
 ```
 
 `WHERE total > 0` sai vì `total` chưa sinh. `WHERE SUM(amount) > 0` sai vì aggregate thuộc bước 4.
@@ -144,16 +147,18 @@ Thứ tự **logic** (rút gọn, cả hai engine):
 3. `GROUP BY`
 4. `HAVING`
 5. `WINDOW` (tính `OVER`)
-6. `SELECT` list (alias, biểu thức, `DISTINCT`)
-7. `ORDER BY`
-8. `OFFSET` / `FETCH` / `TOP` / `LIMIT`
+6. `SELECT` list (biểu thức, alias)
+7. `DISTINCT`
+8. `ORDER BY`
+9. `OFFSET` / `FETCH` / `TOP` / `LIMIT`
 
 Hệ quả bắt buộc:
 
 - `WHERE` **không** thấy alias của `SELECT`.
 - `HAVING` thấy aggregate; `WHERE` không — lọc hàng *trước* gộp thì `WHERE`, lọc *nhóm* thì `HAVING`.
 - Window tính **sau** `GROUP BY`/`HAVING`, **trước** `DISTINCT` ngoài cùng.
-- ORDER BY dùng alias SELECT trên cả hai. PostgreSQL cũng cho GROUP BY bằng alias đơn lẻ hoặc ordinal; nếu tên trùng cột nguồn, GROUP BY ưu tiên cột nguồn. T-SQL GROUP BY không dùng alias cùng tầng SELECT. Alias không được dùng trong WHERE/HAVING.
+- `ORDER BY` dùng tên alias `SELECT` đơn lẻ trên cả hai engine; **khác biệt quan trọng với biểu thức chứa alias:** SQL Server cho phép `ORDER BY total * 2 DESC`, còn PostgreSQL **lỗi** (`column "total" does not exist`) — PG chỉ cho tên alias đứng một mình trong `ORDER BY` (muốn tính biểu thức trên alias phải lặp biểu thức gốc hoặc bọc CTE/subquery).
+- PostgreSQL cũng cho `GROUP BY` bằng alias đơn lẻ hoặc ordinal; nếu tên trùng cột nguồn, `GROUP BY` ưu tiên cột nguồn. T-SQL `GROUP BY` không dùng alias cùng tầng `SELECT`. Alias không được dùng trong `WHERE`/`HAVING`.
 
 ```sql
 SELECT year_num AS y
@@ -224,17 +229,18 @@ SELECT *
 FROM (VALUES (1, 'a'), (2, 'b')) AS v(id, name);
 ```
 
-`APPLY` / `LATERAL` — table source phụ thuộc hàng trái: [joins.md](joins.md) §8. `TABLESAMPLE` gắn *một* table source (mục 12), không gắn lên kết quả join.
+`APPLY` / `LATERAL` — table source phụ thuộc hàng trái: [joins.md](joins.md) §8. `TABLESAMPLE` gắn *một* table source (mục 11), không gắn lên kết quả join.
 
 Nhiều nguồn không `JOIN` tường minh (`FROM a, b WHERE …`) = tích Descartes rồi lọc — dễ quên `WHERE` thành cross join. Viết `INNER JOIN … ON`.
 
-**Ghi chú:** PostgreSQL `FROM func(x)` khi `x` là cột bảng trái **cần** `LATERAL`. SQL Server TVF tương quan dùng `CROSS APPLY` / `OUTER APPLY`, không viết `JOIN dbo.tvf(o.id)` kiểu độc lập. Derived table SQL Server **bắt buộc** alias; PostgreSQL cũng nên đặt alias (một số ngữ cảnh bắt buộc).
+**Ghi chú:** Từ PG 9.3+, function/SRF trong `FROM` (`FROM orders o, func(o.x)`) có **`LATERAL` ngầm** (không bắt buộc ghi từ khóa `LATERAL`, dù viết tường minh dễ đọc hơn); chỉ **subquery** trong `FROM` mới bắt buộc từ khóa `LATERAL`. SQL Server TVF tương quan dùng `CROSS APPLY` / `OUTER APPLY`, không viết `JOIN dbo.tvf(o.id)` kiểu độc lập. Derived table SQL Server **bắt buộc** alias; PostgreSQL **16+** cho phép bỏ alias nhưng vẫn nên đặt rõ ràng để portable.
 
 ---
 
 ## 5. WHERE & sargable
 
 ```sql
+-- PostgreSQL (SQL Server: dùng '2026-01-01' hoặc CAST('2026-01-01' AS date))
 WHERE status = 'paid'
   AND created_at >= DATE '2026-01-01'
   AND deleted_at IS NULL;
@@ -262,7 +268,7 @@ WHERE sku LIKE 'ABC%'            -- có thể seek
 WHERE sku LIKE '%ABC%'           -- scan / trigram (PG GIN) — indexes.md
 
 -- Implicit convert: nvarchar vs varchar, int vs decimal
-WHERE varchar_col = N'x'         -- SQL Server: convert cột → mất index
+WHERE varchar_col = N'x'         -- SQL Server: SQL collation → scan hoàn toàn; Windows collation có GetRangeThroughConvert (vẫn seek được nhưng CE dễ lệch/tốn CPU)
 WHERE id = '42'                  -- lệch kiểu; viết đúng literal/tham số
 
 -- OR hai cột khác nhau: thường Union / scan, không một seek
@@ -294,7 +300,7 @@ HAVING SUM(total) > 1000;
 
 **SQL Server:** mọi cột trong `SELECT` không nằm trong aggregate **phải** có trong `GROUP BY`. Không suy functional dependency từ PK.
 
-**PostgreSQL:** nếu `GROUP BY` khóa chính của bảng, cột khác của *cùng bảng* được chọn (SQL:2003 functional dependency).
+**PostgreSQL:** nếu `GROUP BY` **`PRIMARY KEY`** của bảng, cột khác của *cùng bảng* được chọn (SQL:2003 functional dependency). Lưu ý: PG hiện chỉ công nhận functional dependency cho **`PRIMARY KEY`**, **không** áp cho `UNIQUE NOT NULL`.
 
 ```sql
 -- PostgreSQL OK nếu customers.id là PK
@@ -330,9 +336,15 @@ SELECT
     SUM(total)
 FROM orders
 GROUP BY ROLLUP (country);
+
+-- PostgreSQL 14+: GROUP BY DISTINCT loại grouping set trùng khi ghép nhiều ROLLUP/CUBE
+SELECT country, city, status, SUM(total)
+FROM orders
+GROUP BY DISTINCT ROLLUP (country, city), ROLLUP (country, status);
+-- Mặc định là GROUP BY ALL (tính lặp (country) và ()); SQL Server không có GROUP BY DISTINCT
 ```
 
-**Ghi chú:** `COUNT(*)` đếm hàng nhóm; `COUNT(col)` bỏ `NULL`. `SUM` trên tập rỗng không có nhóm → 0 hàng, không phải `0` — khác `COALESCE((SELECT SUM…), 0)` scalar. Join 1-n trước `GROUP BY` nhân hàng — fan-out: [joins.md](joins.md) §11. PG 19 có thể **aggregate trước join** khi rewrite có lợi — cùng kết quả logic, plan khác; không miễn khai fan-out trong SQL viết tay. Cột không aggregate phải có trong `GROUP BY` (PostgreSQL thêm ngoại lệ phụ thuộc hàm theo khóa).
+**Ghi chú:** `COUNT(*)` đếm hàng nhóm; `COUNT(col)` bỏ `NULL`. `SUM` trên tập rỗng **không có `GROUP BY`** trả về **1 hàng chứa `NULL`**; chỉ **khi có `GROUP BY`** thì tập rỗng mới trả về **0 hàng** (nên muốn luôn ra `0` thay vì 0 hàng phải bọc scalar subquery `COALESCE((SELECT SUM(total) ...), 0)`). Join 1-n trước `GROUP BY` nhân hàng — fan-out: [joins.md](joins.md) §11. PG 19 có thể **aggregate trước join** khi rewrite có lợi — cùng kết quả logic, plan khác; không miễn khai fan-out trong SQL viết tay. Cột không aggregate phải có trong `GROUP BY` (PostgreSQL thêm ngoại lệ phụ thuộc hàm theo `PRIMARY KEY`).
 
 ---
 
@@ -350,7 +362,7 @@ Scalar subquery: 0 hàng → `NULL`; >1 hàng → lỗi runtime. Nhiều hàng: 
 
 `SELECT *` rồi “trừ cột”: **không** có `SELECT * EXCEPT` trên SQL Server 2025 hay PostgreSQL 19. Liệt kê cột, view, hoặc (PG) JSON rồi bỏ key — không portable.
 
-Alias trong *cùng* list: không dùng lại `with_tax` ở cột kế (trừ vài chỗ T-SQL không portable). Lặp biểu thức hoặc CTE.
+Alias trong *cùng* list: cả SQL Server lẫn PostgreSQL đều **không** hỗ trợ lateral column alias trong result set `SELECT` (SQL Server chỉ cho tham chiếu biến trước trong lệnh gán biến `SELECT @a = ..., @b = @a + 1`). Muốn tái sử dụng biểu thức trung gian: lặp biểu thức, dùng `CROSS APPLY (VALUES (...))` / `CROSS JOIN LATERAL (VALUES (...))` ([cte-subqueries.md](cte-subqueries.md) §12), hoặc bọc CTE.
 
 `SELECT *` trong view bind lúc `CREATE` — thêm cột bảng gốc **không** tự xuất hiện: [ddl.md](ddl.md).
 
@@ -376,6 +388,10 @@ OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY;
 | Kết hợp | **Không** `TOP` + `OFFSET`/`FETCH` | `LIMIT` ≡ `FETCH FIRST` |
 | Offset lớn | Scan + skip; đắt | Đắt; planner không biến offset thành seek |
 | `PERCENT` | `TOP (n) PERCENT` | không trên `LIMIT`/`FETCH` |
+| Thứ tự `NULL` mặc định | **`NULL` nhỏ nhất** (`ASC`: đầu; `DESC`: cuối) | **`NULL` lớn nhất** (`ASC`: cuối; `DESC`: đầu) |
+| `NULLS FIRST` / `LAST` | **Không** (dùng `CASE WHEN col IS NULL THEN ...`, phá index order) | **Có** (hỗ trợ cả trong `CREATE INDEX`) |
+
+**Cẩn thận khi port `ORDER BY` trên cột nullable:** Thứ tự `NULL` mặc định **ngược nhau hoàn toàn** giữa hai engine. Trên PostgreSQL, `ORDER BY created_at DESC` đặt `NULL` lên **đầu trang 1** trừ khi viết `DESC NULLS LAST`; còn SQL Server mặc định đặt `NULL` xuống cuối khi `DESC` và lên đầu khi `ASC`.
 
 PostgreSQL chấp nhận cả ba dạng cắt: `LIMIT`, `FETCH FIRST n ROWS ONLY`, `FETCH FIRST n ROWS WITH TIES`. `LIMIT ALL` = không cắt. `OFFSET` không `LIMIT` = bỏ n hàng rồi trả phần còn.
 
@@ -429,25 +445,35 @@ Phân trang API: keyset (mục 9), không `page * page_size`. Cột `ORDER BY` n
 Keyset (seek): “hàng sau khóa đã thấy”, không skip N. Cần **sort key độc nhất** (thêm `id` nếu `created_at` trùng).
 
 ```sql
--- PostgreSQL: so sánh tuple native (lexicographic)
+-- PostgreSQL: so sánh tuple native (lexicographic — chỉ dùng khi các cột CÙNG chiều ASC hoặc DESC)
 SELECT id, created_at, total
 FROM orders
-WHERE (created_at, id) < (@ts, @id)
+WHERE (created_at, id) < ($1, $2)
 ORDER BY created_at DESC, id DESC
 FETCH NEXT 20 ROWS ONLY;
 ```
 
-SQL Server **không** so sánh `(a, b) < (@a, @b)` như PostgreSQL. Viết tay, giữ sargable:
+SQL Server **không** so sánh `(a, b) < (@a, @b)` như PostgreSQL. Viết tay kèm **redundant bound** (`created_at <= @ts`) để optimizer seek một khoảng liên tục trên index `(created_at DESC, id DESC)` thay vì rẽ hai seek hoặc scan vì `OR`:
 
 ```sql
--- SQL Server: dạng seek được
-WHERE created_at < @ts
-   OR (created_at = @ts AND id < @id)
+-- SQL Server: thêm redundant bound created_at <= @ts để seek tốt hơn
+WHERE created_at <= @ts
+  AND (created_at < @ts OR (created_at = @ts AND id < @id))
 ORDER BY created_at DESC, id DESC
 OFFSET 0 ROWS FETCH NEXT 20 ROWS ONLY;
 ```
 
-Hướng `ASC` đảo bất đẳng thức. Composite 3 cột: mở từng prefix (`a < @a OR (a = @a AND (b < @b OR …))`).
+**Hướng sort hỗn hợp (`ORDER BY created_at DESC, id ASC`):** Tuple `(created_at, id) < ($1, $2)` **không** dùng được khi hai cột khác chiều. Viết tách điều kiện theo đúng chiều từng cột (kèm redundant bound cho SQL Server và index khớp chiều `(created_at DESC, id ASC)`):
+
+```sql
+-- Mixed sort: created_at DESC, id ASC (PostgreSQL dùng $1, $2; SQL Server dùng @ts, @id)
+WHERE created_at <= $1
+  AND (created_at < $1 OR (created_at = $1 AND id > $2))
+ORDER BY created_at DESC, id ASC
+FETCH NEXT 20 ROWS ONLY;    -- SQL Server thêm OFFSET 0 ROWS trước FETCH
+```
+
+Hướng `ASC` thuần đảo bất đẳng thức. Composite 3 cột: mở từng prefix (`a < @a OR (a = @a AND (b < @b OR …))`).
 
 Giới hạn:
 
@@ -474,6 +500,16 @@ SELECT DISTINCT ON (customer_id) *
 FROM orders
 ORDER BY customer_id, created_at DESC, id DESC;
 -- → đơn mới nhất mỗi khách
+
+-- Muốn sắp kết quả cuối theo cột KHÁC khóa DISTINCT ON (vd total DESC): bọc ngoài
+SELECT *
+FROM (
+    SELECT DISTINCT ON (customer_id) *
+    FROM orders
+    ORDER BY customer_id, created_at DESC, id DESC
+) AS latest
+ORDER BY total DESC
+LIMIT 10;
 ```
 
 SQL Server **không** có `DISTINCT ON`. Tương đương chuẩn (cả hai):
@@ -543,9 +579,36 @@ Muốn ~1% hàng *đã* `paid`: lọc trong derived table **không** được `T
 
 View phức tạp / partitioned: sample từng partition leaf tùy engine; không giả định “1% toàn bảng logic”.
 
-Không thay `ORDER BY random() LIMIT n` / `TABLESAMPLE` + `ORDER BY NEWID() TOP n` khi cần đúng n hàng (và đắt). `random()` sort toàn bộ.
+Không thay `ORDER BY random() LIMIT n` (PG) / `SELECT TOP (n) ... ORDER BY NEWID()` (SQL Server) khi cần đúng n hàng ngẫu nhiên (đắt vì sort toàn bộ bảng).
 
 **Ghi chú:** `TABLESAMPLE` không đi qua index seek có nghĩa “mẫu theo khóa”. `REPEATABLE` không khóa isolation. Kết hợp `FOR UPDATE` + sample = khóa tập page ngẫu nhiên — hầu như vô nghĩa cho queue.
+
+---
+
+## 12. Set operations: `UNION` / `INTERSECT` / `EXCEPT`
+
+Kết hợp nhiều nhánh `SELECT` có cùng số cột và kiểu tương thích (tên cột kết quả lấy từ nhánh **đầu tiên**).
+
+| Toán tử | Ngữ nghĩa | SQL Server | PostgreSQL |
+|---|---|---|---|
+| `UNION` / `UNION ALL` | Hợp: khử trùng (sort/hash) vs giữ nguyên | Có cả hai | Có cả hai |
+| `INTERSECT` / `EXCEPT` | Giao / Hiệu (khử trùng) | Có | Có |
+| `INTERSECT ALL` / `EXCEPT ALL` | Giao / Hiệu theo bội số (multiset) | **Không** | **Có** |
+
+```sql
+-- Ưu tiên: INTERSECT cao hơn UNION và EXCEPT trên cả hai engine → luôn dùng ngoặc khi trộn
+(SELECT customer_id FROM active_orders
+ UNION ALL
+ SELECT customer_id FROM vip_customers)
+EXCEPT
+SELECT customer_id FROM blocked_customers
+ORDER BY customer_id
+OFFSET 0 ROWS FETCH NEXT 50 ROWS ONLY;
+```
+
+- **Độ ưu tiên:** `INTERSECT` ràng buộc chặt hơn `UNION` và `EXCEPT` — không đặt ngoặc rất dễ ra tập sai.
+- **`NULL`:** Trong set operations, hai giá trị `NULL` được coi là **bằng nhau** (khác `=` trong `WHERE`), nên `UNION`/`INTERSECT`/`EXCEPT` khử trùng cả `NULL`.
+- **`ORDER BY` / `LIMIT` / `FETCH`:** Đặt ở cuối áp cho **toàn bộ kết quả** sau set operation; muốn giới hạn từng nhánh riêng phải bọc ngoặc/subquery. Ưu tiên `UNION ALL` khi biết hai nhánh rời nhau để tránh chi phí sort/hash khử trùng.
 
 ---
 
@@ -567,7 +630,9 @@ SELECT * FROM dbo.Orders WITH (UPDLOCK, ROWLOCK, HOLDLOCK) WHERE Id = 1;
 SELECT * FROM dbo.Queue WITH (UPDLOCK, ROWLOCK, READPAST) WHERE …;
 ```
 
-`FOR UPDATE` PostgreSQL gắn **cuối** `SELECT` (sau `FOR UPDATE OF bảng` / `LIMIT`). Không viết giữa `FROM` và `WHERE`. SQL Server hint trên table source.
+`FOR UPDATE [OF bảng]` trên PostgreSQL đặt **cuối** `SELECT` (sau `ORDER BY` và `LIMIT`/`FETCH`), không viết giữa `FROM` và `WHERE`. SQL Server đặt lock hint ngay sau table source trong `FROM`.
+
+**Bẫy `FOR UPDATE` + `ORDER BY` + `LIMIT` dưới `READ COMMITTED` trên PostgreSQL (EvalPlanQual — EPQ):** Khi session khác đang khóa và sửa cột nằm trong `ORDER BY` của hàng đầu tiên rồi `COMMIT`, PG dùng **EPQ** kiểm tra lại `WHERE` trên phiên bản hàng mới nhưng **không re-sort lại** toàn bộ tập trước khi cắt `LIMIT`. Kết quả có thể trả hàng không còn đứng đầu theo thứ tự `ORDER BY` mới nhất (hoặc trả ít hơn `LIMIT` hàng nếu hàng vừa mở khóa không còn thỏa `WHERE`). Với queue worker, dùng `FOR UPDATE SKIP LOCKED`; nếu cần thứ tự nghiêm ngặt, dùng `REPEATABLE READ` (và retry `40001`) hoặc kiểm tra lại trong vòng lặp.
 
 **Ghi chú:** `FOR UPDATE` trên `SELECT` không `WHERE` khóa mọi hàng nhìn thấy — tai nạn. Kết hợp `LIMIT` + `SKIP LOCKED` cho queue worker. `NOLOCK` / `READ UNCOMMITTED` không phải bản SQL Server của `FOR UPDATE`. Optimized locking 2025 **không** thay `UPDLOCK`.
 
@@ -643,6 +708,7 @@ PostgreSQL hot standby: plan theo GUC/stats replica; `WAIT FOR` LSN là *đồng
 ### 15.1 Đơn giản — doanh thu khách đã thanh toán
 
 ```sql
+-- PostgreSQL (SQL Server: thay DATE '2026-01-01' bằng '2026-01-01' và thêm OFFSET 0 ROWS trước FETCH)
 SELECT customer_id, SUM(total) AS revenue
 FROM orders
 WHERE status = 'paid'
@@ -664,26 +730,31 @@ GROUP BY không chọn một hàng đại diện mới nhất; dùng DISTINCT ON
 
 ### 15.3 Nâng cao — keyset + CUBE + không fan-out
 
-Trang tiếp theo (keyset) *sau khi* đã gộp theo quốc gia/thành phố, không join `payments` thô (sẽ nhân `SUM`):
+Trang tiếp theo (keyset) *sau khi* đã gộp theo quốc gia/thành phố, không join `payments` thô (sẽ nhân `SUM`). Lưu ý bắt buộc tính `GROUPING(...)` **ngay trong CTE chứa `GROUP BY`** (không gọi `GROUPING()` ở tầng ngoài hay trong `WHERE`) và xử lý `NULL` do `GROUPING SETS` sinh ra để so sánh tuple không rơi vào `UNKNOWN` làm mất hàng subtotal/grand total:
 
 ```sql
+-- PostgreSQL (giả sử country, city NOT NULL trên bảng orders; NULL chỉ do GROUPING SETS sinh ra)
 WITH paid AS (
-    SELECT country, city, SUM(total) AS revenue
+    SELECT
+        GROUPING(country, city) AS g,
+        country,
+        city,
+        SUM(total) AS revenue
     FROM orders
     WHERE status = 'paid'
     GROUP BY GROUPING SETS ((country, city), (country), ())
-),
-page AS (
-    SELECT country, city, revenue, GROUPING(country, city) AS g
-    FROM paid
-    WHERE (GROUPING(country, city), country, city) > (@g, @country, @city)  -- PG tuple
-    ORDER BY g, country, city
-    FETCH NEXT 20 ROWS ONLY
 )
-SELECT * FROM page;
+SELECT g, country, city, revenue
+FROM paid
+WHERE (g, COALESCE(country, ''), COALESCE(city, ''))
+    > ($1, COALESCE($2, ''), COALESCE($3, ''))
+ORDER BY g, COALESCE(country, ''), COALESCE(city, '')
+FETCH NEXT 20 ROWS ONLY;
 ```
 
-SQL Server: thay so sánh tuple bằng `OR` prefix (mục 9); `GROUPING_ID(country, city)` thay `GROUPING(country, city)` nếu muốn một số nguyên.
+Nếu `country`/`city` có thể chứa `NULL` thật (hoặc `''`), thêm cột cờ `country IS NULL` / `city IS NULL` vào cả khóa `ORDER BY` lẫn tuple so sánh — không bao giờ đưa trực tiếp cột nullable vào phép so sánh tuple `>`.
+
+SQL Server: tính `GROUPING_ID(country, city) AS g` ngay trong CTE `paid`, thay so sánh tuple bằng `OR` prefix với `COALESCE` (mục 9) và thêm `OFFSET 0 ROWS` trước `FETCH NEXT 20 ROWS ONLY`.
 
 ### 15.4 Quan hệ một bước và lọc kết quả
 
@@ -702,6 +773,7 @@ Dùng index theo predicate/join khi phù hợp. Một khách có nhiều đơn t
 ### 15.5 TABLESAMPLE rồi cắt — hiểu lệch
 
 ```sql
+-- PostgreSQL (SQL Server: TABLESAMPLE (1 PERCENT) và thêm OFFSET 0 ROWS trước FETCH)
 -- Probe ~1% page, lấy tối đa 50 hàng nhìn thấy — không phải “50 hàng ngẫu nhiên đều”
 SELECT id, total
 FROM orders TABLESAMPLE SYSTEM (1) REPEATABLE (42)
@@ -738,7 +810,6 @@ Vẫn cần index `(CreatedAt, Id)` INCLUDE `Status` (hoặc ngược tùy selec
 - `DISTINCT ON` chỉ nội bộ PG; public API dùng `ROW_NUMBER` / `LATERAL`.
 - `GROUP BY` PK (PG) không copy sang SQL Server.
 - `SELECT *` không vào production query / view bền.
-- Graph PG 19: path cố định + index FK; chưa variable-length; `EXPLAIN` = join.
 - `TABLESAMPLE`: probe, không metric tài chính; `WHERE` sau sample ≠ mẫu theo predicate.
 - Khóa khi đọc-rồi-ghi: `FOR UPDATE` / `UPDLOCK` — [concurrency.md](concurrency.md).
 - Compat 170: baseline Query Store trước khi tin DOP/OPPO/CE feedback.
@@ -764,7 +835,7 @@ Vẫn cần index `(CreatedAt, Id)` INCLUDE `Status` (hoặc ngược tùy selec
 - `SELECT TOP 10` / `LIMIT 10` không `ORDER BY`.
 - `WHERE alias` / `WHERE ROW_NUMBER()…`.
 - `WHERE o.status = 'paid'` sau `LEFT JOIN` — biến outer thành inner: [joins.md](joins.md) §6.
-- `IN (SELECT nullable)` / `IN (NULL)`.
+- `NOT IN (SELECT nullable)` / `IN (NULL)`.
 - Scalar subquery >1 hàng trên dữ liệu thật (test 1 hàng thì “pass”).
 - `GROUP BY` thiếu cột trên SQL Server “sửa” bằng subquery không tương đương.
 - Keyset thiếu `id` → trùng timestamp bỏ/lặp hàng.
@@ -772,7 +843,8 @@ Vẫn cần index `(CreatedAt, Id)` INCLUDE `Status` (hoặc ngược tùy selec
 - `FETCH … WITH TIES` trên khóa không độc nhất → trang phình.
 - `OFFSET` lớn coi như seek.
 - `TABLESAMPLE` rồi tin là random unbiased / đúng n hàng.
-- Port PGQ sang T-SQL `MATCH` (SQL Graph cũ).
+- `ORDER BY` cột nullable khi port giữa SS (`NULL` nhỏ nhất) và PG (`NULL` lớn nhất) mà không kiểm tra `NULLS FIRST/LAST`.
+- `FOR UPDATE` + `ORDER BY` + `LIMIT` dưới `READ COMMITTED` trên PG mà bỏ qua hành vi EPQ.
 - `FOR UPDATE` trên join lớn không `OF table`.
 - Tin IQP sửa sargable / `NOT IN NULL`.
 - Compat 170 ngày cutover không baseline Query Store.
@@ -787,14 +859,16 @@ Vẫn cần index `(CreatedAt, Id)` INCLUDE `Status` (hoặc ngược tùy selec
 | `OFFSET`/`FETCH` | 2012+ | lâu (còn `LIMIT`) |
 | `FETCH … WITH TIES` | không (dùng `TOP … WITH TIES`) | 13+ (SQL) |
 | `TOP … PERCENT` | có | không |
-| `GROUPING SETS`/`CUBE`/`ROLLUP` | lâu | lâu |
-| Functional dependency `GROUP BY` PK | không | lâu |
+| `GROUPING SETS`/`CUBE`/`ROLLUP` | lâu | lâu (`GROUP BY DISTINCT`: **14+**) |
+| Functional dependency `GROUP BY` PK | không | lâu (chỉ `PRIMARY KEY`) |
 | `GROUP BY` + subquery target (cải thiện) | — | **19** |
 | `DISTINCT ON` | không | lâu |
+| `NULLS FIRST` / `NULLS LAST` | không (`NULL` nhỏ nhất) | lõi (`NULL` lớn nhất) |
+| `INTERSECT ALL` / `EXCEPT ALL` | không | lõi |
 | Tuple `(a,b) < (x,y)` | không | lâu |
 | `TABLESAMPLE` | SYSTEM + `REPEATABLE` + `ROWS`/`PERCENT` | `SYSTEM`/`BERNOULLI` |
 | `FOR UPDATE` / `SKIP LOCKED` | hint `UPDLOCK`/`READPAST` | `FOR UPDATE` + `SKIP LOCKED` |
-| Path `{n,m}` / shortest | — | **chưa** (19) |
+| Path `{m,n}` / `SHORTEST_PATH` | **2019+** (SQL Graph) | **chưa** (dùng recursive CTE) |
 | DOP feedback mặc định | **2025** (compat 170) | — |
 | CE feedback expression | **2025** | — |
 | OPPO / PSPO | **2025** | generic/custom plan; `pg_plan_advice` **19** |

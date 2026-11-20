@@ -69,7 +69,9 @@ OVER (
 
 `FILTER` trên window: **chỉ PostgreSQL**, và chỉ khi `fn` là aggregate. SQL Server: `SUM(CASE WHEN pred THEN x END) OVER (…)` — [functions.md](functions.md). `GROUPS` + `EXCLUDE`: **PostgreSQL**. SQL Server: `ROWS` / `RANGE` (RANGE hạn chế). `NULLS FIRST/LAST`: PG; SS theo `ASC` = NULLS FIRST, `DESC` = NULLS LAST (không sửa được bằng cú pháp `NULLS`).
 
-Logical (rút gọn): window **sau** `HAVING`, **trước** `DISTINCT` / `ORDER BY` ngoài / `LIMIT`/`FETCH`. **Không** dùng window trong `WHERE` / `GROUP BY` / `HAVING`. Lọc `ROW_NUMBER = 1`: CTE / derived table.
+Logical (rút gọn): window **sau** `HAVING`, **trước** `DISTINCT` / `ORDER BY` ngoài / `LIMIT`/`FETCH`. **Không** dùng window trong `WHERE` / `GROUP BY` / `HAVING`. Cả SQL Server 2025 lẫn PostgreSQL 19 đều **chưa hỗ trợ mệnh đề `QUALIFY`** (khác Snowflake / BigQuery / DuckDB) — muốn lọc `ROW_NUMBER = 1` bắt buộc bọc CTE hoặc derived table.
+
+Từ **PostgreSQL 15+**, `EXPLAIN` có **WindowAgg Run Condition**: khi lọc biên trên đơn điệu như `WHERE rn <= N` (với `row_number`, `rank`, `dense_rank`, `count`…), PG dừng tính phần còn lại của partition sớm thay vì quét hết.
 
 ```sql
 WITH ranked AS (
@@ -95,9 +97,9 @@ SELECT * FROM ranked WHERE rn = 1;
 | `ROW_NUMBER()` | 1…n, không hòa | luôn khác nhau (thứ tự hòa **không xác định** nếu thiếu tiebreaker) |
 | `RANK()` | cùng số, nhảy | 1, 1, 3 |
 | `DENSE_RANK()` | cùng số, không nhảy | 1, 1, 2 |
-| `NTILE(k)` | chia ~k nhóm | kích thước nhóm có thể lệch 1 |
-| `PERCENT_RANK()` | `(rank-1)/(n-1)` | 0 khi n = 1 |
-| `CUME_DIST()` | tỷ lệ hàng ≤ current | |
+| `NTILE(k)` | chia ~k nhóm | kích thước nhóm lệch tối đa 1; **có thể cắt đôi nhóm hòa** sang 2 bucket khác nhau |
+| `PERCENT_RANK()` | `(rank-1)/(n-1)` | 0 khi n = 1; dùng vị trí **đầu** nhóm hòa (giống `RANK`) |
+| `CUME_DIST()` | tỷ lệ hàng ≤ current | dùng vị trí **cuối** nhóm hòa (gồm mọi peer `<=` hàng hiện tại) |
 
 ```sql
 SELECT
@@ -134,11 +136,11 @@ NTH_VALUE(total, 2) OVER (                          -- PostgreSQL; SQL Server kh
 )
 ```
 
-`LAG(expr, offset, default)`: `offset` mặc định 1, không âm. Hết partition → `default` hoặc `NULL`. `LEAD` đối xứng tương lai.
+`LAG(expr, offset, default)`: `offset` mặc định `1`. Hết partition → `default` hoặc `NULL`. `LEAD` đối xứng tương lai. SQL Server **cấm `offset` âm**; PostgreSQL **cho phép `offset` âm** (`lag(x, -1)` ≡ `lead(x, 1)`).
 
 SQL Server: `LAG`/`LEAD`/`FIRST_VALUE`/`LAST_VALUE` — không `NTH_VALUE`. PostgreSQL có đủ, kể cả `nth_value`.
 
-Offset **không** nhìn frame. `LAG` hàng trước theo `ORDER BY`, bất kể `ROWS`. `IGNORE NULLS` trên `LAG` vẫn đi theo thứ tự logic, chỉ **nhảy** hàng NULL — §9.
+`LAG`/`LEAD` **không** dùng frame: `LAG` đi theo thứ tự hàng `ORDER BY`. Trên PostgreSQL, viết frame kèm `LAG`/`LEAD` bị bỏ qua; trên **SQL Server gây lỗi biên dịch `Msg 10752`**. `IGNORE NULLS` trên `LAG` vẫn đi theo thứ tự logic, chỉ **nhảy** hàng NULL — §9.
 
 ---
 
@@ -286,8 +288,8 @@ GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW     -- PG: nhóm peer trước + nhó
 | Mode | “1 PRECEDING” nghĩa là | SQL Server | PostgreSQL |
 |---|---|---|---|
 | `ROWS` | một **hàng** trước | có | có |
-| `RANGE` | một **giá trị** offset trên *một* cột ORDER BY | chỉ `UNBOUNDED` / `CURRENT ROW` — **không** `RANGE BETWEEN 1 PRECEDING` / interval | có; datetime dùng `interval` |
-| `GROUPS` | một **nhóm peer** trước | **không** | có (SQL:2011) |
+| `RANGE` | một **giá trị** offset trên *một* cột ORDER BY | chỉ `UNBOUNDED` / `CURRENT ROW` — **không** `RANGE BETWEEN 1 PRECEDING` / interval | có (`11+` cho offset); datetime dùng `interval` |
+| `GROUPS` | một **nhóm peer** trước | **không** | có (**11+**, SQL:2011) |
 
 Không `ORDER BY` trong `OVER`: frame = **cả partition** (với hàm nhận frame).
 
@@ -296,6 +298,10 @@ Có `ORDER BY`, không ghi `ROWS`/`RANGE`/`GROUPS`: mặc định `RANGE UNBOUND
 ### 7.1 `ROWS` vs `RANGE` vs peer
 
 Peer: hai hàng *bằng nhau* trên mọi biểu thức `ORDER BY`. `RANGE … CURRENT ROW` gồm **cả** peer sau hàng hiện tại trong thứ tự vật lý — running sum không “dừng ở hàng này”.
+
+**Hiệu năng Window Spool trên SQL Server:** mặc định `RANGE` buộc SQL Server dùng **on-disk Window Spool** (ghi worktable xuống **`tempdb`**), chậm hơn nhiều lần so với **`ROWS`** vốn dùng **in-memory fast-track spool**. Ngay cả khi cột `ORDER BY` là unique, luôn ghi tường minh `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` để tránh I/O `tempdb` oan.
+
+**Bẫy `RANGE` offset với `NULL` & `DESC` (PostgreSQL):** với `RANGE BETWEEN n PRECEDING AND ...`, mọi giá trị `NULL` tạo thành một nhóm peer riêng (không tham gia cộng/trừ offset); và khi `ORDER BY x DESC`, `n PRECEDING` là giá trị **lớn hơn** (`x + n`), còn `n FOLLOWING` là **nhỏ hơn** (`x - n`) — ngược trực giác với `ASC`.
 
 ```sql
 -- PostgreSQL: 7 ngày lịch, không phải 7 hàng
@@ -333,7 +339,7 @@ Port sang SQL Server: không có `GROUPS`. Xấp xỉ:
 - Nhiều hàng / khóa: dense-rank làm “số nhóm” rồi frame `ROWS` trên *nhóm đã gộp*, hoặc self-join theo `DENSE_RANK`.
 
 ```sql
--- SQL Server: moving sum theo 2 *giá trị ngày* (nhóm), không 2 hàng
+-- SAI: cách dưới vẫn là ROWS theo từng hàng, KHÔNG phải GROUPS theo nhóm ngày (sai khi 1 ngày có >1 hàng)
 WITH s AS (
     SELECT
         d, qty,
@@ -344,15 +350,15 @@ SELECT
     d, qty,
     SUM(qty) OVER (
         ORDER BY grp
-        ROWS BETWEEN 1 PRECEDING AND CURRENT ROW   -- vẫn theo HÀNG đã đánh số, không phải nhóm
+        ROWS BETWEEN 1 PRECEDING AND CURRENT ROW   -- vẫn đếm 2 HÀNG, không phải 2 nhóm ngày!
     )
 FROM s;
 ```
 
-Cách trên **vẫn** `ROWS` theo hàng — sai nếu một ngày nhiều hàng. Đúng nghĩa `GROUPS`: gộp theo `d` trước, rồi window trên aggregate; hoặc join `DENSE_RANK` hiện tại với `DENSE_RANK` ∈ [cur-1, cur].
+Đúng nghĩa `GROUPS` trên SQL Server: gộp theo `d` trước, rồi window trên aggregate; hoặc join `DENSE_RANK` hiện tại với `DENSE_RANK` ∈ `[cur-1, cur]`.
 
 ```sql
--- SQL Server: tổng nhóm ngày hiện tại và nhóm ngày trước có dữ liệu.
+-- ĐÚNG (SQL Server): tổng nhóm ngày hiện tại và nhóm ngày trước có dữ liệu.
 -- Gộp trước, tính window trên nhóm, rồi trả kết quả về từng hàng gốc.
 WITH by_day AS (
     SELECT d, SUM(qty) AS day_qty
@@ -366,7 +372,7 @@ WITH by_day AS (
 )
 SELECT a.d, a.qty, w.grp_window
 FROM dbo.Daily AS a
-JOIN grouped_window AS w ON a.d = w.d OR (a.d IS NULL AND w.d IS NULL);
+JOIN grouped_window AS w ON a.d IS NOT DISTINCT FROM w.d;   -- SS 2022+ (bản cũ: a.d = w.d OR (a.d IS NULL AND w.d IS NULL))
 ```
 
 Cú pháp biên đầy đủ (PG; SS subset): `UNBOUNDED PRECEDING` | `n PRECEDING` | `CURRENT ROW` | `n FOLLOWING` | `UNBOUNDED FOLLOWING`. `n` không âm. Frame `FOLLOWING` trước `PRECEDING` → lỗi. `RANGE` + `n PRECEDING` trên PG cần đúng *một* cột `ORDER BY` kiểu có phép cộng (số / datetime + interval).
@@ -426,7 +432,7 @@ WINDOW
 
 Một chỗ sửa frame — mọi hàm `OVER w` theo. Tránh copy-paste một chỗ `UNBOUNDED FOLLOWING`, chỗ kia quên (§5).
 
-SQL Server cũng cho dạng bổ sung partition lên tên đã định (`OVER (win PARTITION BY …)`) trên một số ngữ cảnh — đối chiếu Learn; khi nghi ngờ viết `OVER (…)` đủ một chỗ hoặc chỉ `WINDOW` + tham chiếu.
+**Khác biệt kế thừa `PARTITION BY`:** trên **PostgreSQL**, window kế thừa `WINDOW w2 AS (w1 ...)` **cấm hoàn toàn** khai báo `PARTITION BY`, kể cả khi `w1` chưa có `PARTITION BY`. SQL Server 2022+ cho phép thêm `PARTITION BY` nếu window cha chưa có, nhưng không portable — để chạy chung cả hai engine, đặt `PARTITION BY` ở window gốc (`w_base`).
 
 Không đặt `WINDOW` trong view/inline TVF rồi gọi từ ngoài như biến — phạm vi **một** `SELECT`. CTE: mỗi tầng `SELECT` một danh sách `WINDOW`.
 
@@ -486,7 +492,7 @@ LAST_VALUE(value) IGNORE NULLS OVER (
 )
 ```
 
-Tại 10:00 và 11:00: `LAST_VALUE` + `IGNORE NULLS` + frame đến hiện tại = 10. Thiếu `IGNORE NULLS` = NULL. Thiếu nới frame nhưng thêm `UNBOUNDED FOLLOWING` = 20 trên *mọi* hàng (cuối partition), không phải LOCF.
+Tại 10:00 và 11:00: `LAST_VALUE` + `IGNORE NULLS` + frame đến hiện tại = `10`. Thiếu `IGNORE NULLS` = `NULL`. Ngược lại, nếu nới frame sang `UNBOUNDED FOLLOWING` thì kết quả ra `20` trên *mọi* hàng (cuối partition), không phải LOCF.
 
 ```sql
 -- Nếu muốn non-null cuối TOÀN partition, frame mặc định vẫn thiếu UNBOUNDED FOLLOWING
@@ -532,7 +538,7 @@ Keyset (seek, ổn định khi có insert xen):
 -- PostgreSQL: so sánh tuple
 SELECT *
 FROM orders
-WHERE (created_at, id) < (@last_at, @last_id)
+WHERE (created_at, id) < ($1, $2)
 ORDER BY created_at DESC, id DESC
 FETCH FIRST 20 ROWS ONLY;
 
@@ -694,11 +700,25 @@ Không phải mọi hàm trong `OVER` dùng frame. Review nhầm `ROWS` trên `L
 | **Không** | `ROW_NUMBER` `RANK` `DENSE_RANK` `NTILE` `PERCENT_RANK` `CUME_DIST` `LAG` `LEAD` |
 | **Có** | `SUM` `AVG` `COUNT` `MIN` `MAX` `PRODUCT` (SS) `FIRST_VALUE` `LAST_VALUE` `NTH_VALUE` (PG) và aggregate-as-window khác |
 
-`LAG`/`LEAD` đi theo `ORDER BY` + offset hàng (và `IGNORE NULLS` nếu có). Viết `LAG(x) OVER (ORDER BY ts ROWS BETWEEN 5 PRECEDING AND CURRENT ROW)` — `ROWS` **bị bỏ qua** (không đổi nghĩa offset). `FIRST_VALUE` *có* nhìn frame.
+`LAG`/`LEAD` và các hàm ranking (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `NTILE`, `PERCENT_RANK`, `CUME_DIST`) đi theo `ORDER BY` + offset/thứ hạng, không dùng frame. **Khác biệt lớn giữa hai engine:**
+- **PostgreSQL:** viết frame (`ROWS`/`RANGE`) kèm các hàm này bị **bỏ qua** (không lỗi, không đổi kết quả).
+- **SQL Server:** đặt frame lên bất kỳ hàm nào trong nhóm **Không** (kể cả gián tiếp qua named window có frame) gây **lỗi biên dịch `Msg 10752`** (`The function '...' may not have a window frame`).
+
+`FIRST_VALUE` / `LAST_VALUE` / `NTH_VALUE` *có* nhìn frame.
 
 `COUNT(*) OVER ()` không `ORDER BY` = cả partition (mọi hàng sau `WHERE`/`HAVING`). `COUNT(*) OVER (ORDER BY ts)` = mặc định `RANGE … CURRENT ROW` = số hàng *đến peer hiện tại*, không phải tổng partition.
 
-Window + `DISTINCT` trong hàm: `COUNT(DISTINCT x) OVER (…)` — SQL Server **không** hỗ trợ (lỗi cú pháp). PostgreSQL: `COUNT(DISTINCT)` window hạn chế — thường gộp trước hoặc `dense_rank`. Đừng bịa `SUM(DISTINCT) OVER` trên SS.
+Window + `DISTINCT` trong hàm: **cả SQL Server lẫn PostgreSQL đều hoàn toàn không hỗ trợ** `COUNT(DISTINCT x) OVER (…)` (PG báo `DISTINCT is not implemented for window functions`; SS báo lỗi cú pháp). Workaround chuẩn cho `COUNT(DISTINCT x)` theo partition (không `ORDER BY`):
+
+```sql
+-- Khi x NOT NULL: dùng hai DENSE_RANK ngược chiều (cả hai engine)
+SELECT
+    dept_id,
+    DENSE_RANK() OVER (PARTITION BY dept_id ORDER BY role_id ASC)
+  + DENSE_RANK() OVER (PARTITION BY dept_id ORDER BY role_id DESC) - 1 AS distinct_roles
+FROM employees;
+-- Nếu x có NULL: tính COUNT(DISTINCT x) trong CTE GROUP BY rồi JOIN lại (tránh đếm nhầm NULL).
+```
 
 ---
 
@@ -714,9 +734,9 @@ ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC NULLS LAST, id)
 -- Ép: ORDER BY CASE WHEN salary IS NULL THEN 1 ELSE 0 END, salary DESC, id
 ```
 
-`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total) OVER (PARTITION BY dept)` — SQL Server: **window**, giữ hàng, bắt buộc `OVER`. PostgreSQL `percentile_cont` là **ordered-set aggregate** (gộp hàng); ordered-set *window* được nhưng khác hợp đồng SS (SS giữ mọi hàng cùng percentile). Port median: đọc [functions.md](functions.md) §6 — đừng copy `WITHIN GROUP` PG vào SS rồi quên `OVER`.
+`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total) OVER (PARTITION BY dept)` — SQL Server: **window**, giữ hàng, bắt buộc `OVER`. PostgreSQL `percentile_cont` là **ordered-set aggregate** (gộp hàng) và **hoàn toàn không hỗ trợ `OVER`** (viết `percentile_cont(...) OVER (...)` lỗi ngay `OVER is not supported for ordered-set aggregate`). Muốn giữ từng hàng trên PG phải tính trong CTE `GROUP BY` rồi `JOIN` lại. Port median: đọc [functions.md](functions.md) §6 — đừng copy `WITHIN GROUP` PG vào SS rồi quên `OVER`.
 
-`PERCENT_RANK` / `CUME_DIST` không dùng frame; hòa theo `ORDER BY` như `RANK`. `n = 1` → `PERCENT_RANK` = 0.
+`PERCENT_RANK` / `CUME_DIST` không dùng frame, và **xử lý nhóm hòa khác nhau**: `PERCENT_RANK` dùng vị trí **đầu** nhóm hòa giống `RANK` (`(rank - 1) / (n - 1)`, với `n = 1` → `0`); còn `CUME_DIST` dùng vị trí **cuối** nhóm hòa (tỷ lệ mọi hàng có giá trị `<=` hàng hiện tại kể cả peer trên tổng số hàng `n`).
 
 ---
 
@@ -766,9 +786,12 @@ ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC NULLS LAST, id)
 - `PERCENT_RANK` với n = 1 (0) hiểu nhầm.
 - Sort lặp: năm cửa sổ `ORDER BY` khác nhau trên cùng CTE nặng.
 - `LAG(x IGNORE NULLS)` Oracle-style.
-- `ROWS` trên `LAG` nghĩ đổi offset.
+- `ROWS` trên `LAG` / `ROW_NUMBER`: bỏ qua trên PG nhưng **lỗi biên dịch `Msg 10752`** trên SQL Server.
+- Để mặc định `RANGE` trên SQL Server làm phát sinh on-disk Window Spool trong `tempdb` (dùng `ROWS` tường minh).
 - `COUNT(*) OVER (ORDER BY …)` nghĩ là tổng partition.
-- `COUNT(DISTINCT x) OVER` trên SQL Server.
+- `COUNT(DISTINCT x) OVER` (không hỗ trợ trên cả SQL Server lẫn PostgreSQL).
+- `percentile_cont(...) OVER (...)` trên PostgreSQL (lỗi ngay vì là ordered-set aggregate).
+- Viết mệnh đề `QUALIFY` (chưa hỗ trợ trên cả SQL Server 2025 lẫn PostgreSQL 19).
 - `NULLS LAST` copy sang T-SQL.
 
 ---
@@ -779,14 +802,16 @@ ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC NULLS LAST, id)
 |---|---|---|
 | `ROW_NUMBER` / `RANK` / `LAG` / `SUM() OVER` | lõi (2005/2012 tùy hàm) | lõi |
 | `ROWS` frame `n PRECEDING` | có | có |
-| `RANGE` + interval / `n PRECEDING` | **không** (chỉ UNBOUNDED/CURRENT ROW) | có |
-| `GROUPS` frame | — | lõi (SQL:2011) |
-| `EXCLUDE` frame | — | lõi |
+| `RANGE` + interval / `n PRECEDING` | **không** (chỉ UNBOUNDED/CURRENT ROW) | **11+** |
+| `GROUPS` frame | — | **11+** (SQL:2011) |
+| `EXCLUDE` frame | — | **11+** |
 | Named `WINDOW` | **2022+**, compat >= 160 | lõi |
 | `IGNORE NULLS` / `RESPECT NULLS` | **2022+** (`LAG`/`LEAD`/`FIRST_VALUE`/`LAST_VALUE`) | **19** (+ `nth_value`) |
 | `NTH_VALUE` | — | lõi |
 | `FILTER` trên window aggregate | — | lõi |
 | `PRODUCT() OVER` | **2025** | — |
+| `WindowAgg` run conditions (`WHERE rn <= N` dừng sớm) | — | **15+** |
+| `QUALIFY` clause | — (chưa hỗ trợ) | — (chưa hỗ trợ) |
 | `NULLS FIRST` / `LAST` trong `OVER` | — | lõi |
 | So sánh tuple keyset `(a,b) < (…)` | — | lõi |
 
@@ -805,9 +830,9 @@ WINDOW
     w_run  AS (w_ord ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW);
 ```
 
-Cấm: `WINDOW w2 AS (w1 PARTITION BY other)` khi `w1` đã có partition — đổi tập nhóm. Cấm hai `ORDER BY` chồng (thay, không merge). Frame trên `w1` rồi `w2` thêm frame khác → lỗi / không portable; để frame ở cửa sổ *lá*.
+Cấm: trên **PostgreSQL**, window kế thừa `WINDOW w2 AS (w1 PARTITION BY ...)` bị **cấm hoàn toàn `PARTITION BY`**, kể cả khi `w1` chưa có `PARTITION BY` (chỉ SS 2022+ mới cho bổ sung `PARTITION BY` nếu `w1` chưa có). Cấm hai `ORDER BY` chồng (không merge). Frame trên `w1` rồi `w2` thêm frame khác → lỗi / không portable; để frame ở cửa sổ *lá*.
 
-`OVER w_run` và `OVER (w_run)` cùng nghĩa khi tên đủ. Ranking (`ROW_NUMBER`) trên `w_run` **bỏ qua** frame — vẫn hữu ích vì cùng `PARTITION`/`ORDER` với `SUM` running, một spec.
+`OVER w_run` và `OVER (w_run)` cùng nghĩa khi tên đủ. **Cảnh báo cross-engine:** dùng ranking/offset (`ROW_NUMBER`, `LAG`, `LEAD`…) trên `w_run` (window đã có `ROWS`/`RANGE` frame) chỉ chạy trên **PostgreSQL** (bỏ qua frame), còn trên **SQL Server gây lỗi biên dịch `Msg 10752`** — tách riêng `w_ord` (không frame) cho ranking/offset và `w_run` (có frame) cho aggregate/`FIRST_VALUE`/`LAST_VALUE`.
 
 SQL Server 2019-: bung từng `OVER (` đầy đủ. PG mọi bản lõi có `WINDOW`.
 

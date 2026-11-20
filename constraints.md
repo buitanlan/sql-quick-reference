@@ -5,7 +5,7 @@
 
 Constraint quyết định hàng nào được commit. PK/UNIQUE (kể cả `NULLS NOT DISTINCT`), FK + hành động xóa/sửa, CHECK (NULL **qua**), `EXCLUDE` / temporal `WITHOUT OVERLAPS` (PostgreSQL), deferred (chỉ PG), `NOCHECK` untrusted (SQL Server) vs `NOT VALID` (PG) — lệch dialect dễ port sai. App-only unique = race. DDL lock: [ddl.md](ddl.md). Isolation lúc commit deferred: [transactions.md](transactions.md). Index đứng sau unique/FK: [indexes.md](indexes.md). DML tự chia khoảng application-time: [dml.md](dml.md).
 
-PostgreSQL 19 **GA** (19/11/2026): FK check nhanh hơn (implementation, không đổi ngữ nghĩa); `ALTER … CONSTRAINT … [NOT] ENFORCED` cho **CHECK** (trước 19: ENFORCED chủ yếu FK). SQL Server: không `EXCLUDE`, không defer FK.
+PostgreSQL 19 **GA** (19/11/2026): FK check nhanh hơn (implementation, không đổi ngữ nghĩa); `ALTER … CONSTRAINT … [NOT] ENFORCED` cho **CHECK** (còn `CREATE`/`ADD … NOT ENFORCED` có từ PG 18). SQL Server: không `EXCLUDE`, không defer FK.
 
 ---
 
@@ -57,7 +57,7 @@ Constraint chạy trong statement hoặc lúc `COMMIT` (deferred PG). Trigger b�
 Ba câu hỏi trước mỗi constraint:
 
 1. **Invariant gì?** Một hàng (CHECK, NOT NULL) vs nhiều hàng (UNIQUE, EXCLUDE) vs hai bảng (FK) vs period (WITHOUT OVERLAPS).
-2. **NULL?** UNIQUE mặc định nhiều NULL; CHECK `UNKNOWN` qua; FK NULL thường không đòi cha.
+2. **NULL?** `UNIQUE` mặc định nhiều `NULL` trên PG nhưng chỉ tối đa 1 `NULL` trên SQL Server; `CHECK` `UNKNOWN` qua; FK `NULL` thường không đòi cha.
 3. **Khi nào kiểm?** Immediate vs deferred vs `NOT VALID` (hàng cũ) vs `NOCHECK` (SS, untrusted / tắt) vs `NOT ENFORCED` (PG, không kiểm kể cả hàng mới).
 
 Đổi PK trên bảng lớn = rewrite + mọi FK. Disable FK “cho nhanh ETL” rồi quên `WITH CHECK` = optimizer mất join elimination *và* dữ liệu mồ côi.
@@ -103,38 +103,41 @@ Composite PK: `(tenant_id, id)` khi identity toàn cục không đủ. Clustered
 
 PostgreSQL 18+: PK temporal `PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)` — mục 9. Không phải SQL Server `PERIOD FOR SYSTEM_TIME`.
 
-**Ghi chú:** Unique index ≠ PK: PK được FK tham chiếu; chỉ một PK. Nhiều UNIQUE được. Surrogate `id` không miễn UNIQUE nghiệp vụ (`tenant_id, ext_id`). JSON INDEX SS đòi **clustered PK** — [json.md](json.md), [indexes.md](indexes.md).
+**Ghi chú:** Unique constraint/index ≠ PK: mỗi bảng chỉ một PK, nhưng FK có thể tham chiếu tới **cả PK lẫn `UNIQUE`** (trên SS gồm cả unique index non-filtered). Nhiều `UNIQUE` được. Surrogate `id` không miễn `UNIQUE` nghiệp vụ (`tenant_id, ext_id`). JSON INDEX SS đòi **clustered PK** — [json.md](json.md), [indexes.md](indexes.md).
 
 ---
 
 ## 3. UNIQUE & NULLS NOT DISTINCT
 
-SQL NULL ≠ NULL: unique mặc định **cho phép nhiều hàng NULL** trên cả hai engine.
+Hai engine **ngược nhau mặc định** khi cột `UNIQUE` chứa `NULL`:
+- **PostgreSQL (chuẩn ANSI):** `NULL ≠ NULL` → `UNIQUE` mặc định **cho phép nhiều `NULL`** (`NULLS DISTINCT`). Muốn chỉ tối đa 1 `NULL` dùng `UNIQUE NULLS NOT DISTINCT` (**PG 15+**).
+- **SQL Server:** `UNIQUE` constraint / unique index mặc định (unfiltered) **chỉ cho phép tối đa 1 `NULL`** (coi `NULL = NULL` trong unique — chèn `NULL` thứ 2 báo lỗi `2627`/`2601`). Muốn **cho phép nhiều `NULL`** (như PG mặc định), phải tạo filtered unique index `WHERE col IS NOT NULL`.
 
 | | SQL Server | PostgreSQL |
 |---|---|---|
-| Mặc định | Nhiều NULL | Nhiều NULL (`NULLS DISTINCT`) |
-| Cấm trùng NULL | Filtered unique `WHERE col IS NOT NULL` **không** cấm nhiều NULL — chỉ unique phần non-null | `UNIQUE NULLS NOT DISTINCT` (**15+**) |
-| Composite | NULL một cột: hàng khác NULL cùng vị trí vẫn được (NULL không bằng) | Giống, trừ `NULLS NOT DISTINCT` |
+| Mặc định | **Tối đa 1 `NULL`** (unfiltered `UNIQUE`) | Nhiều `NULL` (`NULLS DISTINCT`) |
+| Cho phép nhiều `NULL` | Filtered unique `WHERE col IS NOT NULL` | Mặc định (`NULLS DISTINCT`) |
+| Cấm trùng `NULL` (tối đa 1 `NULL`) | Mặc định (`UNIQUE` unfiltered) | `UNIQUE NULLS NOT DISTINCT` (**15+**) |
+| Composite | Hai hàng `(1, NULL)` **bị chặn** (trừ khi filtered `WHERE col2 IS NOT NULL`) | Hai hàng `(1, NULL)` được phép (trừ `NULLS NOT DISTINCT`) |
 
 ```sql
--- PostgreSQL 15+
+-- PostgreSQL 15+: chỉ cho phép tối đa một NULL (giống UNIQUE mặc định của SQL Server)
 CREATE TABLE t (
     email text UNIQUE NULLS NOT DISTINCT
 );
 ALTER TABLE t ADD CONSTRAINT uq_email UNIQUE NULLS NOT DISTINCT (email);
 
--- SQL Server: unique phần non-null (nhiều NULL vẫn được)
+-- SQL Server: cho phép nhiều NULL, chỉ unique phần non-null (giống UNIQUE mặc định của PG)
 CREATE UNIQUE INDEX ux_users_email
     ON dbo.Users (Email)
     WHERE Email IS NOT NULL;
 ```
 
-Muốn “tối đa một NULL” trên SS: không có `NULLS NOT DISTINCT`. Cách gần: cột sentinel, computed `ISNULL`, hoặc filtered không đủ — thiết kế `NOT NULL`.
+Trên SQL Server, nếu muốn hành vi giống `UNIQUE NULLS NOT DISTINCT` của PG (tối đa 1 `NULL`) thì **chính `UNIQUE` mặc định** đã làm điều đó. Ngược lại, nếu port `UNIQUE (email)` từ PG (nhiều `NULL` hợp lệ) sang SQL Server mà quên `WHERE Email IS NOT NULL`, người dùng thứ 2 không có email sẽ văng lỗi `2627`.
 
-Composite `NULLS NOT DISTINCT`: hai hàng `(NULL, 1)` trùng. Mặc định DISTINCT: hai hàng đó được (NULL ≠ NULL). Port unique “cặp (tenant, phone) phone optional không trùng” — review từng cột NULL.
+Composite `NULLS NOT DISTINCT` (PG) / `UNIQUE` mặc định (SS): hai hàng `(1, NULL)` bị chặn vì coi trùng. Composite `NULLS DISTINCT` (PG mặc định) / filtered `WHERE col2 IS NOT NULL` (SS): hai hàng `(1, NULL)` được phép. Review kỹ từng cột nullable khi port giữa hai engine.
 
-**Ghi chú:** Port unique “email optional nhưng không trùng” từ PG `NULLS NOT DISTINCT` sang SS filtered index = **sai** (hai NULL lọt). Review dialect gates.
+**Ghi chú:** Port unique “email optional, nhiều `NULL` hợp lệ” từ PG sang SQL Server phải dùng filtered unique `WHERE Email IS NOT NULL`; port PG `NULLS NOT DISTINCT` sang SQL Server thì dùng `UNIQUE` mặc định (unfiltered). Review dialect gates.
 
 ---
 
@@ -158,9 +161,9 @@ ALTER TABLE dbo.Orders WITH CHECK
 | Hành động | Khi xóa/sửa cha |
 |---|---|
 | `NO ACTION` | Từ chối nếu còn con. PG: có thể **defer** (kiểm lúc COMMIT). SS: immediate reject |
-| `RESTRICT` | PG: immediate, không defer. SS: `ON DELETE RESTRICT` (2019+ tương đương chặn; historically `NO ACTION`) |
-| `CASCADE` | Xóa/sửa con theo. Cây sâu / cycle = thảm họa |
-| `SET NULL` | Cột con nullable |
+| `RESTRICT` | PG: immediate, không defer. SS: **không hỗ trợ** (lỗi cú pháp — dùng `NO ACTION`) |
+| `CASCADE` | Xóa/sửa con theo. Cây sâu / cycle = thảm họa. **SS Error 1785:** cấm tồn tại ≥ 2 đường cascade (multiple cascade paths) từ cùng một bảng cha tới bảng con — phải dùng `NO ACTION` + trigger/app |
+| `SET NULL` | Cột con nullable. **PG 15+:** hỗ trợ `ON DELETE SET NULL (col2)` cho composite FK (chỉ set `NULL` cột chỉ định, giữ nguyên cột `NOT NULL` như `tenant_id`) |
 | `SET DEFAULT` | Cột có default hợp lệ (trỏ cha còn sống) |
 
 Self-FK, hai bảng vòng: PG deferred (mục 10); SS insert theo thứ tự hoặc disable tạm.
@@ -222,9 +225,9 @@ CHECK (status IS NOT NULL AND status IN ('new', 'paid'))
 
 Không subquery (cả hai, CHECK không thấy bảng khác). Cross-table: trigger / `CONSTRAINT TRIGGER` (PG) / indexed view + unique (SS, hạn chế).
 
-SQL Server: CHECK không gọi UDF không deterministic tùy phiên bản — giữ biểu thức đơn. PG: `CHECK` không volatile; `now()` trong CHECK = bất ngờ.
+SQL Server: `CHECK` không gọi UDF không deterministic tùy phiên bản — giữ biểu thức đơn. PG: `CHECK` cho phép hàm `STABLE` như `now()` (không cấm cú pháp, chỉ cấm subquery), nhưng đây là **anti-pattern** vì kết quả đổi theo thời điểm kiểm — dump/restore hoặc `VALIDATE` sau này sẽ fail.
 
-PostgreSQL **19:** `ALTER TABLE … ALTER CONSTRAINT … [NOT] ENFORCED` cho **CHECK** (trước 19: ENFORCED chủ yếu FK). `NOT ENFORCED` ≠ xóa constraint — catalog còn, không kiểm hàng mới. Khác `NOT VALID`. Mục 12.
+PostgreSQL **18+ / 19:** `CREATE`/`ADD CONSTRAINT … NOT ENFORCED` (từ **18**); `ALTER TABLE … ALTER CONSTRAINT … [NOT] ENFORCED` cho **CHECK** (từ **19**, trước chỉ FK). `NOT ENFORCED` ≠ xóa constraint — catalog còn, không kiểm hàng mới. Khác `NOT VALID`. Mục 12.
 
 **Ghi chú:** `CHECK (qty > 0 OR qty IS NULL)` thừa nếu NULL đã qua. Review `CHECK (a < b)` khi `a`/`b` nullable: hàng `a` NULL vẫn vào.
 
@@ -234,14 +237,20 @@ PostgreSQL **19:** `ALTER TABLE … ALTER CONSTRAINT … [NOT] ENFORCED` cho **C
 
 ```sql
 -- PostgreSQL
-ALTER TABLE orders ALTER COLUMN note SET NOT NULL;     -- scan hàng cũ
+ALTER TABLE orders ALTER COLUMN note SET NOT NULL;     -- scan hàng cũ (ACCESS EXCLUSIVE)
+-- PG 18+: thêm NOT NULL hai bước không khóa lâu (lưu trong pg_constraint với contype = 'n')
+ALTER TABLE orders ADD CONSTRAINT orders_note_nn NOT NULL note NOT VALID;
+ALTER TABLE orders VALIDATE CONSTRAINT orders_note_nn;
+
 ALTER TABLE orders ALTER COLUMN status SET DEFAULT 'new';
 ALTER TABLE orders ALTER COLUMN status DROP DEFAULT;
 
--- SQL Server
+-- SQL Server: DEFAULT là một named constraint (sys.default_constraints)
 ALTER TABLE dbo.Orders ALTER COLUMN Note nvarchar(200) NOT NULL;
 ALTER TABLE dbo.Orders ADD CONSTRAINT DF_Orders_Status DEFAULT (N'new') FOR Status;
 ```
+
+Trên **SQL Server**, `DEFAULT` được quản lý như một **named constraint** (`sys.default_constraints`): nếu muốn `DROP COLUMN` hoặc đổi default, phải `DROP CONSTRAINT` trước — vì vậy luôn đặt tên tường minh (`DF_<Table>_<Col>`) thay vì để engine tự sinh tên ngẫu nhiên.
 
 Thêm cột `NOT NULL` + default constant: engine hiện đại thường metadata-only (không rewrite hết hàng) trong nhiều trường hợp — vẫn test bảng lớn. `NOT NULL` không default trên bảng có hàng = fail.
 
@@ -334,7 +343,7 @@ COMMIT;                                   -- kiểm lúc COMMIT
 
 SQL Server: **không** defer FK. Insert vòng: disable / staging / thứ tự / trigger.
 
-Unique/PK/CHECK cũng defer được nếu khai báo `DEFERRABLE` (PG). Unique deferred = đến COMMIT mới lỗi trùng — khó debug.
+Chỉ `UNIQUE`, `PRIMARY KEY`, `FOREIGN KEY` và `EXCLUDE` mới khai báo `DEFERRABLE` được trên PG — **`CHECK` và `NOT NULL` không thể `DEFERRABLE`** (lỗi cú pháp). Unique deferred = đến `COMMIT` mới lỗi trùng — khó debug.
 
 **Ghi chú:** `SET CONSTRAINTS ALL DEFERRED` không biến FK `NOT DEFERRABLE` thành deferred. ORM “flush vòng” cần schema `DEFERRABLE`. `postgres_fdw` **19** thừa `READ ONLY`/`DEFERRABLE` sang remote — txn read-only không ghi remote — [transactions.md](transactions.md) §12.
 
@@ -355,11 +364,16 @@ ALTER TABLE dbo.Orders CHECK CONSTRAINT FK_Orders_Customers;
 ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customers;
 ```
 
-`WITH NOCHECK ADD CONSTRAINT` lúc tạo: không quét data cũ; constraint **untrusted**. Optimizer **không** dùng FK cho join elimination / infer NOT NULL phía con.
+`WITH NOCHECK ADD CONSTRAINT` lúc tạo: không quét data cũ; constraint **untrusted** (áp dụng cho cả **FK lẫn `CHECK` constraint**). Optimizer **không** dùng FK untrusted cho join elimination, và **không** dùng `CHECK` untrusted cho contradiction detection / partition elimination (vd `WHERE Total < 0` vẫn phải scan dù có `CHECK (Total >= 0)`).
 
 ```sql
 SELECT name, is_disabled, is_not_trusted
 FROM sys.foreign_keys
+WHERE parent_object_id = OBJECT_ID(N'dbo.Orders');
+
+-- Kiểm tra cả CHECK constraint untrusted
+SELECT name, is_disabled, is_not_trusted
+FROM sys.check_constraints
 WHERE parent_object_id = OBJECT_ID(N'dbo.Orders');
 ```
 
@@ -385,7 +399,7 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customers;
 
 ## 12. Disable / NOT VALID / ENFORCED
 
-**PostgreSQL `NOT VALID`:** thêm FK/CHECK không quét hàng cũ. Hàng **mới** vẫn kiểm. Validate sau, lock nhẹ hơn add + scan một nhịp:
+**PostgreSQL `NOT VALID`:** thêm FK, `CHECK` hoặc `NOT NULL` (**PG 18+**) không quét hàng cũ. Hàng **mới** vẫn kiểm. Validate sau, lock nhẹ hơn add + scan một nhịp:
 
 ```sql
 ALTER TABLE orders
@@ -399,14 +413,14 @@ ALTER TABLE orders VALIDATE CONSTRAINT orders_customer_fk;
 
 ### 12.1 CHECK `[NOT] ENFORCED` (PG 19)
 
-Docs `ALTER TABLE` 19: enforceability đổi được cho **FOREIGN KEY và CHECK**. Deferrability vẫn chỉ FK.
+Mốc phiên bản: `CREATE`/`ADD CONSTRAINT … NOT ENFORCED` có từ **PG 18**; từ **PG 19**, `ALTER TABLE … ALTER CONSTRAINT … [NOT] ENFORCED` đổi được trạng thái enforce cho cả **FOREIGN KEY lẫn CHECK** (đổi deferrability trong `ALTER CONSTRAINT` vẫn chỉ áp dụng cho FK).
 
 ```sql
 ALTER TABLE orders ALTER CONSTRAINT chk_total NOT ENFORCED;
 ALTER TABLE orders ALTER CONSTRAINT chk_total ENFORCED;
 ```
 
-- `NOT ENFORCED`: **không** kiểm hàng mới *và* không quét. Catalog còn — documentation / tối ưu “tin” constraint ở chỗ không ảnh hưởng đúng đắn (docs CREATE TABLE: engine *có thể* vẫn giả định thỏa cho một số quyết định optimizer).
+- `NOT ENFORCED`: **không** kiểm hàng mới *và* không quét. Catalog còn — documentation / tối ưu “tin” constraint ở chỗ không ảnh hưởng đúng đắn (docs `CREATE TABLE` PG 19: engine *có thể* vẫn giả định thỏa cho một số quyết định optimizer).
 - `ENFORCED` (từ NOT ENFORCED): **scan** hàng cũ (Phase 3) rồi kiểm hàng mới. Partition/inherit: recurse con.
 
 `NOT ENFORCED` ≠ `NOT VALID` (hàng mới vẫn kiểm). ≠ `NOCHECK` SS (disabled) — gần *ý* “tắt kiểm” hơn `NOT VALID`.
@@ -443,12 +457,17 @@ SQL Server: `WITH CHECK ADD` lúc thấp điểm; luôn `CREATE INDEX` trên `Cu
 ### 13.2 Unique NULL nghiệp vụ
 
 ```sql
--- PG: tối đa một NULL
+-- 1) Tối đa một NULL:
+-- PG 15+
 ALTER TABLE users ADD CONSTRAINT uq_phone UNIQUE NULLS NOT DISTINCT (phone);
+-- SQL Server: UNIQUE mặc định ĐÃ chỉ cho tối đa một NULL
+ALTER TABLE dbo.Users ADD CONSTRAINT UQ_Users_Phone UNIQUE (Phone);
 
--- SS: bắt NOT NULL hoặc sentinel; filtered không đủ
-ALTER TABLE dbo.Users ALTER COLUMN Phone nvarchar(32) NOT NULL;
-CREATE UNIQUE INDEX ux_users_phone ON dbo.Users (Phone);
+-- 2) Cho phép nhiều NULL (chỉ unique phần non-null):
+-- PG: UNIQUE mặc định (NULLS DISTINCT)
+ALTER TABLE users ADD CONSTRAINT uq_phone UNIQUE (phone);
+-- SQL Server: bắt buộc dùng filtered unique index
+CREATE UNIQUE INDEX ux_users_phone ON dbo.Users (Phone) WHERE Phone IS NOT NULL;
 ```
 
 ### 13.3 Phòng họp không chồng
@@ -500,9 +519,9 @@ RESTRICT trên orders ← customers: xóa khách fail nếu còn đơn — thư�
 | `=` kể cả NULL | `NULLS NOT DISTINCT` | PG 15+ |
 | `&&` range + `=` cột | `EXCLUDE gist` | PG |
 | Period không chồng cùng key | `WITHOUT OVERLAPS` | PG 18+ |
-| Overlap ngày trên SS | trigger / indexed view / app + `UPDLOCK` | SS |
+| Overlap ngày trên SS | trigger / app + `UPDLOCK` / bảng slot rời (indexed view không chặn được range overlap liên tục) | SS |
 
-WITHOUT OVERLAPS trên PK/UNIQUE kiểm range/multirange; mọi đoạn do ứng dụng tạo phải thỏa constraint. `EXCLUDE` trên `tstzrange` không tự cắt leftover — DML thường `UPDATE` cả hàng.
+`WITHOUT OVERLAPS` trên PK/UNIQUE kiểm range/multirange; mọi đoạn do ứng dụng tạo phải thỏa constraint. `EXCLUDE` trên `tstzrange` chỉ chặn chồng chéo — `UPDATE` thường thay cả hàng, không tự tách khoảng.
 
 Race RC hai `INSERT` khoảng chồng: GiST/unique lock — một fail unique-like, không “cả hai lọt” nếu constraint engine (khác app check).
 
@@ -542,33 +561,34 @@ COMMIT;
 ## 14. Best practices & checklist
 
 - Invariant trong constraint, không chỉ app. Race cần unique/EXCLUDE + isolation phù hợp.
-- Mỗi FK: index cột con. `ON DELETE CASCADE` chỉ khi nghiệp vụ xóa cây.
+- Cân nhắc index cột con FK theo workload `DELETE`/`UPDATE` cha và tránh tạo trùng prefix index sẵn có. `ON DELETE CASCADE` chỉ khi nghiệp vụ xóa cây.
 - CHECK: nhớ NULL pass; `NOT NULL` + IN list rõ ràng.
-- Unique + NULL: nói rõ `NULLS NOT DISTINCT` vs filtered.
-- PG: `NOT VALID` + `VALIDATE`; không `NOCHECK` kiểu SS.
-- SS: sau ETL `WITH CHECK CHECK CONSTRAINT`; soi `is_not_trusted`.
+- Unique + NULL: nhớ hai engine **ngược mặc định** (PG nhiều NULL vs SS tối đa 1 NULL) và chọn đúng `NULLS NOT DISTINCT` / filtered `WHERE col IS NOT NULL`.
+- PG: `NOT VALID` + `VALIDATE` (gồm cả `NOT NULL` từ PG 18+); không `NOCHECK` kiểu SS.
+- SS: sau ETL `WITH CHECK CHECK CONSTRAINT`; soi `is_not_trusted` trên cả `sys.foreign_keys` lẫn `sys.check_constraints`; đặt tên tường minh cho `DEFAULT` constraint.
 - Temporal: WITHOUT OVERLAPS kiểm overlap; chia khoảng cần DML ứng dụng trong một transaction.
 - Deferred chỉ khi insert vòng; unique deferred khó vận hành.
 - Đổi PK = dự án riêng (rewrite, FK, downtime).
-- PG 19: `NOT ENFORCED` CHECK nhớ bật lại; `ENFORCED` = scan.
+- PG 18+/19: `NOT ENFORCED` CHECK nhớ bật lại; `ENFORCED` = scan.
 
 ---
 
 ## 15. Bẫy khi review
 
 - FK không index — `DELETE` cha scan bảng con.
-- `ON DELETE CASCADE` trên `customers` → mất `orders`.
+- `ON DELETE CASCADE` trên `customers` → mất `orders`; trên SQL Server gặp Error 1785 nếu có nhiều đường cascade tới cùng bảng con.
 - `CHECK (status IN (…))` cột nullable, app tin “luôn new|paid”.
-- Unique “một NULL” trên SS bằng filtered index.
-- `NOCHECK` rồi `CHECK` không `WITH CHECK` — untrusted, mất join elimination.
+- Tưởng SQL Server `UNIQUE` mặc định cho nhiều `NULL` (thực tế chỉ cho 1 `NULL`; muốn nhiều `NULL` phải dùng filtered `WHERE col IS NOT NULL`).
+- Viết `ON DELETE RESTRICT` trên SQL Server (lỗi cú pháp — chỉ có `NO ACTION`).
+- `NOCHECK` rồi `CHECK` không `WITH CHECK` — untrusted (cả FK lẫn `CHECK`), mất join elimination / contradiction detection.
 - Nhầm `NOT VALID` = `NOCHECK` (hàng mới / trusted khác nhau).
 - Nhầm `NOT ENFORCED` = `NOT VALID`.
 - Port `EXCLUDE` / `WITHOUT OVERLAPS` sang SS bằng unique hai cột thời điểm.
-- `BEGIN` T-SQL + `SET CONSTRAINTS` (không tồn tại).
+- `BEGIN` T-SQL + `SET CONSTRAINTS` (không tồn tại), hoặc khai báo `CHECK … DEFERRABLE` trên PG (không hỗ trợ).
 - CHECK subquery “thấy bảng khác” — không portable, thường illegal.
-- `NOT ENFORCED` (PG 19) quên bật lại: hàng mới cũng lọt.
+- `NOT ENFORCED` (PG 18+/19) quên bật lại: hàng mới cũng lọt.
 - App unique check `SELECT` rồi `INSERT` không khóa — [concurrency.md](concurrency.md).
-- Trigger INSERT trên leftover làm nghiệp vụ “cập nhật giá” gửi mail hai lần.
+- Tách khoảng temporal trong app bằng `DELETE`+`INSERT` làm `INSERT` trigger chạy cho các đoạn cắt lại — dễ gửi mail/audit trùng.
 - `btree_gist` inet trên EXCLUDE — upgrade 19 chặn (khác room_id int).
 
 ---
@@ -577,15 +597,16 @@ COMMIT;
 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
-| `UNIQUE NULLS NOT DISTINCT` | — (filtered ≠) | **15+** |
-| `ON DELETE RESTRICT` | 2019+ rõ | lâu |
+| `UNIQUE` + `NULL` mặc định | Tối đa 1 `NULL` (nhiều `NULL` → filtered `IS NOT NULL`) | Nhiều `NULL` (`NULLS NOT DISTINCT` từ **15+**) |
+| `ON DELETE RESTRICT` | — (lỗi cú pháp; dùng `NO ACTION`) | lâu |
+| `ON DELETE SET NULL (cols)` | — | **15+** (chỉ set `NULL` cột chỉ định) |
 | `EXCLUDE` / GiST | — | lâu |
 | PK `WITHOUT OVERLAPS` | — | **18+** |
-| Deferred FK/UNIQUE | — | lâu |
-| `NOT VALID` + `VALIDATE` | `WITH NOCHECK` khác | lâu |
-| CHECK `[NOT] ENFORCED` | — | **19** (FK ENFORCED trước) |
+| Deferred FK/UNIQUE/PK/EXCLUDE | — | lâu (cấm `CHECK`/`NOT NULL`) |
+| `NOT VALID` + `VALIDATE` | `WITH NOCHECK` khác | lâu (FK/CHECK); **18+** (`NOT NULL`, `contype = 'n'`) |
+| `NOT ENFORCED` | — (`NOCHECK` khác) | **18+** (`CREATE`/`ADD`); **19** (`ALTER CONSTRAINT` cho `CHECK`) |
 | FK check nhanh hơn | — | **19** |
-| Untrusted FK catalog | `is_not_trusted` | `convalidated` |
+| Untrusted catalog | `sys.foreign_keys` & `sys.check_constraints.is_not_trusted` | `pg_constraint.convalidated` |
 
 Temporal DML race: [dml.md](dml.md). Isolation / deferred lúc COMMIT / FDW: [transactions.md](transactions.md).
 
@@ -596,8 +617,8 @@ Temporal DML race: [dml.md](dml.md). Isolation / deferred lúc COMMIT / FDW: [tr
 | Invariant | Công cụ |
 |---|---|
 | Một hàng định danh | `PRIMARY KEY` |
-| Không trùng nghiệp vụ, nhiều NULL OK | `UNIQUE` mặc định |
-| Không trùng kể cả NULL | PG `NULLS NOT DISTINCT`; SS thiết kế `NOT NULL` |
+| Không trùng nghiệp vụ, nhiều `NULL` OK | PG: `UNIQUE` mặc định; SS: filtered unique `WHERE col IS NOT NULL` |
+| Không trùng kể cả `NULL` (tối đa 1 `NULL`) | PG: `UNIQUE NULLS NOT DISTINCT` (**15+**); SS: `UNIQUE` mặc định (unfiltered) |
 | Không chồng range | PG `EXCLUDE` / `WITHOUT OVERLAPS` |
 | Biểu thức / join | SS indexed view `UNIQUE`; PG unique expression index |
 
@@ -607,29 +628,31 @@ Indexed view SQL Server: `SCHEMABINDING`, `SET` options, Enterprise/query hint `
 
 ## Phụ lục B. Trigger không phải constraint
 
-`CREATE TRIGGER` chạy sau/trước DML, có thể `RAISERROR`/`RAISE`. Bulk/`COPY`/`TABLOCK`/`DISABLE TRIGGER` / `session_replication_role` (PG) / `IDENTITY_INSERT` không cùng đường. Constraint unique/FK engine **không** tắt vì replication role trừ replica identity / `DISABLE`. Review “constraint trong trigger” = race + bypass.
+`CREATE TRIGGER` chạy sau/trước DML, có thể `RAISERROR`/`RAISE`, nhưng dễ bị bypass: trên SQL Server, `DISABLE TRIGGER`, `BULK INSERT` (mặc định **bỏ qua `CHECK`, `FK` và trigger** nếu không có `CHECK_CONSTRAINTS` / `FIRE_TRIGGERS`) và `SqlBulkCopy` có thể lọt qua kiểm tra (riêng `IDENTITY_INSERT` chỉ cho chèn giá trị tường minh vào cột identity, **không** tắt constraint hay trigger). Trên PostgreSQL, `session_replication_role = 'replica'` **CÓ tắt kiểm tra Foreign Key** (vì FK được cài bằng internal trigger `RI_FKey_*`), còn `PK`/`UNIQUE`/`CHECK`/`NOT NULL`/`EXCLUDE` vẫn chạy. Review “constraint trong trigger” = race + bypass.
 
 Constraint trigger PG (`CONSTRAINT TRIGGER`) defer được như FK — vẫn không thấy bảng khác trong CHECK.
 
-Leftover temporal fire trigger INSERT: test trước khi bật mail/audit “mỗi UPDATE giá”.
+Khi ứng dụng tự tách khoảng temporal (xóa khoảng cũ, chèn các đoạn mới), `INSERT` trigger sẽ chạy — test kỹ trước khi bật mail/audit “mỗi UPDATE giá”.
 
 ---
 
 ## Phụ lục C. Catalog khi review PR
 
 ```sql
--- SQL Server: FK untrusted / disabled
+-- SQL Server: FK và CHECK untrusted / disabled
 SELECT name, is_disabled, is_not_trusted, delete_referential_action_desc
 FROM sys.foreign_keys;
 
+SELECT name, is_disabled, is_not_trusted
+FROM sys.check_constraints;
+
 -- PostgreSQL: validated / defer / enforced
-SELECT conname, contype, convalidated, condeferrable, condeferred
+SELECT conname, contype, convalidated, condeferrable, condeferred, conenforced
 FROM pg_constraint
 WHERE conrelid = 'orders'::regclass;
--- 19: cột enforce — \d pg_constraint (conenforced / tương đương docs)
 ```
 
-`contype`: `p` PK, `u` unique, `f` FK, `c` check, `x` exclude. Thiếu index FK: so cột `confrelid` với `pg_index`. SS: `sys.foreign_key_columns` vs `sys.index_columns`.
+`contype`: `p` PK, `u` unique, `f` FK, `c` check, `x` exclude, `n` `NOT NULL` (**PG 18+**), `t` constraint trigger. Tìm FK thiếu index phía con trên PG phải so **`conrelid` + `conkey`** (bảng con) với `pg_index` (không phải `confrelid` là bảng cha). SS: `sys.foreign_key_columns` vs `sys.index_columns`.
 
 ---
 
@@ -643,7 +666,7 @@ Constraint WITHOUT OVERLAPS kiểm kết quả nhưng không thực hiện phép
 
 ## Phụ lục E. `NOT ENFORCED` vs optimizer
 
-Docs CREATE TABLE 19: `NOT ENFORCED` = app chịu invariant; engine **có thể** vẫn giả định thỏa cho một số quyết định optimizer *không ảnh hưởng đúng kết quả*. Đừng tắt CHECK rồi dựa “optimizer không tin” như SS untrusted. SS untrusted = **không** join elimination. Hai mô hình khác — test plan.
+`CREATE`/`ADD CONSTRAINT … NOT ENFORCED` (PG 18+) và `ALTER CONSTRAINT … [NOT] ENFORCED` cho `CHECK` (PG 19): app chịu invariant; docs `CREATE TABLE` PG 19 ghi rõ engine **có thể** vẫn giả định constraint thỏa cho một số quyết định optimizer *không ảnh hưởng đúng kết quả*. Đừng tắt CHECK rồi dựa “optimizer không tin” như SS untrusted. SS untrusted (`is_not_trusted = 1`) = **không** join elimination / contradiction detection. Hai mô hình khác — test plan.
 
 Bật lại `ENFORCED`: scan hàng cũ (fail nếu bẩn). Partition: recurse con kể khi parent đã NOT ENFORCED.
 
@@ -661,11 +684,11 @@ CREATE TABLE t (
 -- (1, NULL) trùng (1, NULL) → lỗi
 -- (1, NULL) và (2, NULL) → được (tenant khác)
 
--- Mặc định NULLS DISTINCT
+-- Mặc định NULLS DISTINCT (PG)
 -- (1, NULL) và (1, NULL) → được
 ```
 
-SS filtered `WHERE phone IS NOT NULL`: hai `(1, NULL)` lọt. Port “optional phone unique per tenant” từ PG sang SS = `NOT NULL` hoặc sentinel `''` (rồi unique) — không filtered.
+Trên SQL Server, `UNIQUE (Tenant, Phone)` mặc định **chặn** hai hàng `(1, NULL)` (giống `NULLS NOT DISTINCT` của PG). Ngược lại, filtered unique `CREATE UNIQUE INDEX ... ON dbo.T (Tenant, Phone) WHERE Phone IS NOT NULL` sẽ **cho phép** hai hàng `(1, NULL)` (giống `NULLS DISTINCT` mặc định của PG).
 
 Unique filtered `WHERE deleted_at IS NULL`: nhiều hàng xóa mềm cùng phone — được; hai active trùng — lỗi. Khác `NULLS NOT DISTINCT`.
 
@@ -686,29 +709,21 @@ Sửa: status NOT NULL + CHECK IN
   hoặc CHECK (status IS NOT NULL AND status IN ('a','b'))
 ```
 
-PG 19 `NOT ENFORCED` trên CHECK: hàng mới cũng lọt — không dùng để “sửa data rồi quên bật”. `NOT VALID`: hàng mới vẫn kiểm.
+PG 18+/19 `NOT ENFORCED` trên CHECK: hàng mới cũng lọt — không dùng để “sửa data rồi quên bật”. `NOT VALID`: hàng mới vẫn kiểm.
 
-SS CHECK UDF không deterministic: tránh. PG `now()` trong CHECK = bất ngờ theo thời điểm ghi.
-
-Chia khoảng bằng ứng dụng: xét trigger, identity và WITHOUT OVERLAPS trên mọi đoạn mới. Untrusted SS: `WITH CHECK CHECK CONSTRAINT` sau ETL — `is_not_trusted` vào alert. `NOT VALID` ≠ `NOT ENFORCED` ≠ `NOCHECK`.
-
-EXCLUDE gist `(room_id WITH =, during WITH &&)` + `btree_gist` cho int; kiểm incompatibility inet/cidr khi nâng 19. Index cột con FK theo workload, tránh trùng index có cùng prefix. Deferred giúp kiểm constraint ở cuối transaction; CHECK 19 ENFORCED cần kiểm dữ liệu khi bật lại.
-
-MATCH SIMPLE: một cột FK NULL = không đòi cha. `MATCH FULL` (PG): một NULL + một non-null = lỗi. SS không MATCH FULL. Circular insert: PG `DEFERRABLE`; SS thứ tự / NULL rồi UPDATE / (tránh) `NOCHECK` quên `WITH CHECK`.
-
-Leftover range: cắt giữa → 2 INSERT; phủ hết → 0 leftover; race RC → `FOR UPDATE`. Catalog SS `is_not_trusted`; PG `convalidated`. CHECK `[NOT] ENFORCED` **19**.
+SS `CHECK` gọi UDF không deterministic: tránh. PG `now()` (hàm `STABLE`) được phép trong `CHECK` nhưng là anti-pattern vì kết quả đổi theo thời điểm ghi/restore.
 
 ---
 
 ## Phụ lục H. Checklist constraint (WHY)
 
-1. **ETL SS: `WITH CHECK CHECK CONSTRAINT`** — quên = untrusted, mất join elimination.
-2. **PG: `NOT VALID` rồi `VALIDATE`** — hàng mới sạch; khác `NOT ENFORCED`.
+1. **ETL SS: `WITH CHECK CHECK CONSTRAINT`** — quên = untrusted (cả FK lẫn `CHECK`), mất join elimination / contradiction detection.
+2. **PG: `NOT VALID` rồi `VALIDATE`** — hàng mới sạch (FK, `CHECK`, `NOT NULL` PG 18+); khác `NOT ENFORCED`.
 3. **CHECK 19 `ENFORCED` = scan** — bật lại trên bảng bẩn sẽ fail.
 4. **Chia range trong ứng dụng** — một transaction, khóa và `WITHOUT OVERLAPS`.
-5. **`NULLS NOT DISTINCT` không = filtered unique SS**.
+5. **SQL Server `UNIQUE` mặc định chỉ cho 1 `NULL`** — muốn nhiều `NULL` như PG mặc định phải dùng filtered unique `WHERE col IS NOT NULL`.
 6. **EXCLUDE gist int+range OK; inet/cidr `btree_gist` chặn 19**.
-7. **Mỗi FK một index cột con**.
+7. **Cân nhắc index cột con FK theo workload** — kiểm prefix index hiện có trước khi tạo mới.
 8. **Không `ON DELETE CASCADE` trên `customers` trừ khi nghiệp vụ xóa cây**.
 
 

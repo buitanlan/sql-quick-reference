@@ -75,14 +75,16 @@ NULL            -- untyped; lấy kiểu từ ngữ cảnh
 
 ```sql
 -- SQL Server: literal nguyên không dấu → int nếu vừa 32-bit có dấu; lớn hơn → numeric
+-- Dấu '-' là toán tử unary tách khỏi token literal nên -2147483648 là numeric (không phải int)
 SELECT SQL_VARIANT_PROPERTY(2147483647, 'BaseType');   -- int
 SELECT SQL_VARIANT_PROPERTY(2147483648, 'BaseType');   -- numeric
-SELECT SQL_VARIANT_PROPERTY(-2147483648, 'BaseType');  -- int
+SELECT SQL_VARIANT_PROPERTY(-2147483648, 'BaseType');  -- numeric (muốn int: CAST(-2147483648 AS int))
 
 -- PostgreSQL: untyped numeric literal chọn theo ngữ cảnh; đứng một mình:
-SELECT pg_typeof(1);       -- integer
-SELECT pg_typeof(1.0);     -- numeric
-SELECT pg_typeof(1e0);     -- numeric
+SELECT pg_typeof(1);           -- integer
+SELECT pg_typeof(-2147483648); -- bigint (unary '-' áp lên literal 2147483648 kiểu bigint)
+SELECT pg_typeof(1.0);         -- numeric
+SELECT pg_typeof(1e0);         -- numeric
 ```
 
 Trước / sau — overflow im lặng vs lỗi:
@@ -101,7 +103,7 @@ SELECT 2147483648;                         -- integer? không — bigint (vừa 
 SELECT 9223372036854775808;                -- numeric (lớn hơn int8)
 ```
 
-**Ghi chú:** `1_000` hợp lệ trên PostgreSQL 16+, không hợp lệ T-SQL. Dấu `+`/`-` unary gắn với token. `(2147483648)` vẫn numeric trên SQL Server. Chia `1/2` = 0 (integer) — [operators.md](operators.md). `PRODUCT(2)` không phải literal; aggregate — [typesystem.md](typesystem.md).
+**Ghi chú:** `1_000` hợp lệ trên PostgreSQL 16+, không hợp lệ T-SQL. Dấu `+`/`-` là **toán tử unary tách khỏi token literal** — vì vậy `-2147483648` có kiểu **`numeric`** trên SQL Server và **`bigint`** trên PostgreSQL (không phải `int`). `(2147483648)` vẫn `numeric` trên SQL Server. Trên T-SQL còn có **currency literal** (vd `$100`, `£50`, `€10`) tạo kiểu **`money`** — tránh dùng, ưu tiên `numeric`. Chia `1/2` = 0 (integer) — [operators.md](operators.md). `PRODUCT(2)` không phải literal; aggregate — [typesystem.md](typesystem.md).
 
 ### 2.2 Hex & binary số
 
@@ -109,7 +111,7 @@ SELECT 9223372036854775808;                -- numeric (lớn hơn int8)
 -- SQL Server: 0x… là varbinary literal, KHÔNG phải integer hex
 SELECT 0xFF;                               -- 0xFF (1 byte)
 SELECT CAST(0xFF AS int);                  -- 255
--- SELECT 0xFFFFFFFFFF AS int              -- overflow/cắt tùy CAST
+SELECT CAST(0xFFFFFFFFFF AS int);          -- -1 (im lặng cắt lấy 4 byte cuối, không báo overflow)
 
 -- PostgreSQL 16+: 0xFF là INTEGER 255, khác T-SQL binary.
 SELECT 0xFF, 0o377, 0b11111111;            -- 255, 255, 255
@@ -163,6 +165,16 @@ Không có string interpolation. Nối: `+` (SQL Server), `||` (PG; SQL Server *
 
 Newline **thật** trong literal (xuống dòng trong file SQL) hợp lệ cả hai — khác `'\n'` hai ký tự trên PG 19 `'…'` thường.
 
+**Bẫy nối chuỗi kề nhau ngầm định (PostgreSQL):** Theo chuẩn SQL, hai string literal phân tách bởi **ít nhất một ký tự xuống dòng** được PG tự động nối lại (`'a'` xuống dòng `'b'` → `'ab'`). Quên dấu phẩy trong `IN` sẽ chạy thành công nhưng sai logic:
+
+```sql
+-- PostgreSQL: thiếu dấu phẩy sau 'a' → tương đương WHERE code IN ('ab')!
+SELECT * FROM t WHERE code IN (
+    'a'
+    'b'
+);
+```
+
 ### 3.2 Prefix `N` (SQL Server)
 
 ```sql
@@ -172,7 +184,7 @@ SELECT N'tiếng Việt';                      -- nvarchar (Unicode)
 
 **Ghi chú:** Thiếu `N` trên literal Unicode → convert theo database collation; ký tự không có trong code page thành `?` **im lặng**. So sánh `nvarchar` cột với `varchar` literal: convert phía literal, có thể không dùng index / sai kết quả.
 
-PostgreSQL UTF-8: `'tiếng Việt'` đã Unicode — **không** cần `N`. Prefix `N` trên PG không phải national character T-SQL (một số parser bỏ qua / lỗi).
+PostgreSQL UTF-8: `'tiếng Việt'` đã là Unicode — **không** cần `N`. Cẩn thận: `N'abc'` **hợp lệ cú pháp** trên PG nhưng parser dịch thành `NCHAR` (`bpchar` / `char(n)`) thay vì `unknown`/`text` — dễ gây bẫy **trailing space** khi so sánh hoặc nối chuỗi.
 
 `UNISTR(N'…')` nhận **nvarchar** chứa escape — thiếu `N` trên đối số = cùng bẫy code page trước khi unescape.
 
@@ -318,10 +330,15 @@ Bẫy SQL Server: literal `datetime`/`smalldatetime` phụ thuộc `DATEFORMAT` 
 ```sql
 -- SQL Server — hai session
 SET DATEFORMAT mdy;
-SELECT CAST('2026-09-13' AS datetime);     -- Sep 13 (mdy: 09=month, 13=day — OK ISO-like)
+SELECT CAST('2026-09-13' AS datetime);     -- 2026-09-13 (mdy: 09=month, 13=day — OK)
 
 SET DATEFORMAT dmy;
-SELECT CAST('2026-13-09' AS datetime);     -- lỗi hoặc đảo
+SELECT CAST('2026-13-09' AS datetime);     -- 2026-09-13 (OK — dmy đọc 13 là ngày, 09 là tháng!)
+SELECT CAST('2026-09-13' AS datetime);     -- LỖI: dmy đọc 13 là tháng → out-of-range!
+
+-- Hai định dạng LUÔN an toàn với datetime bất kể DATEFORMAT / LANGUAGE:
+SELECT CAST('20260913' AS datetime);
+SELECT CAST('2026-09-13T00:00:00' AS datetime);
 
 SET LANGUAGE N'British';
 SELECT CAST('13/09/2026' AS datetime);     -- 13 Sep
@@ -329,7 +346,7 @@ SET LANGUAGE N'us_english';
 SELECT CAST('13/09/2026' AS datetime);     -- lỗi: 13 không phải tháng
 ```
 
-**Ghi chú:** Kiểu `date` / `datetime2` nhận `yyyy-mm-dd` ổn định hơn `datetime` legacy. Vẫn dùng `CONVERT(…, 23)` (`yyyy-mm-dd`) hoặc `DATEFROMPARTS` trong code. App: parameter `date`/`datetime2`, không nối chuỗi ngày.
+**Ghi chú:** Với `datetime` legacy, chỉ **2 định dạng** `'YYYYMMDD'` và `'YYYY-MM-DDThh:mm:ss'` (ISO 8601 có chữ `T`) là luôn bất biến theo `DATEFORMAT`/`LANGUAGE`; còn kiểu `date` / `datetime2` nhận `'YYYY-MM-DD'` ổn định hơn. Vẫn dùng `CONVERT(…, 23)` (`yyyy-mm-dd`) hoặc `DATEFROMPARTS` trong code. App: parameter `date`/`datetime2`, không nối chuỗi ngày.
 
 PostgreSQL `DateStyle` ảnh hưởng **output** và một số input không ISO. Input `DATE '2026-09-13'` luôn ISO. `TO_DATE('13/09/2026', 'DD/MM/YYYY')` tường minh.
 
@@ -437,7 +454,7 @@ SQL Server `JSON_ARRAY(1,2)` constructor list; `JSON_ARRAYAGG` aggregate — 0 h
 
 ## 9. Dollar-quoting (PostgreSQL)
 
-Không cần nhân đôi nháy. Tag `$body$` / `$$` phải khớp; tag không alphanumeric tùy ý (tránh `$tag$` lồng nhầm).
+Không cần nhân đôi nháy. Tag `$body$` / `$$` phải khớp; tên tag tuân theo quy tắc identifier (chữ, số, `_` — **không bắt đầu bằng chữ số**; tránh `$tag$` trùng nội dung bên trong).
 
 ```sql
 SELECT $$O'Brien$$;
@@ -469,11 +486,13 @@ Chuỗi không prefix `N` trên SQL Server đi theo collation **không Unicode**
 PostgreSQL `'foo'` có kiểu **unknown** cho đến insert / operator / `CAST`. Nguồn lỗi `inconsistent types deduced for parameter` / `could not determine data type`.
 
 ```sql
+-- PostgreSQL
 PREPARE p AS SELECT $1;                    -- lỗi: không suy ra kiểu
 PREPARE p(text) AS SELECT $1;
 
-SELECT COALESCE(NULL, NULL);               -- lỗi: không xác định kiểu
-SELECT COALESCE(NULL::int, NULL);
+SELECT COALESCE(NULL, NULL);               -- PG chạy OK: fallback unknown → NULL::text
+SELECT COALESCE(NULL::int, NULL);          -- NULL::int
+-- SQL Server: SELECT COALESCE(NULL, NULL); -- LỖI: phải có ít nhất 1 tham số khác hằng NULL (dùng CAST(NULL AS int))
 
 SELECT ARRAY[];                            -- lỗi; cần ARRAY[]::int[] hoặc ARRAY[1]
 ```
@@ -510,9 +529,9 @@ SELECT {t '13:45:00'};
 SELECT {fn CONCAT('a', 'b')};
 ```
 
-Driver/SSMS dịch escape thành T-SQL. PostgreSQL **không** dùng `{d '…'}` trong SQL lõi (một số ODBC driver dịch phía client). Code portable: typed `DATE '…'` / `CAST`.
+Cả driver ODBC **lẫn parser của SQL Server** đều hỗ trợ trực tiếp cú pháp ODBC escape (`{d '...'}`, `{ts '...'}`, `{t '...'}`, `{fn ...}`), nên chạy thẳng được qua SSMS/ADO.NET/sqlcmd. Ngược lại, PostgreSQL **không** hỗ trợ `{d '…'}` trong SQL lõi (chỉ một số ODBC driver dịch phía client). Code portable: `CAST('2026-09-13' AS date)` hoặc typed `DATE '…'` trên PG.
 
-sqlcmd/bcp 2025 + TDS 8: escape ODBC vẫn là *client*. File chạy `psql` chứa `{d '…'}` = syntax error.
+File chạy `psql` chứa `{d '…'}` = syntax error.
 
 ---
 
@@ -599,22 +618,23 @@ T2: INSERT blob VALUES ('SGVsbG8=');             -- nếu cột varbinary: conve
 - BASE64: hàm encode/decode, không token; PG 19 chọn `base64` vs `base64url`.
 - Dynamic SQL: parameter cho giá trị; dollar-quote thân hàm PG.
 - `NULL` trong `UNION`/`COALESCE`/`VALUES`: `CAST` tường minh.
-- Hex: nhớ `0x` T-SQL = binary, không phải int; PG `\x` = `bytea`.
-- Không digit separator; không `INTERVAL` trên T-SQL; không `{d}` trong `psql`.
+- Hex: nhớ `0x` T-SQL = `varbinary`, còn PG 16+ `0x` = integer (binary PG dùng `'\x...'::bytea`).
+- Digit separator `1_000` & `0x`/`0o`/`0b` integer chỉ có trên **PG 16+** (không có trên T-SQL); không `INTERVAL` trên T-SQL; không `{d}` trong `psql`.
 
 ---
 
 ## 15. Bẫy khi review
 
 - `'A' = 'a'` “đúng trên SSMS” (CI) — literal không chứng minh collation PG.
-- Thiếu `N` trên tiếng Việt / emoji.
-- `'\\n'` mong newline trên PG 19 (không, trừ `E'…'`).
+- Thiếu `N` trên tiếng Việt / emoji (SQL Server); hoặc dùng `N'abc'` trên PG khiến parser dịch thành `bpchar` (`char(n)`) dính trailing space.
+- `'\n'` mong newline trên PG 19 (không — đó là 2 ký tự `\` và `n`; cần `E'\n'`).
+- Quên dấu phẩy giữa hai chuỗi xuống dòng trong `IN ('a'\n'b')` trên PG → tự nối ngầm thành `IN ('ab')`.
 - `TIMESTAMP '…'` trong script “portable” — T-SQL đọc `timestamp` = rowversion.
 - `{d '…'}` trong file chạy `psql`.
-- `0x0A` dùng như số 10.
+- `0x0A` dùng như số 10 trên SQL Server (`varbinary`, còn PG 16+ là integer 10).
 - `TRUE` trong stored proc T-SQL.
-- `PREPARE` không kiểu; `COALESCE(NULL, NULL)`.
-- `SET DATEFORMAT` trong proc + literal `'01/02/03'`.
+- `PREPARE` không kiểu (PG); `COALESCE(NULL, NULL)` (SQL Server lỗi, PG ra `NULL::text`).
+- `SET DATEFORMAT` trong proc + literal `'01/02/03'` hoặc `'2026-09-13'` kiểu `datetime`.
 - Dollar-tag `$tag$` xuất hiện trong thân chuỗi (đóng sớm).
 - JSON `'{"a":1}'` gán cột `jsonb` qua parameter `text` không `::jsonb`.
 - `SELECT 7/2` “chứng minh” float vì literal viết `7.0` ở chỗ khác.
@@ -624,7 +644,6 @@ T2: INSERT blob VALUES ('SGVsbG8=');             -- nếu cột varbinary: conve
 - `BASE64 '…'` như typed literal (không tồn tại).
 - `json_array()` 0 hàng: `IS NULL` sau nâng 19.
 - `U&'\0041'` copy sang T-SQL; `UNISTR` copy sang PG.
-- `E'\u0041'` tưởng Unicode PG (phải `U&`).
 - Vector `'[…]'` gán cột `json` nhầm.
 
 ---
@@ -646,7 +665,8 @@ T2: INSERT blob VALUES ('SGVsbG8=');             -- nếu cột varbinary: conve
 | `DATE '…'` typed | ODBC `{d}` / `CAST` | lõi |
 | `INTERVAL '…'` | — | lõi |
 | `CURRENT_DATE` (hàm, không literal) | **2025** | lõi |
-| `0x` binary literal | lõi | dùng `bytea` `\x` |
+| `0x` literal | lõi (`varbinary`, không phải int) | **16+** integer literal (`0x`/`0o`/`0b`); binary dùng `'\x...'::bytea` |
+| Digit separator `1_000` | — | **16+** |
 | `\|\|` nối (không phải literal) | **2025** | lõi |
 
 Comment / batch / `GO`: [dialects.md](dialects.md). Keyword `TRUE`/`USER`: [keywords.md](keywords.md). Kiểu sau neo: [typesystem.md](typesystem.md).
@@ -696,13 +716,13 @@ Pattern tới `~` / `REGEXP_LIKE` đi qua **SQL literal trước**.
 
 ```sql
 -- PostgreSQL 19
-WHERE phone ~ '\d{3}';           -- '\' + 'd{3}' tới POSIX — \d thường vẫn là lớp chữ số POSIX
-WHERE phone ~ E'\\d{3}';         -- một '\' tới POSIX
-WHERE phone ~ $$\\d{3}$$;        -- dollar: hai ký tự \ d hay một \ ? — $$ \\d $$ = \ + \ + d
+WHERE phone ~ '\d{3}';           -- '\' + 'd{3}' tới POSIX — \d là lớp chữ số POSIX
+WHERE phone ~ E'\\d{3}';         -- một '\' tới POSIX (giống '\d{3}')
+WHERE phone ~ $$\d{3}$$;         -- dollar-quote không unescape: truyền đúng \d{3} cho POSIX ($$\\d{3}$$ gửi hai \)
 
 -- SQL Server 2025
 WHERE REGEXP_LIKE(phone, N'\d{3}');
-WHERE REGEXP_LIKE(phone, N'\\d{3}');   -- tùy engine regex: \\ là \ literal hay lỗi
+WHERE REGEXP_LIKE(phone, N'\\d{3}');   -- T-SQL không unescape \: gửi \\d{3} cho regex (khớp ký tự \ theo sau bởi ddd)
 ```
 
 Hai session — dump 18 `off` vs 19:

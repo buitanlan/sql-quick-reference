@@ -5,7 +5,7 @@
 
 Hai sản phẩm cùng nói “SQL”, cùng có page, WAL/log, buffer, statistics, replica — nhưng **không cùng máy**. Port schema rồi đo QPS mà không hiểu process model, visibility, vacuum vs ghost cleanup, tempdb vs `pgsql_tmp` là đoán mò. Mục tiêu: biết chỗ **cùng ý** (để chuyển khái niệm) và chỗ **cùng tên nhưng khác guarantee** (để không copy runbook).
 
-Delta phiên bản (TDS 8, `WAIT FOR`, optimized locking, …) gom **§20** — các mục 3–16 là kiến trúc bền, không changelog.
+Delta phiên bản (TDS 8, `WAIT FOR`, optimized locking, …) gom **§20** — các mục 3–19 là kiến trúc bền, không changelog.
 
 ---
 
@@ -75,7 +75,7 @@ Cùng bài toán: bền vững sau crash, cô lập người đọc/người ghi
 
 | Trục | SQL Server | PostgreSQL |
 |---|---|---|
-| Đơn vị chạy | Một process, nhiều thread (Windows/Linux) | Một postmaster + **process** (hoặc thread trên bản build thread) per backend |
+| Đơn vị chạy | Một process, nhiều thread (Windows/Linux) | Một postmaster + **process** per backend (PG 19 vẫn hoàn toàn process-based) |
 | Cập nhật hàng | Thường **in-place** + log + (tùy) version store | **Không** in-place: tuple mới + `xmax` trên bản cũ (MVCC) |
 | Reader mặc định | S lock (trừ RCSI) | Không row-lock trên `SELECT` thường |
 | Dọn bản cũ | Ghost cleanup / version store / ADR | `VACUUM` / autovacuum / `REPACK` |
@@ -96,7 +96,7 @@ Cùng bài toán: bền vững sau crash, cô lập người đọc/người ghi
 | Instance / cluster | Instance | Cluster (`PGDATA`) | Gần: một bộ nhớ + catalog |
 | Database | Database trong instance | Database trong cluster | **Khác:** SS query cross-DB; PG không |
 | Schema | Schema (`dbo`) | Schema + `search_path` | Gần |
-| Page | 8 KB (có thể 2–64 KB historically; 8 KB chuẩn) | 8 KB mặc định | Gần |
+| Page | 8 KB cố định (từ 7.0+; 64 KB là extent) | 8 KB mặc định (`BLCKSZ` 1–32 KB lúc biên dịch) | Gần |
 | Extent | 8 page | Không cùng khái niệm | Khác |
 | Filegroup | Filegroup | Tablespace | Gần (đặt file) |
 | Heap | Heap (không clustered) | Heap (mặc định mọi bảng) | **Khác:** SS thường clustered PK |
@@ -161,7 +161,7 @@ Hệ quả vận hành:
 
 Hệ quả:
 
-- Một backend crash thường không kéo cả cluster (còn lại reset shared memory theo rule).
+- Một backend crash bất thường (SIGSEGV/OOM) buộc `postmaster` gửi `SIGQUIT` ngắt **mọi backend khác**, reset shared memory và chạy crash recovery (không cô lập hoàn toàn như từng request web).
 - `max_connections` đắt: mỗi backend ~ vài MB. Connection pool (`PgBouncer`) gần như bắt buộc ở quy mô web.
 - `shared_buffers` (thường 25% RAM) + **page cache OS**. `effective_cache_size` chỉ gợi ý planner, không cấp phát.
 
@@ -169,9 +169,9 @@ Hệ quả:
 
 ### 3.3 Ghi chú
 
-SQL Server “một vòng đời memory” trong process. PostgreSQL “nhiều process, SysV/POSIX shm”. So `SET max server memory` với `shared_buffers` 1-1 là sai — PG còn OS cache.
+SQL Server “một vòng đời memory” trong process. PostgreSQL “nhiều process, SysV/POSIX shm”. So `sp_configure 'max server memory (MB)'` với `shared_buffers` 1-1 là sai — PG còn OS cache.
 
-PG 19: `io_min_workers` / `io_max_workers` tự scale I/O worker. SQL Server 2025: I/O vẫn trong SQLOS + parallel redo AG. Build PG thread-mode (nếu distro bật) đổi mô hình “một process một conn” — đối chiếu build, đừng giả định mọi 19 đều process.
+PG 19: `io_min_workers` / `io_max_workers` tự scale I/O worker; kiến trúc thực thi chính thức vẫn hoàn toàn **process-per-backend** (PG 19 chưa có thread-mode build). SQL Server 2025: I/O vẫn trong SQLOS + parallel redo AG.
 
 ### 3.4 Shared memory vs clerk
 
@@ -214,7 +214,7 @@ SS: scheduler per NUMA node; foreign page tốn. PG 19: I/O worker `io_min_worke
 
 Prepared statement: SQL Server `sp_prepare` / `sp_executesql` (2025 serialize compile — [routines.md](routines.md)). PostgreSQL `PREPARE` / unnamed extended query; generic vs custom plan (`plan_cache_mode`).
 
-**Kịch bản:** Nâng SS 2025, Agent + linked server + `bcp` cũ → TLS handshake fail. Không phải “query chậm”. PG: client dump 18 `standard_conforming_strings=off` restore 19 lệch escape — §20.
+**Kịch bản:** Nâng SS 2025, Agent + linked server + `bcp` cũ → TLS handshake fail. Không phải “query chậm”. PG: client dump 18 `standard_conforming_strings=off` restore 19 lệch escape — xem §16 & §24.
 
 ---
 
@@ -251,10 +251,11 @@ SQL Server: page thuộc extent (mixed/uniform), GAM/SGAM/PFS/IAM. Allocation bi
 PostgreSQL: FSM (free space map), VM (visibility map). VM đánh dấu all-visible → index-only scan bỏ heap. PG 19: **scan query** có thể đánh dấu all-visible (trước: VACUUM / `COPY FREEZE`).
 
 ```text
-Page 8 KB (cả hai, rút gọn)
-┌──────── header ────────┬── item ids ──┬──── tuples (từ cuối) ────┐
-│ LSN, checksum, …       │  off,len,…   │  [row] [row]   free     │
-└────────────────────────┴──────────────┴─────────────────────────┘
+PostgreSQL page (8 KB): item ids tăng từ đầu → free ← tuples tăng từ cuối
+┌─ header (24B) ─┬─ item ids (lp) → ─┬── free space ──┬─ ← tuples ─┬─ special ─┐
+
+SQL Server page (8 KB): data rows tăng từ đầu → free ← row offset (slot) array từ cuối
+┌─ header (96B) ─┬─ data rows → ─────┬── free space ──┬─ ← slot array (2B/slot) ─┐
 ```
 
 ### 6.2 Bảng vật lý
@@ -269,7 +270,7 @@ Hệ quả: “clustered index seek” trên SS là access path chính. Trên PG
 
 SQL Server: `.mdf`/`.ndf` + `.ldf`; filegroup; `tempdb` nhiều file. Instant file initialization (quyền SeManageVolume).
 
-PostgreSQL: `PGDATA/base/<oid>/`, WAL `pg_wal`, tablespace ngoài. Không “một file một bảng” trừ khi bạn nghĩ thế — mỗi fork (`_fsm`, `_vm`, TOAST) là file.
+PostgreSQL: `PGDATA/base/<oid>/`, WAL `pg_wal`, tablespace ngoài. Không “một file một bảng” trừ khi bạn nghĩ thế — mỗi fork (`_fsm`, `_vm`, TOAST) là file. Bảng lớn hơn **1 GB** được tách thành nhiều segment (`<relfilenode>`, `<relfilenode>.1`, `<relfilenode>.2`, …). Phân biệt **`oid`** (định danh logic bất biến trong `pg_class`) và **`relfilenode`** (tên file vật lý trên đĩa — đổi mới sau `TRUNCATE`, `VACUUM FULL`, `CLUSTER`, `REPACK`, `REINDEX`).
 
 ---
 
@@ -279,7 +280,7 @@ Giá trị lớn không nằm nguyên 8 KB.
 
 **PostgreSQL TOAST:** bảng toast riêng, nén (`pglz` / **`lz4` mặc định 19**), out-of-line. `bytea`/`jsonb`/`text` dài. `default_toast_compression`.
 
-**SQL Server:** `varchar(max)` / `varbinary(max)` / `nvarchar(max)` in-row đến ngưỡng rồi LOB page (`text/image` cũ deprecated). `json` 2025 binary ~2 GB/row (**GA**). Columnstore có LOB riêng; 2025 shrink CS cải thiện.
+**SQL Server:** tách rõ 3 allocation unit: `IN_ROW_DATA` (hàng vừa 8060 bytes), **`ROW_OVERFLOW_DATA`** (cột độ dài biến đổi như `varchar(n)`, `nvarchar(n)`, `varbinary(n)` vượt 8060 bytes — đẩy ra off-row để lại con trỏ 24 bytes), và **`LOB_DATA`** (`varchar(max)` / `nvarchar(max)` / `varbinary(max)`, `xml`, `json` 2025 binary ~2 GB/row **GA**, cùng `text/image` cũ deprecated). Columnstore có LOB riêng; 2025 shrink CS cải thiện.
 
 Cập nhật một key JSON lớn = rewrite giá trị (cả hai, trừ patch nhỏ khi engine hỗ trợ — `json.modify` GA). Chi tiết [json.md](json.md).
 
@@ -326,21 +327,21 @@ Slot logical / CES / mirroring **giữ** log không truncate — đầy đĩa. P
 
 PG 19: `WAIT FOR LSN` trên standby — [transactions.md](transactions.md) §11. SS: không có lệnh tương đương; sync AG commit hoặc retry đọc replica.
 
-**Kịch bản WAL đầy:** slot chết `restart_lsn` đứng yên → `pg_wal` phình → instance read-only / crash. SS: CES consumer lag → `log_reuse_wait` → `.ldf` phình. Cùng *ý*, hai catalog.
+**Kịch bản WAL đầy:** slot chết `restart_lsn` đứng yên → `pg_wal` phình → đầy đĩa gây **PANIC / crash instance** (PG không tự chuyển sang read-only). Phòng thủ bắt buộc bằng GUC **`max_slot_wal_keep_size`** (vượt ngưỡng sẽ invalidate slot thay vì làm sập primary). SS: CES consumer lag → `log_reuse_wait` → `.ldf` phình. Cùng *ý*, hai catalog.
 
 LSN không timeline trên `WAIT FOR` (docs 19) — cascade promote: số LSN trùng timeline khác có thể `success` giả. App DR phải biết timeline, không chỉ số.
 
 ### 8.1 Full page write vs VLF
 
-PG `full_page_writes`: sau checkpoint, lần sửa page đầu ghi cả page vào WAL (FPI) — chống torn page. I/O WAL tăng sau checkpoint. SS: torn page detection / checksum; VLF số lượng quá nhiều hoặc quá lớn = recovery/truncate kỳ cục — `DBCC LOGINFO` (thận trọng prod).
+PG `full_page_writes`: sau checkpoint, lần sửa page đầu ghi cả page vào WAL (FPI) — chống torn page. I/O WAL tăng sau checkpoint; bật **`wal_compression`** (`lz4` / `zstd`) để nén FPI, giảm mạnh dung lượng WAL và băng thông replication. SS: torn page detection / checksum; VLF quá nhiều hoặc quá lớn làm chậm recovery/truncate — kiểm tra bằng **`sys.dm_db_log_info`** / **`sys.dm_db_log_stats`** (thay cho `DBCC LOGINFO` cũ).
 
 ### 8.2 Delayed durability vs synchronous_commit=off
 
-Cả hai: `COMMIT` trả về trước flush bền. Crash mất txn đuôi. PG `WAIT FOR MODE primary_flush` (19) chờ flush trên primary — không bật sync cho mọi session. SS delayed durability database/table option — đọc Learn, không bịa tương tác AG.
+Cả hai: `COMMIT` trả về trước flush bền. Crash mất txn đuôi. PG `WAIT FOR MODE primary_flush` (19) chờ flush trên primary — không bật sync cho mọi session. SS delayed durability là tùy chọn cấp **database** (`DELAYED_DURABILITY = ALLOWED | FORCED`), **transaction** (`COMMIT ... WITH (DELAYED_DURABILITY = ON)`), hoặc khối **ATOMIC** (In-Memory OLTP) — **không có** option cấp bảng.
 
 ### 8.3 Logical decode giữ xmin
 
-Logical slot PG phải giữ tuple đủ decode → `xmin` horizon. 19 `retain_dead_tuples` + `max_retention_duration` — conflict resolution vs bloat. CES/CDC SS giữ **log**, không heap tuple theo xmin. Cùng “consumer chậm”, khác chỗ phình (WAL vs heap vs `.ldf`).
+Logical slot PG mặc định chỉ giữ **`catalog_xmin`** (chỉ chặn vacuum system catalog, **không** chặn vacuum bảng user thường) — chỉ giữ `xmin` bảng user khi physical standby bật `hot_standby_feedback = on` hoặc bật PG 19 `retain_dead_tuples` (+ `max_retention_duration` trên subscription) cho conflict resolution vs bloat. CES/CDC SS giữ **log**, không giữ heap tuple theo xmin. Cùng “consumer chậm”, khác chỗ phình (WAL vs catalog/heap vs `.ldf`).
 
 ---
 
@@ -350,7 +351,7 @@ Writer đưa page bẩn xuống đĩa; checkpoint thu hẹp recovery window.
 
 SQL Server: lazy writer, checkpoint, indirect checkpoint (recovery interval target). Buffer pool extension (SSD) tồn tại trên một số edition.
 
-PostgreSQL: `shared_buffers`, `bgwriter`, `checkpointer`, `backend_flush_after`. Nhiều đọc **không** qua `shared_buffers` đủ lớn → OS cache. `checkpoint_timeout`, `max_wal_size`.
+PostgreSQL: `shared_buffers`, `bgwriter`, `checkpointer`, `backend_flush_after`. Nhiều đọc **không** qua `shared_buffers` đủ lớn → OS cache. `checkpoint_timeout`, `max_wal_size`, và **`checkpoint_completion_target`** (mặc định `0.9` — dàn đều ghi dirty page gần hết chu kỳ checkpoint để tránh I/O spike).
 
 ```text
 Checkpoint quá thưa: crash recovery dài (WAL nhiều).
@@ -401,7 +402,7 @@ PostgreSQL heap sau UPDATE (một hàng, hai phiên bản)
 
 **SQL Server (RCSI off):** in-place (đại thể) + lock. Reader S, writer X. `READ COMMITTED` nhả S sớm.
 
-**SQL Server RCSI/SI:** version store (tempdb hoặc ADR PVS) cho reader — gần *ý* MVCC nhưng version **tách** khỏi hàng hiện tại, không phải heap đầy tuple cũ như PG.
+**SQL Server RCSI/SI:** version store (tempdb hoặc ADR PVS) cho reader — gần *ý* MVCC nhưng version **tách** khỏi hàng hiện tại, không phải heap đầy tuple cũ như PG. Khi bật RCSI/SI, mỗi hàng bị sửa sẽ gắn thêm **14-byte row versioning overhead** (sequence number + con trỏ về version store), dễ gây **page split** trên B-tree đang đầy (fillfactor cao) và tăng nhẹ kích thước trang.
 
 ```text
 SQL Server RCSI
@@ -420,13 +421,13 @@ Hệ quả thiết kế:
 
 Optimized locking **2025** (TID + LAQ): giảm lock memory, không biến SS thành PG MVCC. [concurrency.md](concurrency.md) §4.
 
-**Kịch bản write skew:** hai bác sĩ off-call — RR cả hai engine *có thể* để 0 người trực; PG SSI abort `40001`; SS serializable range *có thể* chặn. Không “bật RCSI là xong”. [transactions.md](transactions.md) §6.
+**Kịch bản write skew:** hai bác sĩ off-call (`UPDATE` 2 hàng sẵn có) — PG `REPEATABLE READ` và SQL Server `SNAPSHOT` **để lọt 0 người trực** (snapshot isolation không chặn write skew); riêng SQL Server `REPEATABLE READ` giữ S lock trên các hàng đã đọc đến cuối txn nên khi 2 bên cùng xin X lock sẽ gây **deadlock (1205)** thay vì để 0 người trực. PG `SERIALIZABLE` (SSI) abort `40001`; SQL Server `SERIALIZABLE` chặn bằng S/key-range lock (có thể deadlock 1205). Không “bật RCSI là xong”. [transactions.md](transactions.md) §6.
 
 ### 10.1 Snapshot xmin vs version store size
 
 ```text
-PG: SELECT backend_xmin FROM pg_stat_activity;
-    xmin horizon = min(backend_xmin, slot xmin, prepared)
+PG: SELECT backend_xmin, backend_xid FROM pg_stat_activity;
+    xmin horizon = min(backend_xmin, backend_xid, slot xmin, prepared xact)
     VACUUM freeze vs wraparound — 19 cảnh báo sớm hơn (100 triệu xid)
 
 SS: version store sys.dm_tran_version_store_space_usage
@@ -438,7 +439,7 @@ Long query báo cáo: PG giữ snapshot cả statement (RC) hoặc cả txn (RR)
 
 ### 10.2 HOT vs in-place
 
-PG HOT: update không đụng cột index, còn chỗ page → bản mới cùng page, index không sửa. Hết chỗ = heap tuple mới + dead. Fillfactor thấp tăng HOT, giảm mật độ đọc.
+PG HOT: update không đụng cột index và còn chỗ trong **cùng page** → **vẫn tạo heap tuple mới và để lại dead tuple cũ** trên page đó (nối chuỗi HOT chain để **không phải thêm index entry mới**, dọn nhẹ bằng page pruning). Hết chỗ cùng page → cấp tuple ở page khác và cập nhật mọi index (non-HOT). Fillfactor thấp tăng tỷ lệ HOT, đánh đổi mật độ đọc.
 
 SS in-place: vừa chỗ thì sửa tại chỗ; không vừa → forwarded record (heap) hoặc page split (B-tree). Ghost record sau delete — cleanup task, không xmin wraparound.
 
@@ -450,24 +451,24 @@ SS in-place: vừa chỗ thì sửa tại chỗ; không vừa → forwarded reco
 |---|---|---|
 | Xóa logic | Ghost record + ghost cleanup task | Dead tuple + `VACUUM` |
 | Thu hồi chỗ | Reuse sau cleanup; `REBUILD` gọn | VACUUM freeze + FSM; `REPACK` rewrite |
-| Wraparound | — (log/LSN khác) | **XID wraparound** — vacuum bắt buộc |
+| Wraparound | — (log/LSN khác) | **XID wraparound** & **MultiXact (`mxid`) wraparound** — vacuum bắt buộc |
 | Online compact | `REORGANIZE` / `REBUILD ONLINE` | `REPACK (CONCURRENTLY)` **19** |
 
 Autovacuum 19: **parallel** index, **scoring** (`pg_stat_autovacuum_scores`). Parallel AV lấy `SHARE UPDATE EXCLUSIVE` — không chặn DML thường, vẫn đợi/`ACCESS EXCLUSIVE` DDL, tranh I/O. [concurrency.md](concurrency.md) §13. SQL Server: ghost cleanup không có “score table” tương đương; stats update theo ngưỡng modification.
 
-Long `idle in transaction` (PG) giữ `xmin` horizon → **cả cluster** không vacuum được một số tuple. SS: open tran giữ log reuse + (RCSI) version store.
+Long `idle in transaction` (PG) giữ `xmin` horizon → **database hiện tại** và **shared catalogs** (từ PG 14+ horizon tính riêng theo từng DB, không chặn mù toàn cluster) không vacuum được tuple mới hơn horizon. Ngoài XID wraparound, workload dùng nhiều `FOR KEY SHARE` / `FOR SHARE` / FK đồng thời còn phải theo dõi **MultiXact (`mxid`) wraparound** (`mxid_age(datminmxid)`, `autovacuum_multixact_freeze_max_age`). SS: open tran giữ log reuse + (RCSI) version store.
 
 `VACUUM FULL` / `REPACK` ≈ `ALTER TABLE REBUILD` về mặt “viết lại file”, không ≈ `REORGANIZE` (leaf defrag). [indexes.md](indexes.md) §10.
 
-**Kịch bản bloat:** replica slot `xmin` đứng + `idle in transaction` 6 giờ → bảng 20 GB dead. `VACUUM` chạy, 0 pages cắt. Sửa horizon (kill idle, drop slot chết), không `REPACK` trước. Cảnh báo wraparound 19: 100 triệu xid (trước 40 triệu).
+**Kịch bản bloat:** physical slot bật `hot_standby_feedback` / logical slot bật `retain_dead_tuples` giữ `xmin` đứng (lưu ý logical slot mặc định chỉ giữ `catalog_xmin`, không chặn vacuum bảng user thường) hoặc `idle in transaction` 6 giờ → bảng 20 GB dead. `VACUUM` chạy, 0 dead tuple dọn được. Sửa horizon trước (kill idle, xử lý slot kẹt), rồi mới `VACUUM` / `REPACK`. Cảnh báo wraparound 19: 100 triệu xid (trước 40 triệu).
 
 ---
 
 ## 12. Temp: tempdb vs pgsql_tmp
 
-**SQL Server `tempdb`:** database thật — table `#`, spilled sort/hash, version store (RCSI), snapshot. Cấu hình số file, ADR **2025**, **space resource governor** (lỗi **1138**). Tranh `tempdb` là incident cổ điển. RG Standard 2025. Linux: tmpfs.
+**SQL Server `tempdb`:** database thật — table `#`, spilled sort/hash, version store (RCSI), snapshot. Cấu hình nhiều data file, ADR **2025**, **space resource governor** (lỗi **1138**). Tranh `tempdb` (allocation PFS/GAM/SGAM và metadata system table) là incident cổ điển — từ **2019+** có **Memory-Optimized TempDB Metadata** chuyển metadata hệ thống sang In-Memory OLTP để triệt tiêu latch contention khi tạo/xóa `#temp` tốc độ cao. RG Standard 2025. Linux: tmpfs.
 
-**PostgreSQL:** sort/hash spill → file trong `base/pgsql_tmp` (hoặc tablespace temp). `CREATE TEMP TABLE` = heap trong schema `pg_temp_NN`, biến mất cuối session/txn (`ON COMMIT`). Không có “một tempdb” để gắn 8 file giống SS — nhưng disk đầy vì spill vẫn chết.
+**PostgreSQL:** sort/hash spill → file trong `base/pgsql_tmp` (hoặc tablespace temp). `CREATE TEMP TABLE` = heap trong schema `pg_temp_NN`, biến mất cuối session/txn (`ON COMMIT`), đọc/ghi qua bộ đệm riêng per-backend **`temp_buffers`** (không qua `shared_buffers`, không sinh WAL). Bẫy thực chiến: tạo/xóa `TEMP TABLE` liên tục trong hàng nghìn giao dịch ngắn gây **catalog bloat** nặng trên `pg_class`/`pg_attribute`/`pg_depend` (PG không cache bảng tạm như SS `#temp`). Không có “một tempdb” để gắn 8 file giống SS — nhưng disk đầy vì spill vẫn chết.
 
 ```text
 SS:  mọi spill / #temp / version  →  một DB tempdb  →  dễ đo, dễ tranh
@@ -529,7 +530,7 @@ AG (rút gọn)
 - **Streaming physical:** WAL, hot standby, sync replica (`synchronous_standby_names`).
 - **Logical:** publication/subscription. **19:** sequence sync (`ALL SEQUENCES`, `REFRESH SEQUENCES`), `wal_level=replica` bật logical không restart, `WAIT FOR LSN`, `CREATE SUBSCRIPTION … SERVER`.
 - Ecosystem: Patroni, repmgr, CloudNativePG — **không** trong core như AG wizard.
-- Slot giữ WAL + xmin. `retain_dead_tuples` + `max_retention_duration` 19.
+- Slot giữ WAL (và `catalog_xmin`; chỉ giữ `xmin` bảng user khi bật `hot_standby_feedback` trên physical standby hoặc `retain_dead_tuples` + `max_retention_duration` 19 trên logical sub).
 
 ```text
 Physical streaming
@@ -542,7 +543,7 @@ Physical streaming
 Logical
 
   Decoding → slot → subscriber apply
-  Slot đứng = WAL + xmin horizon (bloat cluster)
+  Slot đứng = WAL phình + catalog_xmin (chỉ bloat bảng user nếu bật retain_dead_tuples)
 ```
 
 ### 15.3 Ánh xạ sai thường gặp
@@ -563,7 +564,7 @@ Logical
 
 ```text
 SQL Server
-  1. Khởi động: đọc log từ last checkpoint (ADR: sLRU + PVS rút ngắn undo)
+  1. Khởi động: đọc log từ last checkpoint (ADR: sLog + PVS rút ngắn undo)
   2. Redo committed; undo uncommitted (ADR: không quét log cũ như trước)
   3. Tempdb ADR 2025: txn #temp rollback nhanh, log truncate
   4. AG: parallel redo; 2025 async page request khi recovery failover
@@ -601,7 +602,7 @@ Readable secondary SS: redo còn áp, query đọc version/snapshot replica — 
 
 SQL Server: FULL/DIFF/LOG; copy-only; **2025 full/diff trên secondary**; URL immutable blob; managed identity Arc; **ZSTD**. Recovery model SIMPLE không backup log.
 
-PostgreSQL: `pg_basebackup`, `pg_dump`/`pg_dumpall`, WAL archive, `pg_verifybackup`. Incremental (18+ tooling). Point-in-time = base + WAL. Dump logic ≠ physical.
+PostgreSQL: `pg_basebackup`, `pg_dump`/`pg_dumpall`, WAL archive, `pg_verifybackup`. Incremental backup native từ **PG 17+** (`pg_basebackup --incremental` + `pg_combinebackup` + `summarize_wal = on`). Point-in-time = base + WAL. Dump logic ≠ physical.
 
 Nâng major PG: `pg_upgrade` hoặc dump. SS: setup.exe in-place + compat.
 
@@ -707,7 +708,7 @@ Không phải “cái nào mạnh hơn”. Gợi ý kiến trúc:
 - `NOLOCK` trên PG (không có).
 - `BEGIN` T-SQL = mở txn.
 - So `shared_buffers` với max server memory 1-1.
-- AG sync = `synchronous_commit=off` “cho nhanh”.
+- Đánh đồng AG sync với tắt bền vững, hoặc bật `synchronous_commit = off` / delayed durability “cho nhanh” mà bỏ qua rủi ro mất giao dịch đuôi khi crash.
 - `VACUUM` mỗi đêm = `REORGANIZE`.
 - Cross-db query port sang PG không FDW.
 - CES + mirroring + CDC cùng bảng không đo log.
@@ -754,13 +755,18 @@ Cú pháp: [select.md](select.md), [dml.md](dml.md), [ddl.md](ddl.md), [json.md]
 
 ```text
 Thời gian →
-  checkpoint     checkpoint      crash
+  checkpoint 1   checkpoint 2    crash
       │              │              │
- SS:  └─ redo ───────┴──────────────┤ undo uncommitted (ADR rút)
- PG:  └─ replay WAL ────────────────┤ clog + xmax; không undo log riêng
+ SS:                 └─ redo ───────┤ undo uncommitted (ADR rút)
+ PG:                 └─ replay WAL ─┤ clog + xmax; không undo log riêng
 
-RPO: SS FULL = last log backup; SIMPLE = last checkpoint (mất sau đó)
-     PG = last WAL archived + base backup
+RPO khi crash (còn đĩa log/WAL):
+  SS FULL/SIMPLE = 0 (nếu không bật delayed durability)
+  PG             = 0 (nếu synchronous_commit = on)
+RPO khi mất đĩa (phải restore từ backup):
+  SS FULL   = bản LOG backup gần nhất (PITR)
+  SS SIMPLE = bản FULL/DIFF backup gần nhất (không có log backup)
+  PG        = base backup + WAL archived gần nhất (PITR)
 ```
 
 Đo recovery: SS `recovery interval` / indirect checkpoint. PG `checkpoint_timeout` + `max_wal_size` + FPI. Giảm window ≠ tắt durable.
@@ -769,7 +775,7 @@ RPO: SS FULL = last log backup; SIMPLE = last checkpoint (mất sau đó)
 
 ## Phụ lục C. `ctid` / RID không ổn định
 
-PG `ctid` đổi sau `VACUUM FULL`/`REPACK`/update không HOT. Không khóa FK bằng ctid. SS RID heap đổi sau rebuild/forward. Clustered key SS ổn định hơn RID — vẫn đổi nếu rebuild CX đổi khóa.
+PG `ctid` đổi sau **MỌI `UPDATE` kể cả HOT update** (vì HOT vẫn tạo tuple mới với offset mới trong cùng page), cũng như sau `VACUUM FULL` / `REPACK` / `CLUSTER`. Không dùng `ctid` làm khóa lâu dài hay khóa FK. SS RID heap đổi sau rebuild/forward. Clustered key SS ổn định hơn RID — vẫn đổi nếu cập nhật giá trị khóa clustered.
 
 System column `xmin` không index UNIQUE nghiệp vụ. `COPY FROM WHERE xmin` **cấm** 19.
 
@@ -807,22 +813,6 @@ Ghost SS: không score table; REBUILD ≠ VACUUM
 ```
 
 Scan 19 đánh dấu all-visible: index-only rẻ hơn, không thay freeze.
-
-Version deltas (TDS 8, WAIT FOR, TID/LAQ, JSON 2025 GA, `json_array` `[]`) nằm **§20** và file chủ đề — không nhét what's-new vào sơ đồ process/WAL. Review kiến trúc: process, WAL, visibility, HA, temp — rồi mới cổng phiên bản.
-
-Process: SS một `sqlservr`; PG postmaster + backend. WAL: `.ldf`/VLF vs `pg_wal`. Visibility: RCSI/PVS vs heap xmax. HA: AG listener vs streaming + slot + `WAIT FOR LSN`. Temp: tempdb 1138 vs `pgsql_tmp`. Pool bắt buộc phía PG; SS implicit tran vẫn cần `COMMIT`.
-
-```text
-Client ── protocol (TDS 8 / libpq) ── parser ── rewriter ── planner ── executor
-                                              │
-                                    buffer / WAL / heap
-                                              │
-                         replica: AG redo  |  PG replay + WAIT FOR (19)
-```
-
-Crash: SS redo + undo (ADR rút); PG replay WAL, visibility bằng clog/xmax. Đừng copy runbook recovery 1-1.
-
-Connection storm: SS `THREADPOOL` / PBKDF2; PG `max_connections` + `work_mem` × backend. Replica: SS không `WAIT FOR LSN`; PG 19 `WAIT FOR LSN … MODE standby_replay` top-level, isolation ≤ RC. Slot/CES/mirroring: log reuse — [concurrency.md](concurrency.md).
 
 ---
 

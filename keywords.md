@@ -3,7 +3,7 @@
 > **Baseline:** SQL Server **2025** · PostgreSQL **19** (GA 19/11/2026).<br>
 > Reserved word ≠ keyword. Unquoted identifier trùng reserved → lỗi parse. Danh sách **không** giống nhau giữa hai engine.
 
-Từ khóa SQL là tín hiệu cho parser, không phải API gọi được. File này **không** liệt kê hết reserved word (xem catalog / Learn). Mỗi nhóm quan trọng: mục đích → ví dụ hai dialect → ghi chú / version. Identifier hay đụng: §20. Quy ước quote: [dialects.md](dialects.md).
+Từ khóa SQL là tín hiệu cho parser, không phải API gọi được. File này **không** liệt kê hết reserved word (xem catalog / Learn). Mỗi nhóm quan trọng: mục đích → ví dụ hai dialect → ghi chú / version. Identifier hay đụng: §18. Quy ước quote: [dialects.md](dialects.md).
 
 PostgreSQL 19 GA (19/11/2026) giữ `REPACK`, `WAIT FOR`, `ON CONFLICT DO SELECT` và window `IGNORE NULLS`. SQL Server 2025: kiểu `vector`, `CURRENT_DATE`, JSON, và fuzzy (`EDIT_DISTANCE` / `JARO_WINKLER_*` từ **CU11**) là GA. Vector index, `VECTOR_SEARCH`, half-precision vector và CES còn **PREVIEW**.
 
@@ -22,25 +22,23 @@ PostgreSQL 19 GA (19/11/2026) giữ `REPACK`, `WAIT FOR`, `ON CONFLICT DO SELECT
 - [9. `REPACK` (PostgreSQL 19)](#9-repack-postgresql-19)
 - [10. `BEGIN` / giao dịch / `WAIT FOR`](#10-begin--giao-dịch--wait-for)
   - [`WAITFOR` vs `WAIT FOR`](#waitfor-vs-wait-for)
-- [13. DDL: `CREATE` / `ALTER` / `DROP`](#13-ddl-create--alter--drop)
-- [14. Constraint](#14-constraint)
-- [15. Window: `OVER` / `FILTER` / `IGNORE NULLS`](#15-window-over--filter--ignore-nulls)
-- [15. Điều khiển luồng](#15-điều-khiển-luồng)
-- [18. `GRANT` / `REVOKE` / `DENY`](#18-grant--revoke--deny)
-- [19. SQL Server 2025 — built-in mới](#19-sql-server-2025--built-in-mới)
-- [20. PostgreSQL 19 — clause mới](#20-postgresql-19--clause-mới)
-- [21. Hay đụng identifier](#21-hay-đụng-identifier)
-- [22. Hai session — ví dụ làm việc](#22-hai-session--ví-dụ-làm-việc)
-  - [22.1 `BEGIN` port](#221-begin-port)
-  - [22.2 `WAITFOR` vs `WAIT FOR`](#222-waitfor-vs-wait-for)
-  - [22.3 `CURRENT_DATE` đụng cột](#223-current_date-đụng-cột)
-  - [22.4 `DO SELECT` vs `DO UPDATE`](#224-do-select-vs-do-update)
-  - [22.5 Thêm cột khi GROUP BY](#225-thêm-cột-khi-group-by)
-  - [22.6 Sửa khoảng application-time](#226-sửa-khoảng-application-time)
-  - [22.7 `VECTOR` identifier vs type](#227-vector-identifier-vs-type)
-- [23. Best practices & checklist](#23-best-practices--checklist)
-- [24. Bẫy khi review](#24-bẫy-khi-review)
-- [25. Version gates](#25-version-gates)
+- [11. DDL: `CREATE` / `ALTER` / `DROP`](#11-ddl-create--alter--drop)
+- [12. Constraint](#12-constraint)
+- [13. Window: `OVER` / `FILTER` / `IGNORE NULLS`](#13-window-over--filter--ignore-nulls)
+- [14. Điều khiển luồng](#14-điều-khiển-luồng)
+- [15. `GRANT` / `REVOKE` / `DENY`](#15-grant--revoke--deny)
+- [16. SQL Server 2025 — built-in mới](#16-sql-server-2025--built-in-mới)
+- [17. PostgreSQL 19 — clause mới](#17-postgresql-19--clause-mới)
+- [18. Hay đụng identifier](#18-hay-đụng-identifier)
+- [19. Hai session — ví dụ làm việc](#19-hai-session--ví-dụ-làm-việc)
+  - [19.1 `BEGIN` port](#191-begin-port)
+  - [19.2 `WAITFOR` vs `WAIT FOR`](#192-waitfor-vs-wait-for)
+  - [19.3 `CURRENT_DATE` đụng cột](#193-current_date-đụng-cột)
+  - [19.4 `DO SELECT` vs `DO UPDATE`](#194-do-select-vs-do-update)
+  - [19.5 `VECTOR` identifier vs type](#195-vector-identifier-vs-type)
+- [20. Best practices & checklist](#20-best-practices--checklist)
+- [21. Bẫy khi review](#21-bẫy-khi-review)
+- [22. Version gates](#22-version-gates)
 - [Phụ lục A. Keyword vs hàm vs kiểu — cùng chữ](#phụ-lục-a-keyword-vs-hàm-vs-kiểu--cùng-chữ)
 - [Phụ lục B. `ON CONFLICT DO SELECT` — keyword path](#phụ-lục-b-on-conflict-do-select--keyword-path)
 - [Phụ lục C. `REPACK` vs `VACUUM` vs `CLUSTER` — token](#phụ-lục-c-repack-vs-vacuum-vs-cluster--token)
@@ -53,12 +51,19 @@ PostgreSQL 19 GA (19/11/2026) giữ `REPACK`, `WAIT FOR`, `ON CONFLICT DO SELECT
 - **Reserved:** không dùng làm identifier trừ khi quote (`"order"`, `[order]`).
 - **Unreserved / contextual:** keyword chỉ ở vị trí nhất định (`name`, `value`, `type` trên PostgreSQL; `VALUE` trong `JSON_OBJECTAGG`).
 - Danh sách lệch: `USER`, `OFFSET`, `WINDOW`, `FILTER`, `OUTPUT`, `APPLY`, `TOP`, `LIMIT`, `VECTOR`, `REPACK`, `MATCH`.
-- Tra cứu: PostgreSQL `SELECT * FROM pg_get_keywords();` (`reserved` / `unreserved`). SQL Server: *Reserved Keywords (Transact-SQL)* trên Learn — không có view đầy đủ tương đương.
+- Tra cứu: PostgreSQL `SELECT word, catcode, catdesc FROM pg_get_keywords();` phân **4 mức `catcode`**:
+  - `U` (*unreserved*): dùng tự do làm tên bảng/cột/hàm/kiểu không cần quote (vd `name`, `value`).
+  - `C` (*unreserved, cannot be function or type*): dùng làm tên bảng/cột được, nhưng không làm tên hàm/kiểu (vd `int`, `coalesce`).
+  - `T` (*reserved, can be function or type*): không làm tên bảng/cột unquoted, nhưng dùng được làm tên hàm/kiểu (vd `join`, `like`, `is`).
+  - `R` (*reserved*): cấm hoàn toàn khi không quote (vd `select`, `order`, `user`).
+- SQL Server: tra *Reserved Keywords (Transact-SQL)* trên Learn — không có catalog view đầy đủ tương đương.
 
 ```sql
-SELECT * FROM "order";
-SELECT * FROM [order];                   -- SQL Server
+SELECT * FROM "order";                   -- PG; SQL Server chỉ chạy khi QUOTED_IDENTIFIER ON
+SELECT * FROM [order];                   -- SQL Server: luôn là identifier kể cả QUOTED_IDENTIFIER OFF
 ```
+
+**Ảnh hưởng `QUOTED_IDENTIFIER` trên SQL Server:** Khi `SET QUOTED_IDENTIFIER ON` (mặc định ở SSMS/driver hiện đại và bắt buộc cho indexed view, filtered index, index trên computed column, XML/JSON), `"order"` là identifier chuẩn ANSI. Khi `OFF`, `"order"` bị parse thành **string literal** — chỉ `[order]` luôn an toàn bất kể session setting.
 
 Quote cả đời vì tên `user` “chạy được” hôm nay — schema dump, ORM, graph query dễ gãy. Đổi tên (`app_user`) tốt hơn quote.
 
@@ -84,10 +89,10 @@ TABLE orders LIMIT 5;
 
 **Ghi chú:**
 
-- `SELECT` không `ORDER BY` → thứ tự không xác định. `DISTINCT` + `ORDER BY` cột không nằm trong list: SQL Server chặt; PG cho phép trong một số case — đừng dựa.
+- `SELECT` không `ORDER BY` → thứ tự không xác định. `DISTINCT` + `ORDER BY`: cả SQL Server lẫn PostgreSQL đều cấm sắp theo cột không nằm trong `SELECT DISTINCT` list (PostgreSQL chỉ cho biểu thức tính từ cột có sẵn trong list, hoặc dùng `DISTINCT ON`).
 - `SELECT @v = col FROM t` T-SQL gán biến (không xác định nếu nhiều hàng) — khác `SELECT` trả result set.
 - Alias `SELECT` không dùng trong `WHERE` cùng mức.
-- `ON CONFLICT DO SELECT` **không** bắt đầu bằng `SELECT` — clause của `INSERT` (§20, [dml.md](dml.md)).
+- `ON CONFLICT DO SELECT` **không** bắt đầu bằng `SELECT` — clause của `INSERT` (§17, [dml.md](dml.md)).
 
 ---
 
@@ -96,11 +101,13 @@ TABLE orders LIMIT 5;
 - **Mục đích:** Đặt tên subquery; `RECURSIVE` duyệt đồ thị/cây. Trên T-SQL, `WITH` còn là table hint (`WITH (NOLOCK)`) và XML — **không** cùng ngữ nghĩa.
 
 ```sql
+-- SQL Server: đặt ; trước WITH nếu statement trước trong batch thiếu ;
 ; WITH cte AS (
     SELECT id FROM orders WHERE status = 'open'
 )
 SELECT * FROM cte;
 
+-- PostgreSQL: bắt buộc từ khóa RECURSIVE (SQL Server bỏ chữ RECURSIVE)
 WITH RECURSIVE walk AS (
     SELECT id, parent_id FROM nodes WHERE parent_id IS NULL
     UNION ALL
@@ -113,7 +120,7 @@ SELECT * FROM walk;
 
 - `;` trước `WITH` trên T-SQL nếu statement trước thiếu terminator — [dialects.md](dialects.md).
 - Hint `FROM dbo.T WITH (UPDLOCK)` không phải CTE.
-- `WITH` XML (`FOR XML`) / `WITH` JSON (`FOR JSON`) SQL Server — [json.md](json.md).
+- `WITH` trong XML/JSON trên SQL Server: `WITH XMLNAMESPACES (...)` (khai báo namespace XML) và `OPENJSON(...) WITH (...)` (khai báo schema cột JSON) — [json.md](json.md).
 - CTE không phải temp table: tối ưu có thể inline; `MATERIALIZED` / `NOT MATERIALIZED` PostgreSQL (12+) gợi ý.
 
 Chi tiết: [cte-subqueries.md](cte-subqueries.md).
@@ -168,21 +175,24 @@ WHEN NOT MATCHED BY SOURCE THEN
     DELETE
 OUTPUT inserted.Sku, $action;
 
--- PostgreSQL 15+
+-- PostgreSQL 15+ (WHEN NOT MATCHED BY SOURCE & RETURNING merge_action(): 17+)
 MERGE INTO stock AS t
 USING staging AS s
 ON t.sku = s.sku
 WHEN MATCHED THEN
     UPDATE SET qty = s.qty
 WHEN NOT MATCHED THEN
-    INSERT (sku, qty) VALUES (s.sku, s.qty);
+    INSERT (sku, qty) VALUES (s.sku, s.qty)
+WHEN NOT MATCHED BY SOURCE THEN
+    DELETE
+RETURNING merge_action(), t.sku;
 ```
 
 **Ghi chú:**
 
-- Upsert một hàng PG thường `INSERT … ON CONFLICT` rõ hơn `MERGE`. PG 19: `ON CONFLICT DO SELECT` — §20, [dml.md](dml.md).
+- Upsert một hàng PG thường `INSERT … ON CONFLICT` rõ hơn `MERGE`. PG 19: `ON CONFLICT DO SELECT` — §17, [dml.md](dml.md).
 - SQL Server `MERGE` cần `;` kết thúc. Race: vẫn cần khóa / `HOLDLOCK` cho invariant — [transactions.md](transactions.md).
-- `WHEN NOT MATCHED BY SOURCE` chủ yếu T-SQL.
+- PostgreSQL **17+** đã hỗ trợ đầy đủ `WHEN NOT MATCHED BY SOURCE` và `RETURNING merge_action()` (bản PG 15–16 chưa có).
 - `MATCHED` trong `MERGE` là nhánh DML, không phải từ khóa graph.
 
 ---
@@ -193,22 +203,22 @@ WHEN NOT MATCHED THEN
 INSERT INTO orders (customer_id, total) VALUES (1, 99.50);
 INSERT INTO orders (customer_id, total) SELECT id, 0 FROM customers;
 
--- SQL Server UPDATE…FROM
+-- SQL Server UPDATE…FROM (non-deterministic nếu một hàng đích khớp nhiều hàng nguồn)
 UPDATE o SET o.total = o.total * 1.1
 FROM dbo.Orders AS o
 JOIN dbo.Customers AS c ON c.Id = o.CustomerId;
 
--- PostgreSQL UPDATE…FROM (fan-out không xác định nếu nhiều hàng khớp)
+-- PostgreSQL UPDATE…FROM (cũng non-deterministic khi nhiều khớp; KHÔNG lặp bảng đích trong FROM)
 UPDATE orders o
 SET total = total * 1.1
 FROM customers c
 WHERE c.id = o.customer_id;
 
 DELETE FROM orders WHERE id = 1;
-TRUNCATE TABLE orders;                   -- DDL-ish: PG transactional; SQL Server deallocated pages, quyền khác DELETE
+TRUNCATE TABLE orders;                   -- cả hai đều transactional (rollback được); quyền/FK/IDENTITY khác DELETE
 ```
 
-**Ghi chú:** `TRUNCATE` SQL Server không fire DELETE trigger (mặc định), reset IDENTITY; PG `TRUNCATE … CASCADE` FK. Không port mù. Chi tiết [dml.md](dml.md).
+**Ghi chú:** `TRUNCATE` trên SQL Server **vẫn nằm trong transaction** (rollback được), **không bao giờ** fire `DELETE` trigger, reset `IDENTITY`, yêu cầu quyền `ALTER` và bị chặn nếu có FK trỏ vào; PostgreSQL có `TRUNCATE … CASCADE` / `RESTART IDENTITY` và chỉ fire `TRUNCATE` trigger (không fire `DELETE` trigger). Không port mù. Chi tiết [dml.md](dml.md).
 
 
 `INSERT … ON CONFLICT DO SELECT` 19: keyword `DO` + `SELECT` sau conflict — không phải statement `SELECT` độc lập.
@@ -224,8 +234,9 @@ Cùng ý: trả hàng ảnh hưởng. **Không** copy tên clause.
 INSERT INTO orders (customer_id, total) VALUES (1, 10)
 RETURNING id, created_at;
 
+-- PostgreSQL 18+: tham chiếu tường minh OLD / NEW trong RETURNING
 UPDATE orders SET total = total + 1 WHERE id = 1
-RETURNING *;
+RETURNING OLD.total AS prev_total, NEW.total AS curr_total;
 
 -- SQL Server
 INSERT INTO dbo.Orders (CustomerId, Total)
@@ -237,11 +248,15 @@ OUTPUT deleted.Id
 WHERE Id = 1;
 ```
 
+| Khác biệt | SQL Server `OUTPUT` | PostgreSQL `RETURNING` |
+|---|---|---|
+| Bảng có trigger | **Lỗi 334** nếu không có `INTO` — bắt buộc `OUTPUT … INTO @t` | Trả trực tiếp bình thường, không cần `INTO` |
+| Thời điểm quan sát | Thấy giá trị trước `AFTER`/`INSTEAD OF` trigger (không thấy sửa đổi của trigger) | Thấy hàng **sau** `BEFORE` trigger, trước `AFTER` trigger |
+| Giá trị cũ & mới | `deleted.*` / `inserted.*` | **PG 18+**: `OLD.*` / `NEW.*` (trước 18 chỉ thấy giá trị sau `UPDATE`/trước `DELETE`) |
+
 **Ghi chú:**
 
-- `OUTPUT` T-SQL vào table: `OUTPUT … INTO @t`. Trigger + `OUTPUT` ngữ nghĩa phức tạp (hàng `inserted` vs trigger).
-- `RETURNING` PG thấy hàng **sau** BEFORE trigger, trước AFTER — đọc docs khi trigger sửa cột.
-- `OUTPUT` không dùng được mọi hint/scenario (view, trigger) giống `RETURNING`.
+- `OUTPUT` T-SQL đổ vào bảng/biến bảng: `OUTPUT … INTO @t`; có giới hạn với view/FK/trigger giống nhau không tương đương 1-1 với `RETURNING` — chi tiết [dml.md](dml.md).
 - `DO SELECT … RETURNING` 19: trả hàng **đã có** (conflict), không hàng mới insert.
 
 ---
@@ -332,7 +347,7 @@ WAITFOR TIME '23:00';
 
 -- PostgreSQL 19 (standby): chờ LSN — read-your-writes
 -- Primary, sau COMMIT
-SELECT pg_current_wal_insert_lsn();   -- ví dụ 0/306EE20
+SELECT pg_current_wal_lsn();          -- ví dụ 0/306EE20
 
 -- Standby (top-level, isolation ≤ READ COMMITTED)
 WAIT FOR LSN '0/306EE20';
@@ -349,7 +364,7 @@ SQL Server AG: không `WAIT FOR` LSN. Sync commit đắt; async = stale read.
 
 ---
 
-## 13. DDL: `CREATE` / `ALTER` / `DROP`
+## 11. DDL: `CREATE` / `ALTER` / `DROP`
 
 ```sql
 CREATE TABLE t (id int PRIMARY KEY);
@@ -366,9 +381,9 @@ Nhóm object: `TABLE` `VIEW` `INDEX` `SCHEMA` `DATABASE` `TYPE` `DOMAIN` `SEQUEN
 
 ---
 
-## 14. Constraint
+## 12. Constraint
 
-`CONSTRAINT` `PRIMARY` `FOREIGN` `UNIQUE` `CHECK` `REFERENCES` `DEFAULT` `NOT NULL` `DEFERRABLE` (PG) `EXCLUSION` (PG) `ENFORCED` (PG **19** CHECK).
+`CONSTRAINT` `PRIMARY` `FOREIGN` `UNIQUE` `CHECK` `REFERENCES` `DEFAULT` `NOT NULL` `DEFERRABLE` (PG) `EXCLUDE` (PG) `ENFORCED` (PG **19** CHECK).
 
 ```sql
 CREATE TABLE t (
@@ -385,7 +400,7 @@ PG 19: `ALTER … CONSTRAINT … [NOT] ENFORCED` trên **CHECK**. Khác `NOT VAL
 
 ---
 
-## 15. Window: `OVER` / `FILTER` / `IGNORE NULLS`
+## 13. Window: `OVER` / `FILTER` / `IGNORE NULLS`
 
 ```sql
 SELECT SUM(total) OVER (PARTITION BY customer_id ORDER BY id) AS running
@@ -393,20 +408,21 @@ FROM orders;
 
 -- PostgreSQL
 SELECT SUM(total) FILTER (WHERE status = 'paid') FROM orders;
-SELECT LAG(value) IGNORE NULLS OVER (ORDER BY ts);   -- PG 19
+SELECT LAG(value) IGNORE NULLS OVER (ORDER BY ts) FROM metrics;   -- PG 19
 SELECT LAST_VALUE(value) RESPECT NULLS OVER (
     ORDER BY ts
     ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-);
+)
+FROM metrics;
 ```
 
 Hàm 19: `lead`, `lag`, `first_value`, `last_value`, `nth_value`. Mặc định `RESPECT NULLS`.
 
-**Ghi chú:** `FILTER` aggregate: PG; SQL Server dùng `SUM(CASE WHEN …)`. `GROUPS` frame: PG. `IGNORE NULLS` **không** phải toán tử, không dùng trong `WHERE` — [operators.md](operators.md), [window-functions.md](window-functions.md). Frame `LAST_VALUE` mặc định đến `CURRENT ROW` — `IGNORE NULLS` không sửa frame sai. SQL Server: `IGNORE NULLS` trên offset một số phiên bản — **không** giả `NTH_VALUE` (SS không có). `PIVOT`/`UNPIVOT`: chỉ SQL Server (keyword). `WINDOW` clause đặt tên frame. Cột không aggregate phải khai trong `GROUP BY` — [select.md](select.md).
+**Ghi chú:** `FILTER` aggregate: PG; SQL Server dùng `SUM(CASE WHEN …)`. `GROUPS` frame: PG. `IGNORE NULLS` **không** phải toán tử, không dùng trong `WHERE` — [operators.md](operators.md), [window-functions.md](window-functions.md). Frame `LAST_VALUE` mặc định đến `CURRENT ROW` — `IGNORE NULLS` không sửa frame sai. SQL Server **2022+** hỗ trợ `IGNORE NULLS` trên `FIRST_VALUE`, `LAST_VALUE`, `LAG`, `LEAD` (không có `NTH_VALUE`). `PIVOT`/`UNPIVOT`: chỉ SQL Server (keyword). `WINDOW` clause đặt tên frame.
 
 ---
 
-## 15. Điều khiển luồng
+## 14. Điều khiển luồng
 
 ```sql
 -- SQL Server (T-SQL batch — keyword SQL)
@@ -420,14 +436,16 @@ ELSE
 WHILE @i < 10
 BEGIN
     SET @i += 1;
-    CONTINUE;
-    BREAK;
+    IF @i = 5 CONTINUE;
+    IF @i = 8 BREAK;
 END
 ```
 
 ```sql
 -- PostgreSQL: IF/LOOP chỉ trong hàm/DO (PL/pgSQL), không phải SQL thường
 DO $$
+DECLARE
+    x int := 1;
 BEGIN
     IF x > 0 THEN
         RAISE NOTICE 'ok';
@@ -443,7 +461,7 @@ END $$;
 
 ---
 
-## 18. `GRANT` / `REVOKE` / `DENY`
+## 15. `GRANT` / `REVOKE` / `DENY`
 
 `DENY` chỉ SQL Server (thắng `GRANT` trừ sysadmin). PG: `GRANT`/`REVOKE`, không `DENY`.
 
@@ -455,7 +473,7 @@ DENY DELETE ON dbo.Orders TO app;
 -- PostgreSQL
 GRANT SELECT ON app.orders TO app;
 REVOKE INSERT ON app.orders FROM app;
-ALTER … OWNER TO …
+ALTER TABLE app.orders OWNER TO app_owner;
 ```
 
 `AUTHORIZATION` lúc `CREATE SCHEMA`. Principal, `PUBLIC`, schema, RLS, ownership: [permissions.md](permissions.md). `SECURITY DEFINER` / `EXECUTE AS`: [routines.md](routines.md) + `search_path`.
@@ -464,7 +482,7 @@ PG 19: `GRANT`/`REVOKE … GRANTED BY` — role hiệu lực khi ghi ACL. SQL Se
 
 ---
 
-## 19. SQL Server 2025 — built-in mới
+## 16. SQL Server 2025 — built-in mới
 
 Không đợt reserved word lớn; thêm **type / hàm / config**. Tên có thể đụng cột cũ.
 
@@ -490,7 +508,7 @@ Fuzzy `EDIT_DISTANCE*` / `JARO_WINKLER*`: **GA từ CU11** (12/11/2026). CES / v
 
 ---
 
-## 20. PostgreSQL 19 — clause mới
+## 17. PostgreSQL 19 — clause mới
 
 | Keyword / clause | Mục đích | Ghi chú |
 |---|---|---|
@@ -515,7 +533,7 @@ Conflict: **không** update, **trả** hàng đã có (`RETURNING`), tùy chọn
 
 ---
 
-## 21. Hay đụng identifier
+## 18. Hay đụng identifier
 
 Tránh unquoted (cột/bảng/schema). Quote được nhưng ORM và SQL động khổ.
 
@@ -539,9 +557,9 @@ PostgreSQL: `user` / `current_user` là function-like keywords (`SELECT user`).
 
 ---
 
-## 22. Hai session — ví dụ làm việc
+## 19. Hai session — ví dụ làm việc
 
-### 22.1 `BEGIN` port
+### 19.1 `BEGIN` port
 
 ```text
 T1 (SS): BEGIN SELECT 1; END;            -- khối, auto-commit mặc định
@@ -549,7 +567,7 @@ T2 (PG): BEGIN; SELECT 1;                -- txn mở, T2 giữ lock/xmin đến 
 -- Pool PG: idle in transaction — [internal.md](internal.md)
 ```
 
-### 22.2 `WAITFOR` vs `WAIT FOR`
+### 19.2 `WAITFOR` vs `WAIT FOR`
 
 ```text
 T1 (SS): WAITFOR DELAY '00:00:01'; SELECT * FROM dbo.Orders WHERE Id = 42;
@@ -558,15 +576,16 @@ T2 (PG standby): WAIT FOR LSN '…' WITH (MODE 'standby_replay'); SELECT …
          -- đúng LSN mới thấy commit primary
 ```
 
-### 22.3 `CURRENT_DATE` đụng cột
+### 19.3 `CURRENT_DATE` đụng cột
 
 ```text
-T1 (SS 2022): SELECT current_date FROM dbo.T;     -- cột
-T2 (SS 2025): SELECT current_date FROM dbo.T;     -- HÀM date, không cột — hoặc ambiguous
--- Sửa: SELECT t.current_date FROM dbo.T AS t  hoặc đổi tên cột
+T1 (SS 2022): SELECT current_date FROM dbo.T;       -- cột
+T2 (SS 2025): SELECT current_date FROM dbo.T;       -- HÀM date (reserved keyword), không phải cột
+              SELECT t.current_date FROM dbo.T AS t; -- vẫn lỗi syntax trên SS 2025!
+-- Sửa: SELECT t.[current_date] FROM dbo.T AS t;  hoặc đổi tên cột
 ```
 
-### 22.4 `DO SELECT` vs `DO UPDATE`
+### 19.4 `DO SELECT` vs `DO UPDATE`
 
 ```text
 T1: INSERT … ON CONFLICT (id) DO UPDATE SET val = EXCLUDED.val;
@@ -575,18 +594,7 @@ T2: INSERT … ON CONFLICT (id) DO SELECT FOR UPDATE RETURNING *;
     -- không ghi, trả + khóa hàng cũ
 ```
 
-### 22.5 Thêm cột khi GROUP BY
-
-Thêm status vào SELECT có thể yêu cầu thêm status vào GROUP BY và thay grain từ khách hàng thành khách hàng + trạng thái. Viết nhóm tường minh để reviewer nhìn thấy thay đổi.
-
----
-
-### 22.6 Sửa khoảng application-time
-
-
----
-
-### 22.7 `VECTOR` identifier vs type
+### 19.5 `VECTOR` identifier vs type
 
 ```text
 T1: CREATE TABLE dbo.Vector (Id int);           -- tên bảng
@@ -596,7 +604,7 @@ T2: CREATE TABLE dbo.Doc (Embedding vector(3)); -- kiểu 2025
 
 ---
 
-## 23. Best practices & checklist
+## 20. Best practices & checklist
 
 - Đặt tên nghiệp vụ (`app_user`, `sort_order`) thay vì quote reserved.
 - Schema-qualify; đừng `user` làm bảng rồi `SET search_path`.
@@ -609,17 +617,17 @@ T2: CREATE TABLE dbo.Doc (Embedding vector(3)); -- kiểu 2025
 
 ---
 
-## 24. Bẫy khi review
+## 21. Bẫy khi review
 
 - `BEGIN` T-SQL như mở txn.
 - `WITH (NOLOCK)` bị đọc thành CTE.
 - `FETCH` cursor vs `OFFSET FETCH`.
 - `WAITFOR` vs `WAIT FOR`.
-- `MERGE` SQL Server copy lên PG thiếu `BY SOURCE` / isolation.
-- `UPDATE … FROM` fan-out PG.
+- `MERGE` SQL Server copy lên PG: PG **17+** đã có `WHEN NOT MATCHED BY SOURCE` và `RETURNING merge_action()`, nhưng vẫn lệch ở `OUTPUT`/`$action`, isolation/race và PG < 17.
+- `UPDATE … FROM` fan-out (non-deterministic trên cả hai engine; PG thêm bẫy lặp bảng đích trong `FROM`).
 - `SELECT user` tưởng cột.
-- `SELECT current_date` sau khi nâng SQL 2025 — cột cùng tên.
-- `FILTER` / `IGNORE NULLS` giả có trên mọi hàm SQL Server.
+- `SELECT current_date` hoặc `SELECT t.current_date` sau khi nâng SQL 2025 — phải quote `t.[current_date]`.
+- `FILTER` / `IGNORE NULLS` giả có trên mọi hàm SQL Server (`IGNORE NULLS` SS 2022+ không có `NTH_VALUE`).
 - `NATURAL JOIN` / tên cột `date` thêm vào bảng làm join đổi.
 - `GO` trong keyword list — không phải T-SQL.
 - `TRUNCATE` như `DELETE` (trigger, identity, FK).
@@ -632,25 +640,26 @@ T2: CREATE TABLE dbo.Doc (Embedding vector(3)); -- kiểu 2025
 
 ---
 
-## 25. Version gates
+## 22. Version gates
 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
 | `CREATE OR ALTER` | 2016 SP1+ | `CREATE OR REPLACE` lâu |
 | `DROP IF EXISTS` | 2016+ | lõi |
-| `MERGE` | lâu (cẩn thận) | **15+** |
+| `MERGE` | lâu (cẩn thận) | **15+** (`BY SOURCE` / `merge_action()`: **17+**) |
 | `ON CONFLICT` | — (`MERGE`/hint) | **9.5+**; `DO SELECT` **19** |
 | `OFFSET FETCH` | 2012+ | lâu |
 | `IS DISTINCT FROM` | **2022+** | lõi |
-| `JSON_OBJECTAGG` | **2025 GA** | lâu |
-| `REGEXP_LIKE` | **2025** | `~` lâu |
+| `JSON_OBJECTAGG` | **2025 GA** | **16+** (cũ: `json_object_agg`) |
+| `REGEXP_LIKE` | **2025** | **15+** (`~` lâu) |
 | `CURRENT_DATE` | **2025** | lõi |
 | `VECTOR` type | **2025 GA** | pgvector ext |
 | `VECTOR_SEARCH` | **2025 PREVIEW** | — |
 | `UNISTR` / `PRODUCT` | **2025** | — / thủ công |
 | `REPACK` | rebuild index | **19** |
 | `WAIT FOR` LSN | — (`WAITFOR` khác) | **19** |
-| `IGNORE NULLS` window | — | **19** |
+| `IGNORE NULLS` window | **2022+** | **19** |
+| `RETURNING OLD` / `NEW` | `deleted` / `inserted` (`OUTPUT`) | **18+** |
 | CHECK `[NOT] ENFORCED` | — | **19** |
 | `FILTER` aggregate | — | lõi |
 | `LATERAL` | `APPLY` | lõi |
@@ -697,7 +706,7 @@ T2: INSERT trùng id, DO SELECT FOR UPDATE        -- không ghi, khóa, RETURNIN
 T3: INSERT trùng id, DO NOTHING                  -- không hàng RETURNING conflict
 ```
 
-Không `OUTPUT`. Không T-SQL. **Beta 19**. Unique index bắt buộc. [dml.md](dml.md).
+Không `OUTPUT`. Không T-SQL. **PostgreSQL 19 (GA)**. Unique index bắt buộc. [dml.md](dml.md).
 
 `FOR UPDATE` đây là lock clause của `DO SELECT`, không phải `WAIT FOR`.
 

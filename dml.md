@@ -1,9 +1,9 @@
 # DML (INSERT / UPDATE / DELETE / MERGE)
 
 > **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
-> DML đổi dữ liệu trong **transaction**. Cùng cú pháp `UPDATE … FROM` trên hai engine **không** cùng ngữ nghĩa khi một hàng khớp nhiều nguồn — đây là nguồn corruption im lặng trên PostgreSQL.
+> DML đổi dữ liệu trong **transaction**. Cả hai engine đều **không xác định** khi `UPDATE … FROM` khớp nhiều nguồn cho một hàng đích; trên PostgreSQL, lặp bảng đích trong `FROM` còn gây **self-join** (tích Đề-các) làm hỏng dữ liệu im lặng.
 
-`INSERT`/`UPDATE`/`DELETE`/`MERGE` là đơn vị atomic *theo statement* trong autocommit, hoặc một phần txn tường minh. SQL Server mặc định lỗi một statement **không** abort cả txn (`XACT_ABORT OFF`); PostgreSQL lỗi → abort txn trừ savepoint. Isolation, `FOR UPDATE`, leftover temporal: [transactions.md](transactions.md), [concurrency.md](concurrency.md). Trigger: [routines.md](routines.md). Constraint lúc ghi: [constraints.md](constraints.md).
+`INSERT`/`UPDATE`/`DELETE`/`MERGE` là đơn vị atomic *theo statement* trong autocommit, hoặc một phần txn tường minh. SQL Server mặc định lỗi một statement **không** abort cả txn (`XACT_ABORT OFF`); PostgreSQL lỗi → abort txn trừ savepoint. Isolation, `FOR UPDATE`, khóa đồng thời: [transactions.md](transactions.md), [concurrency.md](concurrency.md). Trigger: [routines.md](routines.md). Constraint lúc ghi: [constraints.md](constraints.md).
 
 PostgreSQL 19 **GA** (19/11/2026): `ON CONFLICT DO SELECT`, SIMD `COPY` (`ON_ERROR SET_NULL`, `FORCE_ARRAY`, cấm system column). SQL Server Change Event Streaming = **PREVIEW** — khác `TRUNCATE`/CDC.
 
@@ -26,17 +26,17 @@ PostgreSQL 19 **GA** (19/11/2026): `ON CONFLICT DO SELECT`, SIMD `COPY` (`ON_ERR
 - [7. TRUNCATE vs CES PREVIEW](#7-truncate-vs-ces-preview)
   - [7.1 CES PREVIEW (SQL Server 2025)](#71-ces-preview-sql-server-2025)
 - [8. COPY / BULK](#8-copy--bulk)
-  - [9.1 PostgreSQL 19 — COPY](#91-postgresql-19--copy)
-  - [9.2 SQL Server BULK](#92-sql-server-bulk)
-- [10. Worked examples](#10-worked-examples)
-  - [10.1 Đơn giản — insert + lấy id](#101-đơn-giản--insert--lấy-id)
-  - [10.2 Trung bình — upsert counter vs get-or-create](#102-trung-bình--upsert-counter-vs-get-or-create)
-  - [10.3 Xóa theo lô và giữ khóa trong transaction](#103-xóa-theo-lô-và-giữ-khóa-trong-transaction)
-  - [10.4 COPY 19 — header, SET_NULL, không system col](#104-copy-19--header-set_null-không-system-col)
-  - [10.5 MERGE xóa source-only vs upsert](#105-merge-xóa-source-only-vs-upsert)
-- [11. Best practices & checklist](#11-best-practices--checklist)
-- [12. Bẫy khi review](#12-bẫy-khi-review)
-- [13. Version gates](#13-version-gates)
+  - [8.1 PostgreSQL 19 — COPY](#81-postgresql-19--copy)
+  - [8.2 SQL Server BULK](#82-sql-server-bulk)
+- [9. Worked examples](#9-worked-examples)
+  - [9.1 Đơn giản — insert + lấy id](#91-đơn-giản--insert--lấy-id)
+  - [9.2 Trung bình — upsert counter vs get-or-create](#92-trung-bình--upsert-counter-vs-get-or-create)
+  - [9.3 Xóa theo lô và giữ khóa trong transaction](#93-xóa-theo-lô-và-giữ-khóa-trong-transaction)
+  - [9.4 COPY 19 — header, SET_NULL, không system col](#94-copy-19--header-set_null-không-system-col)
+  - [9.5 MERGE xóa source-only vs upsert](#95-merge-xóa-source-only-vs-upsert)
+- [10. Best practices & checklist](#10-best-practices--checklist)
+- [11. Bẫy khi review](#11-bẫy-khi-review)
+- [12. Version gates](#12-version-gates)
 - [Nguồn chính thức](#nguồn-chính-thức)
 
 ---
@@ -137,7 +137,7 @@ FROM dbo.Orders AS o
 INNER JOIN dbo.Customers AS c ON c.Id = o.CustomerId
 WHERE c.Country = N'VN';
 
--- PostgreSQL — không viết JOIN kiểu T-SQL
+-- PostgreSQL — không lặp bảng đích trong FROM (vẫn JOIN giữa các bảng nguồn được)
 UPDATE orders AS o
 SET total = total * 1.1
 FROM customers AS c
@@ -145,7 +145,9 @@ WHERE c.id = o.customer_id
   AND c.country = 'VN';
 ```
 
-PostgreSQL: `FROM` là tích với target qua `WHERE`. **Một hàng target khớp nhiều hàng `FROM` → cập nhật một lần, nguồn nào không xác định** (plan-dependent). Không báo lỗi. Đây là hazard khác `MERGE` (cardinality violation).
+**Bẫy self-join trên PostgreSQL:** Khác SQL Server (cho phép lặp bảng đích `dbo.Orders AS o` trong `FROM`), PostgreSQL **không** cho lặp bảng đích trong `FROM` — viết `UPDATE orders SET total = total * 1.1 FROM orders AS o2 JOIN customers AS c ON c.id = o2.customer_id WHERE c.country = 'VN'` sẽ tạo **self-join (tích Đề-các)** giữa `orders` đích và `o2`, khiến *mọi hàng* trong `orders` đều bị cập nhật nếu có ít nhất một khách `VN`! Trên PG, chỉ đặt các bảng nguồn trong `FROM` (các bảng nguồn có thể `JOIN` với nhau bình thường), rồi nối bảng đích qua `WHERE`.
+
+Cả hai engine đều **không xác định** khi một hàng target khớp nhiều hàng nguồn trong `UPDATE … FROM` (chọn một hàng nguồn phụ thuộc plan, không báo lỗi). Đây là hazard khác `MERGE` (báo lỗi cardinality violation).
 
 ```sql
 -- Nguy hiểm: staging trùng order_id
@@ -199,7 +201,7 @@ WHERE c.id = o.customer_id
   AND c.closed;
 ```
 
-`USING`/`FROM` cùng hazard fan-out: một hàng xóa khớp nhiều nguồn — vẫn xóa một lần, nhưng `RETURNING`/`OUTPUT` và trigger “per join row” dễ hiểu nhầm. Thu hẹp nguồn.
+`USING`/`FROM` cùng hazard fan-out: một hàng xóa khớp nhiều nguồn vẫn chỉ xóa **một lần** (SQL Server chỉ có statement-level trigger; PostgreSQL `FOR EACH ROW` cũng chỉ fire một lần cho mỗi hàng thực sự bị xóa — không có trigger “per join row”), nhưng `RETURNING`/`OUTPUT` khi chiếu cột từ bảng nguồn có thể không xác định. Thu hẹp nguồn.
 
 Xóa lớn: **lô** để giới hạn lock, WAL, `xmin` / log truncation, timeout.
 
@@ -210,8 +212,8 @@ WITH batch AS (
     FROM user_logs
     WHERE status = 'archived'
     ORDER BY created_at, id
-    FOR UPDATE SKIP LOCKED
     LIMIT 10000
+    FOR UPDATE SKIP LOCKED
 )
 DELETE FROM user_logs AS u
 USING batch AS b
@@ -224,9 +226,18 @@ DELETE TOP (10000)
 FROM dbo.UserLogs
 WHERE Status = N'archived';
 -- lặp đến @@ROWCOUNT = 0
+
+-- Xóa N hàng theo thứ tự (T-SQL cấm DELETE TOP ... ORDER BY trực tiếp → dùng CTE)
+WITH batch AS (
+    SELECT TOP (10000) Id
+    FROM dbo.UserLogs
+    WHERE Status = N'archived'
+    ORDER BY CreatedAt, Id
+)
+DELETE FROM batch;
 ```
 
-`READPAST`/`SKIP LOCKED`: worker song song — [concurrency.md](concurrency.md). `ORDER BY` trong `DELETE TOP` SQL Server cần derived table / CTE (không `DELETE TOP … ORDER BY` trực tiếp trên mọi phiên bản theo nghĩa “xóa N hàng cũ nhất” — dùng subquery).
+`READPAST`/`SKIP LOCKED`: worker song song — [concurrency.md](concurrency.md). T-SQL **không bao giờ** cho phép `DELETE TOP (…) … ORDER BY` trực tiếp — muốn xóa N hàng cũ nhất bắt buộc dùng CTE hoặc derived table như trên.
 
 FK `ON DELETE CASCADE` biến một `DELETE` cha thành xóa cây — đo, không bất ngờ. `TRUNCATE` nhanh hơn `DELETE` toàn bảng nhưng khác trigger/quyền (mục 7).
 
@@ -250,9 +261,9 @@ WHEN NOT MATCHED BY SOURCE THEN     -- SQL Server lâu; PostgreSQL 17+
     DELETE;
 ```
 
-PostgreSQL `MERGE` từ **15**; `WHEN NOT MATCHED BY SOURCE` từ **17** — **19 có**. `WHEN MATCHED AND predicate`. Một target khớp **nhiều** source → lỗi (SS **8672**; PG cardinality / “multiple assignments”).
+PostgreSQL `MERGE` từ **15**; `WHEN NOT MATCHED BY SOURCE` từ **17** — **19 có**. `WHEN MATCHED AND predicate`. Một target khớp **nhiều** source → lỗi (SS **8672**; PG cardinality / “multiple assignments”). Trên SQL Server, câu lệnh `MERGE` **bắt buộc kết thúc bằng dấu `;`** (thiếu `;` báo lỗi cú pháp `Msg 10713`).
 
-SQL Server `MERGE` từng có bug concurrency (vá nhiều CU). Vẫn: khóa / isolation rõ; đừng `MERGE` + `NOLOCK`. Upsert cổ điển `UPDATE` rồi `IF @@ROWCOUNT = 0 INSERT` **race** — hai session cùng miss.
+SQL Server `MERGE` mặc định dưới `READ COMMITTED`/RCSI **không** tự chống race condition khi hai session cùng chèn key chưa tồn tại (sinh lỗi unique `2627`/`2601`); upsert song song **bắt buộc `MERGE dbo.T WITH (HOLDLOCK)`**. Tương tự, `MERGE` trên PostgreSQL dưới `READ COMMITTED` cũng **không** tự chống race insert như `INSERT … ON CONFLICT` (vẫn có thể văng `23505`). Upsert cổ điển `UPDATE` rồi `IF @@ROWCOUNT = 0 INSERT` cũng **race** — hai session cùng miss.
 
 ```sql
 -- Race: cả hai session không thấy hàng, cả hai INSERT → unique fail hoặc duplicate
@@ -261,7 +272,7 @@ IF @@ROWCOUNT = 0
     INSERT INTO dbo.Counters (Id, n) VALUES (@id, 1);
 ```
 
-`HOLDLOCK` / `SERIALIZABLE` trên target, hoặc `MERGE`, hoặc unique + retry. PostgreSQL: `INSERT … ON CONFLICT` cùng ý, một statement.
+Giải pháp đúng trên SQL Server: `MERGE dbo.Counters WITH (HOLDLOCK)` (kết thúc bằng `;`), hoặc `UPDLOCK, HOLDLOCK` trong transaction, hoặc unique + retry. PostgreSQL: `INSERT … ON CONFLICT` chống race insert trong một statement (ổn định hơn `MERGE` PG dưới `READ COMMITTED`).
 
 ### 5.2 ON CONFLICT DO UPDATE / NOTHING
 
@@ -274,7 +285,7 @@ WHERE counters.n < 1000            -- optional: “not really update”
 RETURNING *;
 ```
 
-Cần unique index/constraint **đúng cột** (kể cả partial unique). `ON CONFLICT ON CONSTRAINT counters_pkey`. Không suy từ “cột nhìn giống khóa”.
+Cần unique index/constraint **đúng cột** (kể cả partial unique). `ON CONFLICT ON CONSTRAINT counters_pkey` chỉ nhận **constraint** (PK/UNIQUE/EXCLUDE) — **không** dùng được với partial unique index (phải viết cột + `WHERE` predicate). Ngoài ra, `ON CONFLICT` **không** hoạt động với unique constraint `DEFERRABLE`, và khi xảy ra conflict, **`nextval` của `IDENTITY`/`SEQUENCE` vẫn đã bị tiêu tốn** (tạo lỗ nhảy số — không rollback).
 
 `EXCLUDED` = hàng đề xuất insert. `DO NOTHING` bỏ qua conflict; `RETURNING` **không** ra hàng `DO NOTHING` (chỉ hàng insert thành công). Muốn trả hàng đã có mà không ghi: `DO SELECT` (5.3), không `DO NOTHING` + `RETURNING`.
 
@@ -320,8 +331,8 @@ DO SELECT cần RETURNING/conflict target và quyền SELECT; thêm FOR UPDATE/S
 Không có trên SQL Server — gần:
 
 ```sql
--- SS: MERGE no-op matched + OUTPUT; hoặc HOLDLOCK + insert
-MERGE dbo.T AS d
+-- SS: MERGE no-op matched + OUTPUT — bắt buộc WITH (HOLDLOCK) chống race dưới RC/RCSI và kết thúc bằng ';'
+MERGE dbo.T WITH (HOLDLOCK) AS d
 USING (SELECT 1 AS Id, 'x' AS Val) AS s
 ON d.Id = s.Id
 WHEN MATCHED THEN UPDATE SET Val = d.Val      -- no-op, vẫn lock kiểu update
@@ -331,23 +342,23 @@ OUTPUT inserted.*;
 
 No-op `UPDATE` vẫn là update (trigger, CES, version) — **không** tương đương `DO SELECT` (không ghi). `HOLDLOCK` + `SELECT` rồi `INSERT` = hai statement, race trừ isolation/khóa đúng.
 
-**Ghi chú:** **Beta** 19. Unique violation vẫn cần index unique. Race: `DO SELECT FOR UPDATE` vs `DO UPDATE` khác nghiệp vụ. `DO SELECT WHERE condition` được hỗ trợ; nếu condition không TRUE thì không trả hàng conflict. RETURNING và conflict target là bắt buộc. Partial unique: cùng luật conflict target như `DO UPDATE`.
+**Ghi chú:** PostgreSQL **19 GA**. Unique violation vẫn cần index unique. Race: `DO SELECT FOR UPDATE` vs `DO UPDATE` khác nghiệp vụ. `DO SELECT WHERE condition` được hỗ trợ; nếu condition không TRUE thì không trả hàng conflict. RETURNING và conflict target là bắt buộc. Partial unique: cùng luật conflict target như `DO UPDATE`.
 
 ### 5.4 MERGE vs upsert — khi nào
 
 | Nhu cầu | PostgreSQL | SQL Server |
 |---|---|---|
-| Insert hoặc cộng counter | `ON CONFLICT DO UPDATE` | `MERGE` / `UPDATE`+retry |
-| Insert hoặc trả hàng cũ, không đè | `DO SELECT` **19** | `MERGE` no-op (vẫn update) hoặc khóa tay |
-| Bỏ qua trùng | `DO NOTHING` | `MERGE` không nhánh matched / `IGNORE` không có |
-| Matched update *khác* + xóa source-only | `MERGE` + `NOT MATCHED BY SOURCE` | `MERGE` |
+| Insert hoặc cộng counter | `ON CONFLICT DO UPDATE` | `MERGE WITH (HOLDLOCK)` / `UPDLOCK, HOLDLOCK` |
+| Insert hoặc trả hàng cũ, không đè | `DO SELECT` **19** | `MERGE WITH (HOLDLOCK)` no-op (vẫn update) hoặc khóa tay |
+| Bỏ qua trùng | `DO NOTHING` | `MERGE WITH (HOLDLOCK)` không nhánh matched / `IGNORE` không có |
+| Matched update *khác* + xóa source-only | `MERGE` + `NOT MATCHED BY SOURCE` | `MERGE` (thêm `WITH (HOLDLOCK)` nếu upsert song song) |
 | Nhiều nguồn → một target | `MERGE` **lỗi**; `ON CONFLICT` một insert row | `MERGE` **8672** |
 | Fan-out `UPDATE FROM` | chọn một hàng nguồn không xác định | chọn một hàng nguồn không xác định; `MERGE` update trùng báo lỗi |
 
 `ON CONFLICT` giải quyết xung đột unique khi INSERT; MERGE phân nhánh từ join source/target. Một statement ON CONFLICT DO UPDATE không được tác động cùng hàng target nhiều lần; source trùng arbiter key có thể gây cardinality violation, giống yêu cầu chuẩn hóa source của MERGE.
 
 ```sql
--- PG: hai hàng VALUES cùng id — không phải MERGE cardinality
+-- PG: hai hàng VALUES cùng id trong cùng lệnh → lỗi cardinality_violation (SQLSTATE 21000)
 INSERT INTO t (id, val)
 VALUES (1, 'a'), (1, 'b')
 ON CONFLICT (id) DO UPDATE SET val = EXCLUDED.val;
@@ -373,7 +384,7 @@ ELSE
 COMMIT TRAN;
 ```
 
-`HOLDLOCK` = range/key serializable trên predicate — phantom insert bị chặn. Đắt hơn `ON CONFLICT` một statement. Unique index vẫn bắt buộc (hai session trước khi có hàng: range lock). `MERGE` một statement thường gọn hơn pattern này; vẫn unique-hóa source.
+`HOLDLOCK` = range/key serializable trên predicate — phantom insert bị chặn. Đắt hơn `ON CONFLICT` một statement. Unique index vẫn bắt buộc (hai session trước khi có hàng: range lock). `MERGE dbo.T WITH (HOLDLOCK)` một statement gọn hơn pattern này, nhưng **bắt buộc phải có `WITH (HOLDLOCK)`** (và kết thúc bằng `;`) để chống race insert dưới `READ COMMITTED`/RCSI; trên PG, `MERGE` dưới `READ COMMITTED` cũng **không** tự chống race insert như `INSERT … ON CONFLICT`. Vẫn luôn unique-hóa source.
 
 `WHEN MATCHED AND d.version = s.version THEN UPDATE …` (optimistic) + `WHEN MATCHED AND d.version <> s.version THEN` không làm gì / lỗi: cả hai engine hỗ trợ predicate trên nhánh. Không nhánh → hàng bỏ qua, không báo — kiểm `@@ROWCOUNT` / `RETURNING`.
 
@@ -397,9 +408,9 @@ OUTPUT deleted.Id INTO @gone
 WHERE Id = 1;
 ```
 
-`inserted` / `deleted` là bảng ảo. `OUTPUT INTO` table / table variable. Hạn chế: `OUTPUT` vào bảng đang mutate — thường lỗi; dùng table variable / temp.
+`inserted` / `deleted` là bảng ảo. `OUTPUT INTO` đổ vào table / table variable / temp table. **Giới hạn bảng đích `OUTPUT INTO`:** không được có enabled trigger, không có `CHECK` constraint/rule, không tham gia bất kỳ bên nào của `FOREIGN KEY`, và không trùng bảng đang mutate (nên ưu tiên table variable hoặc `#temp`).
 
-Trigger `INSTEAD OF` + `OUTPUT`: thấy dữ liệu **sau** trigger — đọc docs, đừng giả định “hàng đề xuất”.
+**Trigger + `OUTPUT` (SQL Server):** Trên bảng có **enabled trigger** (cả `AFTER` lẫn `INSTEAD OF`), `OUTPUT` không có `INTO` bị **cấm hoàn toàn (Error 334)** — bắt buộc dùng `OUTPUT ... INTO`. Về dữ liệu nhìn thấy: `OUTPUT` luôn phản ánh **hàng trước khi trigger chạy** — trên bảng có `INSTEAD OF` trigger, `OUTPUT` thấy **hàng đề xuất ban đầu** (không thấy chỉnh sửa của trigger); trên bảng có `AFTER` trigger cũng chỉ thấy trước khi `AFTER` trigger sửa thêm.
 
 ```sql
 -- PostgreSQL
@@ -412,7 +423,7 @@ DELETE FROM orders WHERE id = 1
 RETURNING *;
 ```
 
-**PostgreSQL 18+:** `RETURNING` cũ và mới trên `UPDATE`/`DELETE`:
+**PostgreSQL 18+:** `RETURNING WITH (OLD AS o, NEW AS n)` hỗ trợ cho `UPDATE`, `DELETE`, `INSERT` (đặc biệt `INSERT … ON CONFLICT DO UPDATE`) và `MERGE`:
 
 ```sql
 UPDATE orders
@@ -421,15 +432,44 @@ WHERE id = 1
 RETURNING WITH (OLD AS o, NEW AS n)
     o.total AS old_total, n.total AS new_total;
 
-DELETE FROM orders
-WHERE id = 1
-RETURNING WITH (OLD AS o)
-    o.id, o.total;
+-- PG 18+: INSERT ... ON CONFLICT DO UPDATE (nhánh insert có o = NULL)
+INSERT INTO counters (id, n) VALUES (1, 1)
+ON CONFLICT (id) DO UPDATE SET n = counters.n + EXCLUDED.n
+RETURNING WITH (OLD AS o, NEW AS n)
+    o.n AS old_n, n.n AS new_n;
+
+-- PG 18+: MERGE RETURNING WITH (OLD, NEW)
+MERGE INTO dst AS d USING src AS s ON d.id = s.id
+WHEN MATCHED THEN UPDATE SET val = s.val
+WHEN NOT MATCHED THEN INSERT (id, val) VALUES (s.id, s.val)
+RETURNING WITH (OLD AS o, NEW AS n) merge_action(), o.val, n.val;
 ```
 
-`INSERT` chỉ có hàng mới (`NEW` / `RETURNING *`). `DELETE` không có `NEW`. `DO SELECT` `RETURNING` = hàng **đã có** (không phải `EXCLUDED`).
+`INSERT` thuần có `OLD` là `NULL`; `DELETE` có `NEW` là `NULL`. `DO SELECT` (PG 19) `RETURNING` = hàng **đã có** (không phải `EXCLUDED`).
 
-**Ghi chú:** `RETURNING` chạy sau BEFORE trigger, thấy hàng sẽ lưu; AFTER trigger vẫn chạy trong statement. Client lấy `RETURNING` thay `SELECT` ngay sau để tránh race. SQL Server `SCOPE_IDENTITY()` vs `OUTPUT`: nhiều hàng / parallel → `OUTPUT` an toàn hơn.
+**Di chuyển dữ liệu trong một statement — Data-modifying CTE (PG) vs Composable DML (SS):**
+
+```sql
+-- PostgreSQL: Data-modifying CTE (mọi CTE dùng chung 1 snapshot)
+WITH moved AS (
+    DELETE FROM orders
+    WHERE status = 'archived'
+    RETURNING *
+)
+INSERT INTO orders_archive
+SELECT * FROM moved;
+
+-- SQL Server: Composable DML (nguồn là subquery DML có OUTPUT)
+INSERT INTO dbo.OrdersArchive (Id, CustomerId, Total)
+SELECT d.Id, d.CustomerId, d.Total
+FROM (
+    DELETE FROM dbo.Orders
+    OUTPUT deleted.Id, deleted.CustomerId, deleted.Total
+    WHERE Status = N'archived'
+) AS d;
+```
+
+**Ghi chú:** PG `RETURNING` chạy sau `BEFORE` trigger (thấy hàng sẽ lưu); `AFTER` trigger vẫn chạy trong statement. Client lấy `RETURNING`/`OUTPUT` thay `SELECT` ngay sau để tránh race. Trên SQL Server, phân biệt ba hàm lấy identity: `SCOPE_IDENTITY()` (cùng session + cùng scope — an toàn trước trigger, nhưng chỉ trả **1 giá trị cuối**), `@@IDENTITY` (cùng session, mọi scope — dễ dính identity do trigger tạo ra), và `IDENT_CURRENT('tbl')` (mọi session + mọi scope — race cao). Khi insert nhiều hàng hoặc cần cột khác → dùng `OUTPUT`.
 
 ---
 
@@ -439,6 +479,7 @@ RETURNING WITH (OLD AS o)
 TRUNCATE TABLE logs;
 TRUNCATE TABLE logs RESTART IDENTITY;     -- PostgreSQL
 TRUNCATE TABLE a, b;                      -- PostgreSQL nhiều bảng (FK vòng)
+TRUNCATE TABLE dbo.Events WITH (PARTITIONS (1 TO 4, 7));  -- SQL Server 2016+
 ```
 
 | | SQL Server | PostgreSQL |
@@ -446,8 +487,9 @@ TRUNCATE TABLE a, b;                      -- PostgreSQL nhiều bảng (FK vòng
 | Trong txn user | Rollback được trên SQL Server Database Engine; giữ Sch-M | Rollback được; giữ ACCESS EXCLUSIVE, không MVCC-safe với snapshot cũ |
 | Trigger `DELETE` | Không fire | Không fire `DELETE`; có trigger `TRUNCATE` |
 | Identity / sequence | Reset identity | `RESTART IDENTITY` / `CONTINUE IDENTITY` |
-| FK tới bảng | Thường **cấm** TRUNCATE | `CASCADE` hoặc truncate cả nhóm |
-| Log | Minimal | WAL catalog + hint bits; nhanh hơn `DELETE` |
+| FK tới bảng | **Cấm hoàn toàn** nếu có FK từ bảng khác trỏ tới (kể cả bảng con rỗng; chỉ trừ self-referencing FK) | `CASCADE` hoặc truncate cả nhóm |
+| Log | Minimal | Cấp `relfilenode` rỗng mới + WAL catalog; nhanh hơn `DELETE` |
+| Partition | `WITH (PARTITIONS (...))` (2016+) | `TRUNCATE` trực tiếp bảng partition con |
 | Logical / CDC / CES | Event riêng hoặc **không** từng hàng | `TRUNCATE` message, không stream từng hàng |
 
 SQL Server: quyền `ALTER` (cao hơn `DELETE`); heap/clustered empty. PostgreSQL: `REPACK`/`VACUUM` **không** thay truncate khi muốn rỗng bảng — [ddl.md](ddl.md) §10.
@@ -495,13 +537,14 @@ COPY orders FROM '/tmp/orders.csv' WITH (FORMAT csv, HEADER true, FREEZE);  -- �
 
 `\copy` chạy trong client, file local — không cần quyền file trên server. PG 12+: `COPY … WHERE` (lọc lúc load).
 
-### 9.1 PostgreSQL 19 — COPY
+### 8.1 PostgreSQL 19 — COPY
 
 | Tùy chọn / hành vi | Việc | Cảnh báo |
 |---|---|---|
 | SIMD text/CSV `COPY FROM` | Nhanh hơn parse | Không đổi ngữ nghĩa CSV |
 | Skip **nhiều** dòng header | File có preamble | Đếm đúng số dòng skip |
-| `ON_ERROR SET_NULL` | Lỗi chuyển kiểu trường → NULL; constraint vẫn có thể làm abort | Nuốt dữ liệu bẩn — **cấm** load tài chính |
+| `ON_ERROR ignore` (17+) / `REJECT_LIMIT` (18+) | Bỏ qua dòng lỗi chuyển kiểu (dừng nếu vượt ngưỡng) | Mất dòng âm thầm nếu không log (`LOG_VERBOSITY`) |
+| `ON_ERROR SET_NULL` (**19**) | Lỗi chuyển kiểu trường → NULL; constraint vẫn có thể làm abort | Nuốt dữ liệu bẩn — **cấm** load tài chính |
 | `COPY TO` JSON | Export JSON | ≠ `json_agg` (không `GROUP BY`) |
 | `FORCE_ARRAY` | `COPY TO` JSON array wrap | Đối chiếu docs 19; đừng bịa tên option khác |
 | `COPY TO` partitioned table | Dump trực tiếp bảng cha | Logical sync cũng lợi |
@@ -518,9 +561,9 @@ COPY orders FROM '/tmp/o.csv' WITH (FORMAT csv)
 WHERE ctid IS NOT NULL;          -- lỗi: system column
 ```
 
-Không invent `COPY BINARY` option không đọc docs. `ON_ERROR` khác `IGNORE` từng engine — chỉ dùng tên đã document (`SET_NULL`). SET_NULL chỉ xử lý lỗi input conversion; NOT NULL/CHECK/FK, cấu trúc CSV và lỗi I/O vẫn có thể làm COPY thất bại.
+Không invent `COPY BINARY` option không đọc docs. PostgreSQL hỗ trợ `ON_ERROR stop` (mặc định), `ON_ERROR ignore` (**17+**, kết hợp `REJECT_LIMIT` từ **18+**), và `ON_ERROR set_null` (**19**). `ON_ERROR` chỉ xử lý lỗi chuyển kiểu đầu vào (soft input error); `NOT NULL`/`CHECK`/`FK`, cấu trúc CSV sai và lỗi I/O vẫn làm `COPY` thất bại.
 
-### 9.2 SQL Server BULK
+### 8.2 SQL Server BULK
 
 ```sql
 BULK INSERT dbo.Orders
@@ -552,9 +595,9 @@ Bulk vs stream — chọn sai công cụ:
 
 ---
 
-## 10. Worked examples
+## 9. Worked examples
 
-### 10.1 Đơn giản — insert + lấy id
+### 9.1 Đơn giản — insert + lấy id
 
 ```sql
 -- SQL Server
@@ -568,25 +611,25 @@ VALUES (1, 99.50)
 RETURNING id;
 ```
 
-### 10.2 Trung bình — upsert counter vs get-or-create
+### 9.2 Trung bình — upsert counter vs get-or-create
 
 ```sql
 -- PostgreSQL: cộng counter
 INSERT INTO counters (id, n)
-VALUES (@id, 1)
+VALUES ($1, 1)
 ON CONFLICT (id) DO UPDATE
 SET n = counters.n + 1
 RETURNING n;
 
 -- PostgreSQL 19: lấy hàng cũ, không đè val
 INSERT INTO tokens (id, val)
-VALUES (@id, @val)
+VALUES ($1, $2)
 ON CONFLICT (id) DO SELECT
 FOR UPDATE
 RETURNING *;
 
--- SQL Server counter
-MERGE dbo.Counters AS d
+-- SQL Server counter: bắt buộc WITH (HOLDLOCK) chống race dưới RC/RCSI và kết thúc bằng ';'
+MERGE dbo.Counters WITH (HOLDLOCK) AS d
 USING (SELECT @id AS Id) AS s
 ON d.Id = s.Id
 WHEN MATCHED THEN UPDATE SET n = d.n + 1
@@ -596,7 +639,7 @@ OUTPUT inserted.n;
 
 Bọc isolation / khóa nếu `n` là invariant (không âm, trần). Atomic `UPDATE … SET n = n + 1 WHERE n < trần` đôi khi đủ, không cần `MERGE`. `DO SELECT` **không** tăng `n`.
 
-### 10.3 Xóa theo lô và giữ khóa trong transaction
+### 9.3 Xóa theo lô và giữ khóa trong transaction
 
 ```sql
 -- PostgreSQL: dùng primary key ổn định để liên kết batch.
@@ -619,7 +662,7 @@ Commit từng batch để giới hạn lock/WAL. SKIP LOCKED có thể bỏ sót
 
 ---
 
-### 10.4 COPY 19 — header, SET_NULL, không system col
+### 9.4 COPY 19 — header, SET_NULL, không system col
 
 ```sql
 BEGIN;
@@ -642,10 +685,11 @@ COMMIT;
 
 Tài chính: **bỏ** `ON_ERROR SET_NULL`, để `COPY` abort, sửa file.
 
-### 10.5 MERGE xóa source-only vs upsert
+### 9.5 MERGE xóa source-only vs upsert
 
 ```sql
 -- Cả hai (PG 17+ / SS): đồng bộ dst theo src, xóa hàng không còn trên src
+-- SQL Server: thêm WITH (HOLDLOCK) nếu chạy đồng thời dưới RC/RCSI và luôn kết thúc bằng ';'
 MERGE INTO dst AS d
 USING src AS s
 ON d.id = s.id
@@ -661,70 +705,73 @@ WHEN NOT MATCHED BY SOURCE THEN
 
 ---
 
-## 11. Best practices & checklist
+## 10. Best practices & checklist
 
 - Liệt kê cột `INSERT`; txn ngắn; `XACT_ABORT ON` (SS).
-- Đếm `DISTINCT` PK target trước `UPDATE`/`DELETE` có `FROM`/`USING`.
-- Upsert: PG `ON CONFLICT`; get-or-create không đè: `DO SELECT` **19**; đa nhánh / xóa source-only: `MERGE`.
+- Đếm `DISTINCT` PK target trước `UPDATE`/`DELETE` có `FROM`/`USING`; trên PG không lặp bảng đích trong `FROM`.
+- Upsert: PG `ON CONFLICT`; get-or-create không đè: `DO SELECT` **19**; đa nhánh / xóa source-only: `MERGE` (SS upsert song song luôn thêm `WITH (HOLDLOCK)` và `;`).
 - Nguồn `MERGE`/`INSERT` unique trên khóa.
-- Lấy id mới: `RETURNING` / `OUTPUT`, không `MAX(id)+1`.
+- Lấy id mới: `RETURNING` / `OUTPUT` (bảng có trigger trên SS dùng `OUTPUT INTO`), không `MAX(id)+1` hay `@@IDENTITY`.
 - Xóa lớn: lô + vacuum/index maintain.
 - Chia khoảng `WITHOUT OVERLAPS` trong ứng dụng: khóa hàng (`FOR UPDATE`) trước khi cắt; đoạn mới là `INSERT`.
 - Bulk: staging + constraint sau; `ON_ERROR SET_NULL` không cho tiền.
 - `TRUNCATE` vs `DELETE`: trigger, identity, CES/logical.
-- Sequence/identity lỗ là bình thường.
+- Sequence/identity lỗ là bình thường (kể cả khi `ON CONFLICT` bị conflict).
 
 ```text
 □ WHERE trên mọi UPDATE/DELETE production
-□ Nguồn UPDATE 1 hàng / target
-□ Unique đúng cho ON CONFLICT / MERGE
+□ Nguồn UPDATE 1 hàng / target; không lặp bảng đích trong FROM (PG)
+□ Unique đúng cho ON CONFLICT / MERGE; SS MERGE upsert có WITH (HOLDLOCK) và ';'
 □ DO SELECT ≠ DO UPDATE ≠ DO NOTHING
-□ OUTPUT/RETURNING cột cần, không SELECT lại
+□ OUTPUT/RETURNING cột cần (SS bảng có trigger dùng OUTPUT INTO), không SELECT lại
 □ TRUNCATE vs DELETE đã chọn có chủ đích
 □ CES PREVIEW: không giả định TRUNCATE
 □ Chia range trong ứng dụng: một transaction, khóa và constraint cho mọi đoạn
-□ COPY: không system col WHERE; SET_NULL có chủ đích
+□ COPY: không system col WHERE; SET_NULL/ignore có chủ đích
 □ COPY/BULK quyền file + encoding
 ```
 
 ---
 
-## 12. Bẫy khi review
+## 11. Bẫy khi review
 
 - `UPDATE`/`DELETE` không `WHERE`.
-- PG `UPDATE … FROM` staging trùng khóa — im lặng sai.
-- `MERGE` fan-out source (SS lỗi; vẫn phải unique-hóa).
-- `ON CONFLICT` thiếu unique / sai cột partial.
+- PG `UPDATE … FROM` lặp bảng đích gây self-join; hoặc staging trùng khóa trên cả hai engine — im lặng sai.
+- SQL Server `MERGE` upsert thiếu `WITH (HOLDLOCK)` (race 2627/2601 dưới RC/RCSI) hoặc quên dấu `;`.
+- `MERGE` fan-out source (SS lỗi 8672; PG lỗi cardinality — vẫn phải unique-hóa).
+- `ON CONFLICT` thiếu unique / sai cột partial / dùng `ON CONSTRAINT` với partial index / dùng với unique `DEFERRABLE`.
 - `DO NOTHING` + kỳ vọng `RETURNING` hàng cũ.
 - `DO SELECT` tưởng `DO UPDATE` (không đè vs đè).
 - `NOT IN` trong `DELETE … WHERE id NOT IN (SELECT nullable)`.
 - `IDENTITY_INSERT` quên `OFF`.
 - `OVERRIDING` nhầm ALWAYS vs BY DEFAULT.
-- `OUTPUT` vào cùng bảng đang ghi.
-- Tin `SCOPE_IDENTITY()` sau insert nhiều hàng / trigger.
-- `TRUNCATE` trên bảng bị FK (SS) / quên `CASCADE` (PG).
+- `OUTPUT` không `INTO` trên bảng SQL Server có enabled trigger (Error 334), hoặc `OUTPUT INTO` vào bảng đang ghi / có trigger / có FK.
+- Tin `@@IDENTITY` (dính trigger), `IDENT_CURRENT` (race) hoặc `SCOPE_IDENTITY()` sau insert nhiều hàng.
+- `TRUNCATE` trên bảng bị FK (SS cấm hoàn toàn trừ self-ref) / quên `CASCADE` (PG).
 - `TRUNCATE` trên bảng CES/logical rồi tin stream đủ từng hàng.
 - CES **PREVIEW** như CDC đầy đủ / production.
 - Coi DML application-time là cơ chế system-versioned tự lưu lịch sử như SQL Server.
 - `COPY FROM … WHERE ctid = …` trên PG 19 (system column cấm).
 - `ON_ERROR SET_NULL` load số tiền.
-- Trigger BEFORE đổi hàng vs `RETURNING`; leftover fire INSERT trigger.
+- Trigger `BEFORE` đổi hàng vs PG `RETURNING` (thấy sau `BEFORE`) khác SQL Server `OUTPUT` (thấy trước `AFTER`/`INSTEAD OF` trigger); tách khoảng temporal trong app bằng `DELETE`+`INSERT` sẽ fire `INSERT` trigger.
 
 ---
 
-## 13. Version gates
+## 12. Version gates
 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
-| `MERGE` | lâu (vá concurrency) | **15+** |
+| `MERGE` | lâu (upsert song song cần `WITH (HOLDLOCK)`) | **15+** |
 | `WHEN NOT MATCHED BY SOURCE` | lâu | **17+** (có trên 19) |
 | `ON CONFLICT DO UPDATE` | không | **9.5+** |
 | `ON CONFLICT DO SELECT` | không | **19 GA** |
-| `OUTPUT` | lâu | dùng `RETURNING` |
-| `RETURNING WITH (OLD, NEW)` | không | **18+** |
+| `OUTPUT` / Composable DML | lâu | dùng `RETURNING` / Data-modifying CTE |
+| `RETURNING WITH (OLD, NEW)` | không | **18+** (`UPDATE`/`DELETE`/`INSERT ON CONFLICT`/`MERGE`) |
 | `OVERRIDING SYSTEM/USER VALUE` | không (`IDENTITY_INSERT`) | identity chuẩn |
+| `TRUNCATE ... WITH (PARTITIONS)` | **2016+** | `TRUNCATE` trực tiếp partition con |
 | Application-time `WITHOUT OVERLAPS` | không | **18+** |
 | System-versioned temporal | có | extension / tự quản |
+| `COPY` `ON_ERROR ignore` / `REJECT_LIMIT` | — | **17+** / **18+** |
 | `COPY` SIMD text/CSV | — | **19** |
 | `COPY` `ON_ERROR SET_NULL` / `FORCE_ARRAY` / JSON TO | — | **19** |
 | `COPY FROM WHERE` system col cấm | — | **19** |
@@ -733,7 +780,7 @@ WHEN NOT MATCHED BY SOURCE THEN
 | Change Event Streaming | **2025 PREVIEW** | logical decoding / `wal_level` |
 | Fabric mirroring | **2025 GA** (≠ CES) | — |
 
-DDL quanh bảng đang ghi (`REPACK`, index): [ddl.md](ddl.md). Isolation leftover: [transactions.md](transactions.md) §8. Fan-out join: [joins.md](joins.md) §11.
+DDL quanh bảng đang ghi (`REPACK`, index): [ddl.md](ddl.md). Isolation & race khi chia khoảng temporal: [transactions.md](transactions.md) §8. Fan-out join: [joins.md](joins.md) §11.
 
 ---
 
