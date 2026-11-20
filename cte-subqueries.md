@@ -1,11 +1,11 @@
 # CTE & subquery
 
-> **Baseline:** SQL Server **2025** · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** · PostgreSQL **19** (GA 19/11/2026).<br>
 > CTE là *tên* cho một truy vấn phụ trong *một* statement — không phải temp table, không phải transaction.
 
 Subquery và CTE cùng mô hình: biểu thức bảng. Optimizer **được** inline, nhân bản, hoặc spool. PostgreSQL cho hint `MATERIALIZED` / `NOT MATERIALIZED`; SQL Server không — CTE bị tham chiếu nhiều lần có thể **chạy nhiều lần**. Đệ quy hai dialect lệch từ khóa (`RECURSIVE`), chặn vòng (`CYCLE` vs `MAXRECURSION`), và DML (`DELETE` qua CTE vs data-modifying `WITH`). File này là hợp đồng để review, không phải “WITH luôn chạy trước”.
 
-Join semi/anti: [joins.md](joins.md). Logical `SELECT`: [select.md](select.md). Window trong CTE: [window-functions.md](window-functions.md). SQL/PGQ đã rút khỏi 19 Beta 4: [select.md](select.md), [ddl.md](ddl.md). Truy vấn đường đi nhiều bước bằng recursive CTE dưới đây.
+Join semi/anti: [joins.md](joins.md). Logical `SELECT`: [select.md](select.md). Window trong CTE: [window-functions.md](window-functions.md). Đường đi nhiều bước trên bảng cạnh dùng recursive CTE dưới đây.
 
 ---
 
@@ -235,7 +235,7 @@ OPTION (MAXRECURSION 100);
 
 ## 7. Graph path bằng recursive CTE
 
-PostgreSQL 19 Beta 4 đã rút SQL/PGQ (`CREATE PROPERTY GRAPH`/`GRAPH_TABLE`), xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). Với bảng cạnh `edges(src, dst)`, truy vấn một bước dùng JOIN; nhiều bước dùng recursive CTE.
+Với bảng cạnh `edges(src, dst)`, một bước dùng `JOIN`; nhiều bước dùng recursive CTE.
 
 Mang theo `depth` để giới hạn đường đi và `path`/`CYCLE` để chặn vòng. `UNION` chỉ loại các **hàng kết quả giống hệt nhau**: thêm depth khác nhau thì không tự chặn cycle. SQL Server SQL Graph có `SHORTEST_PATH` riêng; không trộn cú pháp đó vào PostgreSQL. Ví dụ CYCLE ở mục 8 và MAXRECURSION ở mục 9.
 
@@ -690,7 +690,6 @@ CTE + `INSERT…SELECT` SS: `IDENTITY` / `OUTPUT` trên câu `INSERT` ngoài, kh
 □ EXISTS/NOT EXISTS thay IN/NOT IN nullable
 □ RECURSIVE keyword đúng dialect
 □ CYCLE hoặc MAXRECURSION + depth
-□ SQL/PGQ đã rút khỏi PG 19 Beta 4; dùng JOIN hoặc recursive CTE
 □ MATERIALIZED / temp khi CTE 2 lần + đắt
 □ LATERAL/APPLY CROSS vs OUTER
 □ Scalar subquery unique
@@ -719,7 +718,6 @@ CTE + `INSERT…SELECT` SS: `IDENTITY` / `OUTPUT` trên câu `INSERT` ngoài, kh
 - `IN (SELECT col)` col nullable + `NOT IN`.
 - `CROSS APPLY` nuốt hàng trái.
 - `OFFSET` phân trang trong CTE thay keyset — [window-functions.md](window-functions.md).
-- Dùng GRAPH_TABLE đã bị rút khỏi PostgreSQL 19 Beta 4.
 - SQL Graph SS `MATCH` copy sang PGQ.
 - `MERGE` + CTE như snapshot dưới RC.
 - `DISTINCT` trên recursive member SS.
@@ -741,7 +739,6 @@ CTE + `INSERT…SELECT` SS: `IDENTITY` / `OUTPUT` trên câu `INSERT` ngoài, kh
 | `LATERAL` | `APPLY` | lõi |
 | `IN` tuple `(a,b)` | — | lõi |
 | Nested CTE trong CTE | không (warehouse Fabric: biến thể riêng) | subquery `WITH` được ở nhiều ngữ cảnh |
-| SQL/PGQ `GRAPH_TABLE` | SQL Graph riêng | Đã rút khỏi 19 Beta 4; dùng JOIN/recursive CTE |
 
 Routine chứa CTE / TVF + `MAXRECURSION`: [routines.md](routines.md). Isolation khi DML CTE: [transactions.md](transactions.md).
 
@@ -767,7 +764,7 @@ Batch xóa: CTE + `TOP (1000)` trong vòng `WHILE @@ROWCOUNT > 0` (SS) hoặc lo
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PostgreSQL SELECT / WITH / LATERAL](https://www.postgresql.org/docs/19/sql-select.html)
 - [T-SQL common table expressions](https://learn.microsoft.com/en-us/sql/t-sql/queries/with-common-table-expression-transact-sql?view=sql-server-ver17)

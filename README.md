@@ -2,12 +2,12 @@
 
 Bộ tài liệu tham chiếu **in-depth / advanced** cho SQL trên hai engine chính: **SQL Server 2025** (T-SQL) và **PostgreSQL 19**. Không phải giáo trình nhập môn: các khái niệm được trình bày dạng tham khảo nhanh kèm chi tiết nâng cao (semantics, dialect gates, isolation, architecture, pitfalls). Nếu chưa biết SQL, bắt đầu bằng [tutorial PostgreSQL](https://www.postgresql.org/docs/19/tutorial.html) hoặc [tutorial T-SQL](https://learn.microsoft.com/en-us/sql/t-sql/tutorial-writing-transact-sql-statements), rồi dùng bộ này để tra cứu sâu hơn.
 
-> **Baseline:** SQL Server **2025** (17.x, GA 18/11/2025, mainstream đến **01/2031**) · PostgreSQL **19** (Beta 4 · 24/09/2026; chưa GA tại lần rà soát **03/10/2026**).<br>
-> Mục ghi **PREVIEW** (SQL Server: `PREVIEW_FEATURES`; PostgreSQL 19: beta) chưa dùng cho production.
+> **Baseline:** SQL Server **2025** (17.x, GA 18/11/2025, mainstream đến **01/2031**; CU mới nhất khi rà soát: **CU11**, 12/11/2026) · PostgreSQL **19** (GA **19/11/2026**).<br>
+> Mục ghi **PREVIEW** (`PREVIEW_FEATURES` trên SQL Server) chưa dùng cho production. PostgreSQL 19 không còn là beta.
 
 SQL không phải một ngôn ngữ duy nhất: ANSI/ISO SQL là lõi, mỗi engine thêm dialect (T-SQL vs PostgreSQL). File nào có hai cột/khối `-- SQL Server` / `-- PostgreSQL` là điểm lệch ngữ nghĩa — đừng copy mù.
 
-**Cách đọc bộ này.** Hai khối dialect cạnh nhau **không** nghĩa là cùng guarantee: isolation cùng tên (`REPEATABLE READ`) không portable — [transactions.md](transactions.md). Thứ tự *viết* `SELECT` ≠ *logical processing* — [select.md](select.md). Cùng ý “page / WAL / vacuum” nhưng **kiến trúc khác** — [internal.md](internal.md). API gắn **PREVIEW**/beta có thể đổi hoặc bị rút theo CU hoặc trước GA. Cuối mỗi file: Best practices, **Bẫy khi review**, Version gates — dùng khi review PR, không phải phụ lục.
+**Cách đọc bộ này.** Hai khối dialect cạnh nhau **không** nghĩa là cùng guarantee: isolation cùng tên (`REPEATABLE READ`) không portable — [transactions.md](transactions.md). Thứ tự *viết* `SELECT` ≠ *logical processing* — [select.md](select.md). Cùng ý “page / WAL / vacuum” nhưng **kiến trúc khác** — [internal.md](internal.md). API gắn **PREVIEW** có thể đổi theo CU. Cuối mỗi file: Best practices, **Bẫy khi review**, Version gates — dùng khi review PR, không phải phụ lục.
 
 **Chủ đề trừu tượng.** Isolation, khóa, MVCC, WAL, logical processing, `ON` vs `WHERE`, `NOT IN` + NULL, `CHECK` nuốt NULL, B-tree/sargable, CTE đệ quy, fan-out `UPDATE`, DDL trong transaction, `now()` vs đồng hồ tường, `json` vs `jsonb`, `ROWS` vs `RANGE`, trigger theo tập, `SECURITY DEFINER`, `GRANT`/`DENY`/RLS ([permissions.md](permissions.md)) — dễ hiểu sai nếu chỉ nhớ bảng. Các file đó có mục **Hình dung**: ví dụ đời thường, dòng thời gian, rồi mới tới cú pháp. Đọc Hình dung trước khi copy snippet.
 
@@ -19,11 +19,10 @@ Tham khảo: [SQL Server 2025 what's new](https://learn.microsoft.com/sql/sql-se
 
 ## Trạng thái phiên bản và cách kiểm chứng
 
-Ngày rà soát: **03/10/2026**. PostgreSQL 19 đang ở [Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/); thời điểm GA chưa chốt. Các phần ngôn ngữ ổn định vẫn hữu ích cho PostgreSQL 18, nhưng tính năng ghi **19** cần server 19.
+Ngày rà soát: **21/11/2026**. [PostgreSQL 19](https://www.postgresql.org/about/news/postgresql-19-released-3449/) đã GA ngày **19/11/2026**. Tính năng ghi **19** cần server 19; phần SQL ổn định vẫn đúng trên 18 khi không gắn mốc 19. Bộ này không ghi cú pháp đã bị rút khỏi 19.
 
-- **Đã rút khỏi 19:** SQL/PGQ (property graph), temporal DML `FOR PORTION OF`, SPLIT/MERGE partition và thay đổi checksum trực tuyến đã bị rút trong Beta 4.
-- **`GROUP BY ALL` suy ra cột SELECT:** đã bị rút từ [Beta 3](https://www.postgresql.org/about/news/postgresql-186-1711-1615-1519-1424-and-19-beta-3-released-3365/). PostgreSQL vẫn có `GROUP BY ALL grouping_element` để giữ grouping set trùng; đó là nghĩa khác.
-- **SQL Server:** kiểm tra cả build/CU, edition và compatibility level. [Vòng đời SQL Server 2025](https://learn.microsoft.com/en-us/lifecycle/products/sql-server-2025) và [tính năng mới](https://learn.microsoft.com/en-us/sql/sql-server/what-s-new-in-sql-server-2025?view=sql-server-ver17) là nguồn đối chiếu.
+- **Có trong GA 19:** `REPACK` / `REPACK (CONCURRENTLY)`, `WAIT FOR LSN`, `INSERT … ON CONFLICT DO SELECT`, `IGNORE NULLS` trên window, logical replication sequence, `pg_plan_advice`.
+- **SQL Server 2025 CU11** (12/11/2026, build 17.0.5065.9): `EDIT_DISTANCE`, `EDIT_DISTANCE_SIMILARITY`, `JARO_WINKLER_DISTANCE`, `JARO_WINKLER_SIMILARITY` là **GA** — không cần `PREVIEW_FEATURES`. Vẫn **PREVIEW**: change event streaming, vector index, `VECTOR_SEARCH`, vector half-precision. [Release notes](https://learn.microsoft.com/en-us/sql/sql-server/sql-server-2025-release-notes?view=sql-server-ver17). Kiểm tra edition và compatibility level cùng build.
 
 Mỗi file có nguồn chính thức ở cuối. Ví dụ có `…`/`...`, tham số hoặc bảng chưa khai báo là **mảnh cú pháp**, cần hoàn thiện trước khi chạy. Các khối chứa hai dialect phải tách theo comment engine. `$1` là tham số PostgreSQL của prepared statement/driver; `:name` là placeholder phía client, không phải cú pháp SQL trực tiếp; `@name` cần khai báo hoặc bind trên SQL Server.
 

@@ -1,6 +1,6 @@
 # Chỉ mục (Indexes)
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
 > Index không “làm query nhanh”: nó đổi **access path**. Sai thứ tự cột, covering thiếu, hoặc index trên heap vs clustered khác nhau hai dialect — đây là nguồn plan regression khi port.
 
 Index là cấu trúc phụ: seek/scan hẹp, uniqueness, join, covering. Mỗi index = chi phí ghi + dung lượng + maintenance. Hai engine cùng B-tree ở bề mặt nhưng lệch clustered/heap, `INCLUDE`, filtered/partial, columnstore (SQL Server), GIN/GiST/BRIN (PostgreSQL). `CREATE INDEX` không online/concurrent = schema lock ghi. JSON INDEX 2025 đã GA; vector index vẫn PREVIEW. Kiểm yêu cầu của từng loại index.
@@ -328,7 +328,7 @@ CREATE VECTOR INDEX vix ON dbo.Doc (Embedding);    -- DiskANN, PREVIEW
 -- VECTOR_SEARCH (ANN) — PREVIEW; catalog sys.vector_indexes
 ```
 
-Kiểu `vector` + `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTORPROPERTY` là surface **GA** theo what's new 2025. **Index ANN và `VECTOR_SEARCH` = PREVIEW**. Hybrid = vector + full-text, không SQL/PGQ.
+Kiểu `vector` + `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTORPROPERTY` là surface **GA** theo what's new 2025. **Index ANN và `VECTOR_SEARCH` = PREVIEW**. Hybrid = vector + full-text,.
 
 ```sql
 -- PostgreSQL
@@ -383,7 +383,7 @@ REPACK (VERBOSE) employees;
 
 Mặc định `ACCESS EXCLUSIVE` suốt copy. `CONCURRENTLY`: copy dưới `SHARE UPDATE EXCLUSIVE` + logical decoding vào stash; exclusive **lúc swap**. GUC `max_repack_replication_slots`. **Không** trong transaction block.
 
-Hạn chế (**beta**): partitioned / unlogged / catalog; historically một concurrent repack một lúc; deadlock lock upgrade lúc swap — [concurrency.md](concurrency.md). Không thay `TRUNCATE`. Slot + WAL lúc concurrent — job đêm thử replica trước. Autovacuum song song **không** thay REPACK khi bloat nặng.
+Hạn chế: partitioned / unlogged / catalog; một `REPACK (CONCURRENTLY)` tại một thời điểm; deadlock khi nâng khóa lúc swap — [concurrency.md](concurrency.md). Không thay `TRUNCATE`. Slot + WAL lúc concurrent — job đêm thử replica trước. Autovacuum song song **không** thay REPACK khi bloat nặng.
 
 SS `REBUILD ONLINE` ≈ ý “không exclusive suốt copy”; **không** logical decoding. `REORGANIZE` ≠ `VACUUM` ≠ `REPACK`.
 
@@ -692,7 +692,7 @@ WHERE relid = 'orders'::regclass;
 -- SS 2025: kiểu vector GA; index ANN PREVIEW
 -- CREATE VECTOR INDEX …  (DiskANN); VECTOR_SEARCH
 -- PREVIEW_FEATURES ON; catalog sys.vector_indexes
--- Hybrid = vector + full-text, không GRAPH_TABLE
+-- Hybrid = vector + full-text,
 
 -- PG: CREATE EXTENSION vector;
 -- INDEX USING hnsw (embedding vector_cosine_ops)
@@ -789,7 +789,7 @@ Persisted stats secondary 2025 = I/O ghi replica + Query Store secondary ON mặ
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PostgreSQL CREATE INDEX / CONCURRENTLY](https://www.postgresql.org/docs/19/sql-createindex.html)
 - [T-SQL CREATE JSON INDEX](https://learn.microsoft.com/en-us/sql/t-sql/statements/create-json-index-transact-sql?view=sql-server-ver17)

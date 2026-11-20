@@ -1,6 +1,6 @@
 # Hệ thống kiểu dữ liệu
 
-> **Baseline:** SQL Server **2025** · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** · PostgreSQL **19** (GA 19/11/2026).<br>
 > SQL không có CTS/.NET: kiểu là **column type** + **cast rule** + **operator class**. Hai engine **không** map 1-1.
 
 Khi nói “cột `id` là int”, bạn chưa đủ thông tin để port. Cần biết storage, miền giá trị, typmod (`varchar(20)`, `numeric(12,2)`), collation, operator nào hợp lệ (`=`, `&&`, `->`), và indexability. `int` SQL Server và `integer` PostgreSQL gần nhau; `datetime` vs `timestamptz`, `bit` vs `boolean`, `nvarchar` vs `text`, `json` 2025 vs `jsonb` thì **không**. File này giải thích ngữ nghĩa — map máy móc 1-1 là nguồn bug.
@@ -455,7 +455,7 @@ SELECT ARRAY[1,2,3];
 SELECT tags[1], tags @> ARRAY['sql'] FROM posts;   -- 1-based index
 UPDATE posts SET tags = tags || 'sql';
 
--- Range / multirange (application-time PG 18+ WITHOUT OVERLAPS; FOR PORTION OF đã bị rút khỏi 19)
+-- Range / multirange (application-time PG 18+ WITHOUT OVERLAPS)
 SELECT int4range(1, 10, '[)');                     -- 1 ≤ x < 10
 SELECT datemultirange(daterange('2026-01-01', '2026-06-01'));
 
@@ -496,7 +496,7 @@ SELECT VECTORPROPERTY(@q, 'Dimensions');
 | `CREATE EXTERNAL MODEL` / `ALTER` / `DROP` | GA surface | REST embedding, credential **tách** engine |
 | `AI_GENERATE_EMBEDDINGS` / `AI_GENERATE_CHUNKS` | GA surface | Chunk + gọi model đã định nghĩa |
 | `CREATE VECTOR INDEX` (DiskANN), `VECTOR_SEARCH` | **PREVIEW** | Cần `PREVIEW_FEATURES`; catalog `sys.vector_indexes` |
-| Hybrid vector + full-text | GA ý | **Không** SQL/PGQ |
+| Hybrid vector + full-text | GA ý |pgvector là extension |
 
 ```sql
 -- PREVIEW
@@ -524,7 +524,7 @@ CREATE TABLE doc (
 - Bật `PREVIEW_FEATURES` “cho vector” kéo CES/fuzzy trên **cùng** database — [dialects.md](dialects.md).
 - pgvector operators (`<->`, `<=>`) không có trên SQL Server; đừng copy. Chiều `vector(1536)` phải khớp model; `VECTORPROPERTY(…, 'Dimensions')` vs typmod.
 - Half-precision: cùng số chiều, khác dung lượng; mix float32/half trong một `VECTOR_DISTANCE` — kiểm docs (thường đòi cùng layout). Không bịa implicit cast.
-- Hybrid search ≠ `GRAPH_TABLE` ([keywords.md](keywords.md), [select.md](select.md)).
+-
 
 Hai session — PREVIEW index:
 
@@ -792,7 +792,7 @@ pgvector: typmod chiều; storage half tùy version extension — đọc docs ex
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PostgreSQL numeric types](https://www.postgresql.org/docs/19/datatype-numeric.html)
 - [SQL Server JSON data type](https://learn.microsoft.com/en-us/sql/t-sql/data-types/json-data-type?view=sql-server-ver17)

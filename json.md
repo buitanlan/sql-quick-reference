@@ -1,6 +1,6 @@
 # JSON
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
 > JSON trong RDBMS là **tài liệu trong cột**, không phải document DB. Cột quan hệ + index rẻ hơn document khi query equality ổn định.
 
 SQL Server 2025 thêm kiểu `json` binary (**GA SQL Server 2025 và Azure SQL/MI theo update policy**). PostgreSQL: `json` (text) vs **`jsonb`** (binary) — mặc định mới nên `jsonb`. Path, modify, unnest (`OPENJSON` vs `jsonb_to_recordset`), aggregate (`JSON_OBJECTAGG` **GA** on-prem / `json_array()` rỗng → `[]` ở **19**) lệch mạnh. Index: `CREATE JSON INDEX` **GA** vs GIN.
@@ -762,7 +762,7 @@ Không COPY FROM FORMAT json. Load qua jsonb_populate_record, CSV hoặc app; SQ
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [SQL Server JSON overview (GA)](https://learn.microsoft.com/en-us/sql/relational-databases/json/json-data-sql-server?view=sql-server-ver17)
 - [SQL Server JSON data type](https://learn.microsoft.com/en-us/sql/t-sql/data-types/json-data-type?view=sql-server-ver17)

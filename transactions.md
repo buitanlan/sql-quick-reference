@@ -1,6 +1,6 @@
 # Giao dịch & isolation
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
 > Isolation **không** portable. Cùng tên `REPEATABLE READ` trên hai engine **không** cùng guarantee — đây là nguồn bug hay gặp khi port.
 
 SQL xử lý đồng thời bằng **transaction**: một đơn vị công việc hoặc thành công hết (`COMMIT`) hoặc không để lại hiệu ứng (`ROLLBACK`). Isolation quyết định *mình thấy gì của người khác* và *người khác thấy gì của mình* trước khi commit. Hai engine hiện thực isolation khác nhau (khóa vs MVCC/SSI) nên không thể copy `SET TRANSACTION ISOLATION LEVEL` rồi cho rằng hành vi giống nhau.
@@ -897,7 +897,7 @@ Lock mode, `SKIP LOCKED`, deadlock graph, tempdb 1138: [concurrency.md](concurre
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [T-SQL BEGIN TRANSACTION](https://learn.microsoft.com/en-us/sql/t-sql/language-elements/begin-transaction-transact-sql?view=sql-server-ver17)
 - [PostgreSQL WAIT](https://www.postgresql.org/docs/19/sql-wait.html)

@@ -1,11 +1,11 @@
 # DDL (CREATE / ALTER / DROP)
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
 > DDL thường dùng có thể rollback trên cả SQL Server và PostgreSQL. Ngoại lệ phụ thuộc từng lệnh; GO chỉ tách batch, không COMMIT. Kiểm tra lock, log, edition và giới hạn transaction của tác vụ bảo trì.
 
 DDL lấy **schema lock** mạnh: chặn DML, xếp hàng sau transaction dài. Production: thao tác metadata-only / `NOT VALID` / `ONLINE` / `CONCURRENTLY`, không `ALTER` rewrite bảng lớn trong giờ cao điểm. Partition `SPLIT`/`MERGE` (PG **19**, **beta**) và `REPACK` không phải lệnh “rẻ mặc định”.
 
-Constraint: [constraints.md](constraints.md). Index: [indexes.md](indexes.md). Khóa AccessExclusive: [concurrency.md](concurrency.md). Trạng thái SQL/PGQ: [select.md](select.md) §11. Isolation khi DDL trong txn: [transactions.md](transactions.md) §10. Vacuum vs rebuild: [internal.md](internal.md) §11.
+Constraint: [constraints.md](constraints.md). Index: [indexes.md](indexes.md). Khóa AccessExclusive: [concurrency.md](concurrency.md). Isolation khi DDL trong txn: [transactions.md](transactions.md) §10. Vacuum vs rebuild: [internal.md](internal.md) §11.
 
 ---
 
@@ -26,8 +26,7 @@ Constraint: [constraints.md](constraints.md). Index: [indexes.md](indexes.md). K
   - [9.1 ALL SEQUENCES / REFRESH SEQUENCES](#91-all-sequences--refresh-sequences)
 - [10. REPACK vs REBUILD](#10-repack-vs-rebuild)
   - [10.1 REPACK CONCURRENTLY](#101-repack-concurrently)
-- [11. Property graph — đã rút khỏi PostgreSQL 19](#11-property-graph--đã-rút-khỏi-postgresql-19)
-- [12. IF EXISTS / CASCADE](#12-if-exists--cascade)
+- [11. IF EXISTS / CASCADE](#11-if-exists--cascade)
 - [13. Worked examples](#13-worked-examples)
   - [13.1 Đơn giản — bảng + identity trong txn (PG) vs batch (SS)](#131-đơn-giản--bảng--identity-trong-txn-pg-vs-batch-ss)
   - [13.2 Trung bình — VIRTUAL + extended stats + index online](#132-trung-bình--virtual--extended-stats--index-online)
@@ -51,7 +50,7 @@ Ba câu hỏi trước mỗi `ALTER`:
 2. **Lock gì, giữ bao lâu?** (`ACCESS EXCLUSIVE` vs `SHARE UPDATE EXCLUSIVE` + validate).
 3. **Rollback được không?** (cả hai có transactional DDL, ngoại lệ từng lệnh).
 
-PostgreSQL 19 Beta 4: REPACK, sequence trong logical replication và extended stats trên virtual generated còn hỗ trợ; SQL/PGQ và SPLIT/MERGE partition đã bị rút — đối chiếu [release notes 19](https://www.postgresql.org/docs/19/release-19.html). SQL Server 2025: compatibility **170**, `PREVIEW_FEATURES` (vector index, CES, fuzzy) — [internal.md](internal.md) §19.
+PostgreSQL 19 GA (19/11/2026): `REPACK`, sequence trong logical replication và extended stats trên virtual generated. SQL Server 2025: compatibility **170**, `PREVIEW_FEATURES` (vector index, CES, half-precision). Fuzzy `EDIT_DISTANCE` / `JARO_WINKLER_*` **GA từ CU11** — [internal.md](internal.md) §19.
 
 ---
 
@@ -298,9 +297,7 @@ CREATE TABLE events_2026_09 PARTITION OF events
     FOR VALUES FROM ('2026-09-01 00:00:00+00') TO ('2026-10-01 00:00:00+00');
 ```
 
-PK/UNIQUE của bảng partitioned phải chứa mọi cột khóa partition (và khóa partition không được là biểu thức đối với ràng buộc đó). Dùng mốc có timezone rõ ràng với `timestamptz`.
-
-**SPLIT/MERGE partition đã bị rút khỏi PostgreSQL 19 Beta 4**, xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). Để đổi biên partition hiện tại: tạo bảng staging với biên mới, chuyển dữ liệu và dùng `DETACH/ATTACH PARTITION` với kế hoạch khóa/cutover cụ thể. `DETACH PARTITION CONCURRENTLY` có hạn chế riêng, gồm việc không chạy trong transaction block. Đừng xóa partition cũ trước khi kiểm tra số hàng và biên của dữ liệu mới.
+PK/UNIQUE của bảng partitioned phải chứa mọi cột khóa partition (và khóa partition không được là biểu thức đối với ràng buộc đó). Dùng mốc có timezone rõ ràng với `timestamptz`. Đổi biên: `DETACH` / `ATTACH PARTITION` (kế hoạch khóa và đối soát số hàng). `DETACH PARTITION CONCURRENTLY` không chạy trong transaction block.
 
 ---
 
@@ -333,7 +330,7 @@ ALTER TABLE dbo.Events SWITCH PARTITION 2 TO dbo.Events_Staging;
 
 `RANGE RIGHT` vs `LEFT`: giá trị biên thuộc partition nào — sai một ngày = dữ liệu “sai ngăn”, `SWITCH` fail.
 
-**Ghi chú:** Đừng copy `ALTER TABLE … SPLIT PARTITION` PG sang T-SQL (SS tách function/scheme). PG 19 Beta 4 không hỗ trợ SPLIT/MERGE partition. Unique aligned SS vs PK gồm partition-key PG. `SWITCH` ≈ `DETACH`+gắn staging, không phải `TRUNCATE`.
+**Ghi chú:** SQL Server `SPLIT`/`MERGE` là lệnh trên partition **function**, không phải `ALTER TABLE`. Unique aligned trên SQL Server; PostgreSQL bắt PK gồm khóa partition. `SWITCH` gần `DETACH` rồi gắn staging, không phải `TRUNCATE`.
 
 ---
 
@@ -518,13 +515,7 @@ SQL Server gần: `ALTER INDEX … REBUILD WITH (ONLINE = ON)` / rebuild cluster
 
 ---
 
-## 11. Property graph — đã rút khỏi PostgreSQL 19
-
-SQL/PGQ, `CREATE PROPERTY GRAPH` và `GRAPH_TABLE` đã bị rút trong Beta 4; không còn là API PostgreSQL 19. Xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). Mô hình hóa đỉnh/cạnh bằng bảng quan hệ, query đường đi cố định bằng JOIN và đường đi nhiều bước bằng [recursive CTE](cte-subqueries.md). SQL Server SQL Graph là hệ cú pháp riêng, không thể thay thế trực tiếp SQL/PGQ.
-
----
-
-## 12. IF EXISTS / CASCADE
+## 11. IF EXISTS / CASCADE
 
 ```sql
 DROP TABLE IF EXISTS orders;
@@ -546,7 +537,7 @@ CREATE OR REPLACE VIEW v_paid AS …;
 
 SQL Server **không** `CREATE TABLE IF NOT EXISTS` (dùng `IF OBJECT_ID … IS NULL`). **Không** `DROP TABLE … CASCADE` kiểu PG (`DROP SCHEMA` SS không cascade như PG — drop object trước).
 
-CASCADE PostgreSQL có thể xóa view, FK, sequence OWNED BY và materialized view phụ thuộc. Review dependency trước khi DROP. PG 19 Beta 4 không có property graph.
+CASCADE PostgreSQL có thể xóa view, FK, sequence OWNED BY và materialized view phụ thuộc. Review dependency trước khi DROP.
 
 `DROP DATABASE` không chạy trong session đang dùng DB đó. `RESTRICT` (PG, mặc định nhiều lệnh) ngược `CASCADE`.
 
@@ -609,7 +600,7 @@ CREATE INDEX ix_invoice_total ON dbo.Invoice (Total)
 CREATE TABLE events_2026_10 PARTITION OF events
     FOR VALUES FROM ('2026-10-01 00:00:00+00') TO ('2026-11-01 00:00:00+00');
 
--- PostgreSQL 19 Beta 4: subscription/publication đã cấu hình trước.
+-- PostgreSQL 19: subscription/publication đã cấu hình trước.
 ALTER SUBSCRIPTION sub_all REFRESH PUBLICATION;
 ALTER SUBSCRIPTION sub_all REFRESH SEQUENCES;
 
@@ -672,7 +663,7 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 - Bloat: autovacuum trước; `REPACK (CONCURRENTLY)` có chủ đích (slot/WAL/swap).
 - Graph: metadata + index FK; beta; không variable-length.
 - `DROP CASCADE` review phụ thuộc.
-- `PREVIEW_FEATURES` / PG 19 beta không lặng lẽ lên prod.
+- `PREVIEW_FEATURES` (vector index, CES, half-precision) không lặng lẽ lên prod. PostgreSQL 19 đã GA.
 
 ```text
 □ Lock_timeout khi ALTER production
@@ -682,7 +673,7 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 □ SPLIT có filegroup / partition đích; cửa sổ khóa
 □ REFRESH PUBLICATION rồi REFRESH SEQUENCES
 □ REPACK CONCURRENTLY đo WAL + swap
-□ PREVIEW_FEATURES / PG 19 beta không lặng lẽ lên prod
+□ PREVIEW_FEATURES (vector/CES) không lặng lẽ lên prod; PG 19 đã GA
 ```
 
 ---
@@ -703,9 +694,7 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 - `VACUUM FULL` thay `REPACK (CONCURRENTLY)` trên OLTP chưa đo exclusive.
 - `CLUSTER` cron = `REPACK CONCURRENTLY` chưa test slot.
 - Sequence replica pre-19 / quên `REFRESH SEQUENCES` (chỉ giá trị) vs `REFRESH PUBLICATION` (object).
-- Dùng CREATE PROPERTY GRAPH đã bị rút khỏi PG 19 Beta 4.
 - Port `IDENTITY` sang `serial` rồi `TRUNCATE` không `RESTART IDENTITY`.
-- SQL Server SPLIT RANGE thiếu NEXT USED; PG SPLIT PARTITION đã bị rút khỏi 19.
 - Extended stats trên VIRTUAL rồi tin seek không cần expression index.
 - `PREVIEW` vector index trong script DDL bắt buộc.
 
@@ -725,24 +714,23 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 | `NOT VALID` FK/CHECK | `NOCHECK` khác ngữ nghĩa | lâu |
 | CHECK `[NOT] ENFORCED` | — | **19** |
 | Declarative `PARTITION BY` | function/scheme | lâu |
-| `SPLIT`/`MERGE` partition tại chỗ | `ALTER PARTITION FUNCTION` | **19 beta** (`ALTER TABLE`) |
+| `SPLIT`/`MERGE` partition function | `ALTER PARTITION FUNCTION` | SQL Server |
 | `DETACH CONCURRENTLY` | `SWITCH` | **14+** |
 | `CREATE MATERIALIZED VIEW` | indexed view | lâu |
 | Sequence logical replication | — | **19** `ALL SEQUENCES` / `REFRESH SEQUENCES` |
-| `REPACK` / `REPACK (CONCURRENTLY)` | `ALTER INDEX REBUILD` | **19 beta** |
-| CREATE PROPERTY GRAPH | NODE/EDGE thuộc SQL Graph riêng | Đã rút khỏi 19 Beta 4 |
+| `REPACK` / `REPACK (CONCURRENTLY)` | `ALTER INDEX REBUILD` | **19 GA** |
 | `CREATE OR ALTER` | proc/view một số object | `CREATE OR REPLACE` |
 | `DROP IF EXISTS` | **2016+** | lâu |
 | Compat 170 / `PREVIEW_FEATURES` | **2025** | — |
 | JIT default off | — | **19** |
 
-DML sau đổi schema (`OVERRIDING`, `TRUNCATE`, bulk và chia khoảng application-time): [dml.md](dml.md). Join PK/FK mới: [joins.md](joins.md). Trạng thái SQL/PGQ: [select.md](select.md) §11. Vacuum/WAL: [internal.md](internal.md).
+DML sau đổi schema (`OVERRIDING`, `TRUNCATE`, bulk và chia khoảng application-time): [dml.md](dml.md). Join PK/FK mới: [joins.md](joins.md).Vacuum/WAL: [internal.md](internal.md).
 
 ---
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [T-SQL CREATE INDEX](https://learn.microsoft.com/en-us/sql/t-sql/statements/create-index-transact-sql?view=sql-server-ver17)
 - [PostgreSQL CREATE TABLE](https://www.postgresql.org/docs/19/sql-createtable.html)

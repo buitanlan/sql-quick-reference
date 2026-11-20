@@ -1,9 +1,9 @@
 # JOIN
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
 > Join là thao tác đại số: tích Descartes có lọc. Optimizer được đổi `INNER` thành semi/anti, đẩy predicate, reorder — **miễn kết quả logic giữ nguyên**. Plan khác nhau không có nghĩa câu sai.
 
-Join quyết định *hàng nào tồn tại* và *hàng nào bị nhân*. Lỗi hay gặp không phải sai `INNER`/`LEFT` trên giấy, mà: (1) predicate outer đặt nhầm `WHERE`, (2) `NOT IN` với `NULL`, (3) fan-out 1-n ⋈ 1-n, (4) `NATURAL JOIN` đổi silently khi thêm cột. Hai engine cùng tên join; thuật toán và mẹo optimizer **không** portable — PostgreSQL 19 (**beta**) thêm rewrite anti/semi, aggregate-trước-join, Memoize; SQL Server 2025 thêm CE/DOP/OPPO feedback.
+Join quyết định *hàng nào tồn tại* và *hàng nào bị nhân*. Lỗi hay gặp không phải sai `INNER`/`LEFT` trên giấy, mà: (1) predicate outer đặt nhầm `WHERE`, (2) `NOT IN` với `NULL`, (3) fan-out 1-n ⋈ 1-n, (4) `NATURAL JOIN` đổi silently khi thêm cột. Hai engine cùng tên join; thuật toán và mẹo optimizer **không** portable — PostgreSQL 19 (GA 19/11/2026) có rewrite anti/semi, aggregate-trước-join, Memoize; SQL Server 2025 thêm CE/DOP/OPPO feedback.
 
 Khóa khi join rồi cập nhật: [concurrency.md](concurrency.md). `UPDATE … FROM` fan-out: [dml.md](dml.md). Index cho khóa join: [indexes.md](indexes.md). `EXISTS` trong CTE: [cte-subqueries.md](cte-subqueries.md). `SELECT` logical processing: [select.md](select.md) §3. Optimizer engine: [internal.md](internal.md) §13.
 
@@ -58,7 +58,6 @@ Nguyên tắc:
 - **Semi/anti** khi chỉ cần tồn tại/không tồn tại — đừng `DISTINCT` sau `INNER JOIN` con.
 - **Thuật toán** (loop/hash/merge) là việc optimizer; hint chỉ khi đã hết thống kê và đo.
 
-SQL/PGQ đã bị rút khỏi PG 19 Beta 4; dùng JOIN/recursive CTE — [select.md](select.md) mục 11.
 
 ---
 
@@ -309,7 +308,7 @@ SELECT 1 WHERE 1 NOT IN (SELECT NULL); -- 0 hàng
 
 ### 7.2 PG 19: ANTI JOIN rewrite
 
-PostgreSQL **19** (**beta**):
+PostgreSQL **19** (GA 19/11/2026):
 
 - `NOT IN (SELECT …)` khi planner **chứng minh subquery không NULL** → rewrite **ANTI JOIN** (hash/nested loop anti), thường rẻ hơn `<> ALL` naively.
 - Nhiều `LEFT JOIN` + predicate kiểu anti (`IS NULL` trên khóa phải) → **ANTI JOIN**.
@@ -480,7 +479,7 @@ JOIN b ON a.code = b.code AND a.id <> b.id;  -- tránh trùng nếu cả hai kh�
 
 ## 10. Optimizer: PG 19 & SQL Server 2025
 
-Ghi PG 19 **beta** — đối chiếu [release notes 19](https://www.postgresql.org/docs/19/release-19.html). SQL Server: compat **170** + Query Store.
+Ghi PG 19 **GA** — đối chiếu [release notes 19](https://www.postgresql.org/docs/19/release-19.html). SQL Server: compat **170** + Query Store.
 
 ### 10.1 PostgreSQL 19
 
@@ -855,7 +854,6 @@ PG 19 hash “NULL key tốt hơn” không ghép hai NULL. Muốn “cả hai N
 - `CROSS APPLY` khi cần `OUTER APPLY` (mất hàng trái).
 - `NATURAL JOIN` trong view cũ; thêm cột cùng tên.
 - Port `USING` sang SQL Server.
-- Dùng GRAPH_TABLE đã bị rút khỏi PostgreSQL 19 Beta 4.
 - `SET enable_hashjoin = off` lên connection pool.
 - Compat 170 không đo plan cache (OPPO tăng số plan).
 - `UPDATE` join fan-out trên PostgreSQL — [dml.md](dml.md), không phải “JOIN SELECT”.
@@ -878,7 +876,6 @@ PG 19 hash “NULL key tốt hơn” không ghép hai NULL. Muốn “cả hai N
 | CE expression / OPPO / PSPO / DOP feedback | **2025** | generic/custom |
 | `pg_plan_advice` / `pg_stash_advice` | Query Store force | **19** contrib |
 | `GENERATE_SERIES` | 2022+ | lâu |
-| SQL/PGQ | SQL Graph riêng | Đã rút khỏi 19 Beta 4 |
 | JIT default off | — | **19** |
 
 Logical processing `FROM`/`ON`/`WHERE`: [select.md](select.md) §3. Isolation khi join rồi ghi: [transactions.md](transactions.md). IQP trên `SELECT`: [select.md](select.md) §14.
@@ -887,7 +884,7 @@ Logical processing `FROM`/`ON`/`WHERE`: [select.md](select.md) §3. Isolation kh
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PostgreSQL SELECT / FROM / JOIN](https://www.postgresql.org/docs/19/sql-select.html)
 - [PostgreSQL 19 optimizer changes](https://www.postgresql.org/docs/19/release-19.html)

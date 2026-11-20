@@ -1,6 +1,6 @@
 # Routine (procedure, function, trigger)
 
-> **Baseline:** SQL Server **2025** (T-SQL) · PostgreSQL **19 Beta 4** (SQL / PL/pgSQL).<br>
+> **Baseline:** SQL Server **2025** (T-SQL) · PostgreSQL **19** (GA 19/11/2026) (SQL / PL/pgSQL).<br>
 > Routine là mã *trong engine*: biên dịch, quyền, transaction, search_path. Không phải API HTTP mặc định — trừ khi bạn cố ý gọi REST (§9) hoặc model ngoài (§10).
 
 Procedure và function **không** đổi tên được khi port. T-SQL function cấm side-effect mạnh; PL/pgSQL `VOLATILE` function ghi bảng được nhưng khó test. Trigger hai dialect đều **set-based** (SS `inserted`/`deleted` nhiều hàng; PG `FOR EACH ROW` vẫn phải nghĩ burst). Dynamic SQL sai quoting = injection. File này là hợp đồng review, không phải gen CRUD.
@@ -780,7 +780,7 @@ Sâu: SS nested trigger 32; `TRIGGER_NESTLEVEL()`. PG `pg_trigger_depth()`. Cả
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PL/pgSQL INTO / STRICT / EXECUTE](https://www.postgresql.org/docs/19/plpgsql-statements.html)
 - [T-SQL sp_executesql](https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-executesql-transact-sql?view=sql-server-ver17)

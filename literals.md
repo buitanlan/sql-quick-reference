@@ -1,6 +1,6 @@
 # Literal
 
-> **Baseline:** SQL Server **2025** · PostgreSQL **19 Beta 4**.
+> **Baseline:** SQL Server **2025** · PostgreSQL **19** (GA 19/11/2026).
 
 Literal là giá trị viết trong câu lệnh — parser gắn *kiểu* (hoặc *unknown*) trước khi so với cột. Sai literal không phải lỗi cú pháp: `'2026-09-13'` có thể là `varchar`, `date`, hoặc `datetime` tùy engine, `DATEFORMAT`, và ngữ cảnh. PostgreSQL cố tình để chuỗi untyped (`unknown`) đến khi neo; SQL Server chọn `varchar`/`nvarchar` ngay theo prefix `N` và collation. Hiểu lớp này trước khi debug “sao parameter không khớp” / “sao ngày đảo tháng”.
 
@@ -346,7 +346,7 @@ SELECT TIMESTAMP '2026-09-13 00:00' + INTERVAL '3 hours';
 
 SQL Server không có literal interval. `DATEADD(day, 2, @d)` / `DATEDIFF`. Không viết `INTERVAL` trong T-SQL rồi mong parse. `DATEADD` **2025** nhận `bigint` cho `number` — literal `86400` vẫn `int` nếu vừa; nhân `CAST(… AS bigint)` khi khoảng lớn — [typesystem.md](typesystem.md).
 
-Dùng typed literal như DATE '2026-01-01' trên PostgreSQL để tránh lệ thuộc DateStyle; T-SQL dùng DATEFROMPARTS/CONVERT có style rõ ràng. FOR PORTION OF đã bị rút khỏi PG 19.
+Dùng typed literal như DATE '2026-01-01' trên PostgreSQL để tránh lệ thuộc DateStyle; T-SQL dùng DATEFROMPARTS/CONVERT có style rõ ràng.
 
 ---
 
@@ -766,7 +766,7 @@ SELECT JSON_ARRAYAGG(NULL) AS one_null_row; -- [] theo ABSENT ON NULL mặc đ�
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PostgreSQL lexical structure](https://www.postgresql.org/docs/19/sql-syntax-lexical.html)
 - [UNISTR](https://learn.microsoft.com/en-us/sql/t-sql/functions/unistr-transact-sql?view=sql-server-ver17)

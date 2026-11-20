@@ -1,7 +1,7 @@
 # Dialect, identifier & quy ước
 
-> **Baseline:** SQL Server **2025** (T-SQL) · PostgreSQL **19 Beta 4**.<br>
-> SQL chuẩn: ISO/IEC 9075 (SQL:2023 + SQL/PGQ). Engine **không** implement đủ chuẩn; luôn kiểm tra dialect.
+> **Baseline:** SQL Server **2025** (T-SQL) · PostgreSQL **19** (GA 19/11/2026).<br>
+> SQL chuẩn: ISO/IEC 9075 (SQL:2023). Engine **không** implement đủ chuẩn; luôn kiểm tra dialect.
 
 SQL không phải một ngôn ngữ. ANSI/ISO định nghĩa lõi (`SELECT`, `JOIN`, `NULL`), mỗi engine thêm dialect, identifier, batch, collation và session option riêng. Port script giữa SQL Server và PostgreSQL thất bại trước hết ở *quy ước* — folding tên, `search_path` / default schema, `GO` vs `;`, three-valued logic — chứ không phải ở `SELECT`. File này là lớp nền: [typesystem.md](typesystem.md), [literals.md](literals.md), [keywords.md](keywords.md) giả định bạn đã hiểu các luật dưới đây.
 
@@ -99,7 +99,6 @@ OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY;
 
 - `FETCH` portable; `TOP` / `LIMIT` đọc nhanh hơn với người quen dialect — chọn một convention trong repo.
 - Lớp extension **không** có trên engine kia: `VECTOR_SEARCH` (SQL Server, **PREVIEW**) ≠ `pgvector` operator `<=>`.
-- SQL/PGQ đã bị rút khỏi PostgreSQL 19 trong [Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). Dùng JOIN/recursive CTE; SQL Server NODE/EDGE/MATCH thuộc SQL Graph riêng.
 
 Hai session — cùng “10 hàng mới nhất”, khác guarantee nếu thiếu `ORDER BY`:
 
@@ -654,7 +653,6 @@ Công tắc **database scoped** dành cho vector index/VECTOR_SEARCH, fuzzy stri
 
 JSON 2025 hiện đã GA; vector index vẫn PREVIEW trên SQL Server 2025. Đối chiếu từng API và nền tảng trước khi copy runbook cloud. Bật “cho vector” kéo **cả** feature preview trên database đó, không phải từng lệnh.
 
-PostgreSQL 19 không có flag PREVIEW_FEATURES. Cả major đang beta; REPACK và WAIT FOR còn trong Beta 4, còn SQL/PGQ và FOR PORTION OF đã bị rút. Theo dõi release notes trước khi nâng major.
 
 ### 10.3 `standard_conforming_strings` & `escape_string_warning`
 
@@ -769,7 +767,6 @@ Chỉ mục **parser / session / client / identifier**. Optimizer/HA/SKU đầy 
 4. **Đổi encoding `MULE_INTERNAL` trước** — encoding gỡ.
 5. **Test `postgres_fdw` trong txn `READ ONLY`** — ghi remote fail; ETL phải txn read-write.
 6. **`search_path` / `DISCARD ALL` trên pool** — không đổi so 18, nhưng custom GUC vẫn leak.
-7. **JIT / `max_locks_per_transaction` 128** — GUC session/cluster; kiểm ngân sách shared memory khi đổi cấu hình. REPACK còn trong 19 Beta 4; SQL/PGQ đã bị rút.
 
 ---
 
@@ -902,7 +899,7 @@ T2 (pg_upgrade → 19): từ chối cluster cho đến khi đổi tên
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PostgreSQL lexical structure](https://www.postgresql.org/docs/19/sql-syntax-lexical.html)
 - [T-SQL nested block comments](https://learn.microsoft.com/en-us/sql/t-sql/language-elements/slash-star-comment-transact-sql?view=sql-server-ver17)

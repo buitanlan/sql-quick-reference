@@ -1,6 +1,6 @@
 # Khóa & concurrency
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
 > Bổ sung [transactions.md](transactions.md): đây là **lock, wait, deadlock, version store**. Isolation quyết định *thấy gì*; file này là *đợi gì, giết ai*.
 
 SQL Server mặc định **pessimistic** (lock manager) + tùy chọn row versioning (RCSI/SI). PostgreSQL **MVCC**: reader không block writer; writer block writer trên **cùng tuple**. Cùng `FOR UPDATE` / `UPDLOCK` không cùng hàng đợi. Optimized locking **2025** giảm lock memory — **không** đổi isolation. Deadlock `1205` vs `40001`/`40P01`. `SKIP LOCKED` ≠ `READPAST` hết nuance. Slot CES / logical replication / Fabric mirroring giữ xmin/log.
@@ -848,7 +848,7 @@ Không `ORDER BY` = planner có thể khóa 2 rồi 1 — deadlock với session
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [SQL Server optimized locking](https://learn.microsoft.com/en-us/sql/relational-databases/performance/optimized-locking?view=sql-server-ver17)
 - [T-SQL READPAST and RCSI](https://learn.microsoft.com/en-us/sql/t-sql/queries/hints-transact-sql-table?view=sql-server-ver17)

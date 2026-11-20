@@ -1,6 +1,6 @@
 # Quyền (Permissions)
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
 > File này là **ủy quyền** (ai được làm gì sau khi đã vào được). Xác thực (mật khẩu, Entra, `pg_hba`, TLS) chỉ nhắc khi nó đổi principal. Routine `SECURITY DEFINER` / `EXECUTE AS`: [routines.md](routines.md) §11. Kiến trúc login/TDE: [internal.md](internal.md) §18.
 
 `GRANT SELECT` trên hai engine **không** cùng mô hình principal. SQL Server tách **login** (cửa instance) và **user** (cửa database), có `DENY` thắng `GRANT`. PostgreSQL chỉ có **role**; “user” là role có `LOGIN`. Không có `DENY`: muốn cấm thì `REVOKE`, hoặc đừng cho vào role đang giữ quyền. Copy script `DENY` sang `psql` là lỗi cú pháp, không phải “cấm được”.
@@ -443,7 +443,6 @@ RLS + một login app: mọi tenant dùng chung `app_write`, policy theo session
 - `GRANT` / `REVOKE … GRANTED BY role` — ACL ghi nhận người cấp không phải lúc nào cũng là current user (role member có quyền).
 - Cảnh báo mật khẩu sắp hết hạn: `password_expiration_warning_threshold` (mặc định bảy ngày).
 - `pg_read_all_data` / `pg_write_all_data` + large object.
-- SQL/PGQ đã bị rút khỏi PostgreSQL 19 Beta 4; không có privilege property graph để cấp trong baseline này.
 - `SECURITY DEFINER` + `search_path`: không đổi luật 19; vẫn bắt buộc khóa path.
 
 ---
@@ -533,7 +532,6 @@ GRANT SELECT ON app.employees_public TO app_read;   -- view không có cột sal
 - `SECURITY DEFINER` không `SET search_path` — [routines.md](routines.md).
 - Dynamic SQL trong proc owner: chaining đứt, hoặc `EXECUTE AS OWNER` + nối chuỗi = leo quyền.
 - Pool không `REVERT` / `RESET ROLE`.
-- Dùng GRAPH_TABLE đã bị rút khỏi PostgreSQL 19 Beta 4.
 
 ---
 
@@ -557,7 +555,7 @@ Từ khóa `GRANT` ngắn: [keywords.md](keywords.md) §18. Definer và `search_
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PostgreSQL row security](https://www.postgresql.org/docs/19/ddl-rowsecurity.html)
 - [SQL Server row-level security](https://learn.microsoft.com/en-us/sql/relational-databases/security/row-level-security?view=sql-server-ver17)

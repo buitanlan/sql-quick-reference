@@ -1,11 +1,11 @@
 # Ràng buộc (Constraints)
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
 > Constraint là invariant **engine** — không phải validation app. Isolation không thay CHECK/FK. `NOCHECK` / `NOT VALID` / deferred / `NOT ENFORCED` đổi *khi nào* kiểm, không xóa rule.
 
 Constraint quyết định hàng nào được commit. PK/UNIQUE (kể cả `NULLS NOT DISTINCT`), FK + hành động xóa/sửa, CHECK (NULL **qua**), `EXCLUDE` / temporal `WITHOUT OVERLAPS` (PostgreSQL), deferred (chỉ PG), `NOCHECK` untrusted (SQL Server) vs `NOT VALID` (PG) — lệch dialect dễ port sai. App-only unique = race. DDL lock: [ddl.md](ddl.md). Isolation lúc commit deferred: [transactions.md](transactions.md). Index đứng sau unique/FK: [indexes.md](indexes.md). DML tự chia khoảng application-time: [dml.md](dml.md).
 
-PostgreSQL 19 **beta**: FK check nhanh hơn (implementation, không đổi ngữ nghĩa); `ALTER … CONSTRAINT … [NOT] ENFORCED` cho **CHECK** (trước 19: ENFORCED chủ yếu FK). SQL Server: không `EXCLUDE`, không defer FK.
+PostgreSQL 19 **GA** (19/11/2026): FK check nhanh hơn (implementation, không đổi ngữ nghĩa); `ALTER … CONSTRAINT … [NOT] ENFORCED` cho **CHECK** (trước 19: ENFORCED chủ yếu FK). SQL Server: không `EXCLUDE`, không defer FK.
 
 ---
 
@@ -302,9 +302,7 @@ CREATE TABLE product_price (
 );
 ```
 
-Với khóa sku kiểu text, cần opclass GiST phù hợp, thường từ `CREATE EXTENSION btree_gist` trước khi tạo bảng. Constraint cấm range rỗng và cấm overlap cho cùng sku. Temporal FK dùng `PERIOD` kiểm khoảng ở bảng con được phủ bởi khoảng ở bảng cha. Xem [CREATE TABLE PostgreSQL](https://www.postgresql.org/docs/19/sql-createtable.html).
-
-`FOR PORTION OF` đã bị rút trong Beta 4, xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/); không có việc engine tự chia range hoặc chèn leftover trong PostgreSQL 19. DML thông thường thay cả hàng; tự chia khoảng cần transaction, khóa và kiểm constraint.
+Với khóa sku kiểu text, cần opclass GiST phù hợp, thường từ `CREATE EXTENSION btree_gist` trước khi tạo bảng. Constraint cấm range rỗng và cấm overlap cho cùng sku. Temporal FK dùng `PERIOD` kiểm khoảng ở bảng con được phủ bởi khoảng ở bảng cha. `UPDATE` thay cả hàng range khớp `WHERE`; engine không tự cắt một khoảng thành nhiều đoạn. Xem [CREATE TABLE PostgreSQL](https://www.postgresql.org/docs/19/sql-createtable.html).
 
 SQL Server `SYSTEM_VERSIONING`/`PERIOD FOR SYSTEM_TIME` ghi lịch sử system-time. Nó không tự cấm overlap của khoảng hiệu lực nghiệp vụ mà ứng dụng khai báo.
 
@@ -465,7 +463,7 @@ EXCLUDE USING gist (room_id WITH =, during WITH &&)
 
 ### 13.4 WITHOUT OVERLAPS kiểm constraint
 
-Với bảng product_price ở mục 9, hai khoảng [2026-01-01,2026-07-01) và [2026-07-01,2027-01-01) cùng sku hợp lệ vì biên [) không overlap. Khoảng [2026-06-01,2026-08-01) sẽ bị từ chối. Constraint kiểm kết quả; UPDATE thường không tự chia khoảng. FOR PORTION OF đã bị rút khỏi 19.
+Với bảng product_price ở mục 9, hai khoảng [2026-01-01,2026-07-01) và [2026-07-01,2027-01-01) cùng sku hợp lệ vì biên [) không overlap. Khoảng [2026-06-01,2026-08-01) sẽ bị từ chối. Constraint kiểm kết quả; `UPDATE` thay cả hàng khớp `WHERE`, không tự cắt khoảng.
 
 ---
 
@@ -570,7 +568,6 @@ COMMIT;
 - CHECK subquery “thấy bảng khác” — không portable, thường illegal.
 - `NOT ENFORCED` (PG 19) quên bật lại trước GA prod.
 - App unique check `SELECT` rồi `INSERT` không khóa — [concurrency.md](concurrency.md).
-- Tưởng WITHOUT OVERLAPS tự chia range khi UPDATE; FOR PORTION OF đã bị rút khỏi 19.
 - Trigger INSERT trên leftover làm nghiệp vụ “cập nhật giá” gửi mail hai lần.
 - `btree_gist` inet trên EXCLUDE — upgrade 19 chặn (khác room_id int).
 
@@ -584,7 +581,6 @@ COMMIT;
 | `ON DELETE RESTRICT` | 2019+ rõ | lâu |
 | `EXCLUDE` / GiST | — | lâu |
 | PK `WITHOUT OVERLAPS` | — | **18+** |
-| FOR PORTION OF + leftover tự động | — | Đã rút khỏi 19 Beta 4 |
 | Deferred FK/UNIQUE | — | lâu |
 | `NOT VALID` + `VALIDATE` | `WITH NOCHECK` khác | lâu |
 | CHECK `[NOT] ENFORCED` | — | **19** (FK ENFORCED trước) |
@@ -639,7 +635,7 @@ WHERE conrelid = 'orders'::regclass;
 
 ## Phụ lục D. Chia khoảng trong ứng dụng
 
-Cho khoảng gốc [L,R) và khoảng cập nhật [P,Q), ứng dụng có thể tạo tối đa ba đoạn: trái giữ giá cũ, phần giao lấy giá mới, phải giữ giá cũ. Chỉ tạo đoạn không rỗng và giữ tất cả thay đổi trong một transaction. PostgreSQL 19 không có FOR PORTION OF; đây là thuật toán ứng dụng, không phải hiệu ứng UPDATE tự động.
+Cho khoảng gốc [L,R) và khoảng cập nhật [P,Q), ứng dụng có thể tạo tối đa ba đoạn: trái giữ giá cũ, phần giao lấy giá mới, phải giữ giá cũ. Chỉ tạo đoạn không rỗng và giữ tất cả thay đổi trong một transaction. Đây là thuật toán ứng dụng, không phải hiệu ứng `UPDATE` tự động.
 
 Constraint WITHOUT OVERLAPS kiểm kết quả nhưng không thực hiện phép chia. Khi xóa hàng gốc rồi chèn đoạn mới, cần xét các FK đang tham chiếu hàng đó, trigger, khóa đồng thời và các cột identity/default.
 
@@ -709,7 +705,7 @@ Leftover range: cắt giữa → 2 INSERT; phủ hết → 0 leftover; race RC �
 1. **ETL SS: `WITH CHECK CHECK CONSTRAINT`** — quên = untrusted, mất join elimination.
 2. **PG: `NOT VALID` rồi `VALIDATE`** — hàng mới sạch; khác `NOT ENFORCED`.
 3. **CHECK 19 `ENFORCED` = scan** — bật lại trên bảng bẩn sẽ fail.
-4. **Chia range trong ứng dụng** — một transaction, khóa và WITHOUT OVERLAPS; 19 không có FOR PORTION OF.
+4. **Chia range trong ứng dụng** — một transaction, khóa và `WITHOUT OVERLAPS`.
 5. **`NULLS NOT DISTINCT` không = filtered unique SS**.
 6. **EXCLUDE gist int+range OK; inet/cidr `btree_gist` chặn 19**.
 7. **Mỗi FK một index cột con**.
@@ -720,7 +716,7 @@ Leftover range: cắt giữa → 2 INSERT; phủ hết → 0 leftover; race RC �
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PostgreSQL constraints / WITHOUT OVERLAPS](https://www.postgresql.org/docs/19/sql-createtable.html)
 - [T-SQL constraint trust](https://learn.microsoft.com/en-us/sql/relational-databases/tables/disable-foreign-key-constraints-with-insert-and-update-statements?view=sql-server-ver17)

@@ -1,6 +1,6 @@
 # Toán tử (Operators)
 
-> **Baseline:** SQL Server **2025** · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** · PostgreSQL **19** (GA 19/11/2026).<br>
 > Precedence không giống C# / C. Khi nghi ngờ — **dùng ngoặc**.
 
 Toán tử SQL gắn với *kiểu* và *three-valued logic*, không với method overload kiểu C#. `=` vừa so sánh vừa (T-SQL) gán trong `SET`; `+` vừa cộng vừa nối chuỗi trên SQL Server; PostgreSQL `^` là lũy thừa, `#` mới là XOR. Optimizer **được** đổi thứ tự `AND`/`OR` — không có short-circuit chuẩn. File này là ngữ nghĩa để review, không phải bảng ghi nhớ một dòng.
@@ -33,14 +33,14 @@ Kiểu toán hạng: [typesystem.md](typesystem.md). NULL / `UNKNOWN`: [dialects
 - [12. Bit](#12-bit)
 - [13. Vector & fuzzy](#13-vector--fuzzy)
   - [Vector](#vector)
-  - [Fuzzy — SQL Server **PREVIEW** (`PREVIEW_FEATURES`)](#fuzzy--sql-server-preview-preview_features)
+  - [Fuzzy — SQL Server (GA từ CU11)](#fuzzy--sql-server-ga-từ-cu11)
 - [14. Gán & compound (T-SQL)](#14-gán--compound-t-sql)
 - [15. Overload (PostgreSQL)](#15-overload-postgresql)
 - [16. Hai session — ví dụ làm việc](#16-hai-session--ví-dụ-làm-việc)
   - [16.1 `NOT IN` NULL vs ANTI JOIN 19](#161-not-in-null-vs-anti-join-19)
   - [16.2 `IS DISTINCT FROM NULL` fold](#162-is-distinct-from-null-fold)
   - [16.3 Regex `LIKE` class port](#163-regex-like-class-port)
-  - [16.4 Fuzzy PREVIEW vs regex GA](#164-fuzzy-preview-vs-regex-ga)
+  - [16.4 Fuzzy (GA từ CU11) vs regex GA](#164-fuzzy-ga-từ-cu11-vs-regex-ga)
   - [16.5 `JSON_CONTAINS` vs `@>`](#165-json_contains-vs-)
   - [16.6 Chia 0 + `AND`](#166-chia-0--and)
 - [17. Best practices & checklist](#17-best-practices--checklist)
@@ -68,7 +68,7 @@ SELECT '1' + '2';             -- SQL Server: '12' (varchar+varchar)
 -- PostgreSQL: '1' + '2' lỗi (không có text + text); dùng ||
 ```
 
-**Ghi chú:** Regex SQL Server 2025 là **hàm** `REGEXP_LIKE` (GA), không infix `~`. Fuzzy `EDIT_DISTANCE` vẫn **PREVIEW**. `JSON_CONTAINS` là hàm **GA**. PG 19 fold `IS DISTINCT FROM NULL` là optimizer, không toán tử mới.
+**Ghi chú:** Regex SQL Server 2025 là **hàm** `REGEXP_LIKE` (GA), không infix `~`. Fuzzy `EDIT_DISTANCE` / `JARO_WINKLER_*` **GA từ CU11** (12/11/2026). `JSON_CONTAINS` là hàm **GA**. PG 19 fold `IS DISTINCT FROM NULL` là optimizer, không toán tử mới.
 
 ---
 
@@ -212,7 +212,6 @@ WHERE x = SOME (SELECT v FROM t);        -- ≡ ANY
 
 Empty subquery: `> ALL ()` = TRUE; `> ANY ()` = FALSE (chuẩn). Test khi port.
 
-ALL trong GROUP BY grouping sets khác > ALL; tính năng suy ra SELECT list đã bị rút khỏi PG 19 — [keywords.md](keywords.md), [select.md](select.md).
 
 ---
 
@@ -461,7 +460,7 @@ SELECT int4range(1,5) <@ int4range(0,10);
 SELECT '[2026-01-01,2026-07-01)'::daterange;
 ```
 
-SQL Server: overlap temporal = period system-versioned / `FOR SYSTEM_TIME` — không có `&&` native (trừ spatial `STIntersects`, hoặc so sánh hai mốc). PG 19 Beta 4 đã rút FOR PORTION OF; range vẫn có && để kiểm overlap — [dml.md](dml.md).
+SQL Server: overlap temporal = period system-versioned / `FOR SYSTEM_TIME` — không có `&&` native (trừ spatial `STIntersects`, hoặc so sánh hai mốc). Range `&&` kiểm overlap.
 
 Array index **1-based**. `tags[0]` → `NULL` không lỗi.
 
@@ -505,10 +504,10 @@ SELECT embedding <=> :q;                                  -- cosine (docs pgvect
 
 **Không** port `<=>` sang T-SQL. **Không** port `VECTOR_DISTANCE` sang PG core. Half-precision vs float32: cùng hàm/operator, khác storage — [typesystem.md](typesystem.md).
 
-### Fuzzy — SQL Server **PREVIEW** (`PREVIEW_FEATURES`)
+### Fuzzy — SQL Server (GA từ CU11)
 
 ```sql
--- PREVIEW — không production mặc định
+-- GA từ CU11 (12/11/2026). RTM–CU10 cần PREVIEW_FEATURES.
 SELECT EDIT_DISTANCE(N'kitten', N'sitting');
 SELECT EDIT_DISTANCE_SIMILARITY(a, b);
 SELECT JARO_WINKLER_DISTANCE(a, b);
@@ -517,7 +516,7 @@ SELECT JARO_WINKLER_SIMILARITY(a, b);
 
 PostgreSQL: extension `fuzzystrmatch` (`levenshtein`, …), dùng tên hàm khác SQL Server; cần cài extension trong database.
 
-**Ghi chú:** Fuzzy không sargable btree thông thường. Bật `PREVIEW_FEATURES` kéo vector index/CES trên cùng DB — [dialects.md](dialects.md). Regex GA (`REGEXP_*`) ≠ fuzzy PREVIEW.
+**Ghi chú:** Fuzzy không sargable btree thông thường. `PREVIEW_FEATURES` vẫn cần cho vector index và CES trên cùng DB — [dialects.md](dialects.md). Regex GA (`REGEXP_*`) là họ khác fuzzy.
 
 `IGNORE NULLS` không áp dụng `EDIT_DISTANCE`. `FILTER (WHERE …)` trên aggregate PG ≠ fuzzy.
 
@@ -594,11 +593,11 @@ T2 (PG):    WHERE sku LIKE '[A-Z]%'        -- chỉ sku bắt đầu '['
             -- SS 2025: WHERE REGEXP_LIKE(sku, N'^[A-Z]')
 ```
 
-### 16.4 Fuzzy PREVIEW vs regex GA
+### 16.4 Fuzzy (GA từ CU11) vs regex GA
 
 ```text
 T1: REGEXP_LIKE(email, N'@contoso\.com$')  -- GA 2025, prod OK nếu test
-T2: EDIT_DISTANCE(name, @q) < 2            -- PREVIEW; CU có thể đổi; đừng khóa search prod
+T2: EDIT_DISTANCE(name, @q) < 2            -- GA từ CU11; trước đó cần PREVIEW_FEATURES
 ```
 
 ### 16.5 `JSON_CONTAINS` vs `@>`
@@ -652,7 +651,6 @@ T2: CASE WHEN denom <> 0 THEN num/denom END > 1
 - Fuzzy distance trên prod khi chưa chấp nhận **PREVIEW**.
 - `name ~ pattern` trên T-SQL (thành bit `~` / lỗi).
 - `IGNORE NULLS` trong `WHERE` / trên `SUM` SS.
-- `GROUP BY ALL` hiểu là `> ALL`.
 - Mix `<=>` pgvector với `VECTOR_DISTANCE`.
 - `IS DISTINCT FROM NULL` “toán tử mới 19” (chỉ fold).
 
@@ -667,7 +665,7 @@ T2: CASE WHEN denom <> 0 THEN num/denom END > 1
 | Fold `IS DISTINCT FROM NULL` | — | **19** (optimizer) |
 | `NOT IN` → ANTI JOIN (không NULL) | tùy CE | **19** |
 | `REGEXP_LIKE` / `REGEXP_*` | **2025 GA** | `~` `SIMILAR TO` lâu |
-| Fuzzy `EDIT_DISTANCE` / `JARO_WINKLER_*` | **2025 PREVIEW** | `fuzzystrmatch` ext |
+| Fuzzy `EDIT_DISTANCE` / `JARO_WINKLER_*` | **GA từ CU11** | `fuzzystrmatch` ext |
 | `JSON_CONTAINS` / JSON INDEX | **GA** | `@>` GIN lâu |
 | `VECTOR_DISTANCE` | **2025 GA** | pgvector `<->` / `<=>` |
 | `VECTOR_SEARCH` | **2025 PREVIEW** | pgvector ANN index |
@@ -803,7 +801,7 @@ Review trap: thấy `IGNORE NULLS` trong PR toán tử/`WHERE` → chuyển [win
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PostgreSQL operators](https://www.postgresql.org/docs/19/sql-syntax-lexical.html#SQL-PRECEDENCE)
 - [T-SQL string concatenation pipes (2025)](https://learn.microsoft.com/en-us/sql/t-sql/language-elements/string-concatenation-pipes-transact-sql?view=sql-server-ver17)

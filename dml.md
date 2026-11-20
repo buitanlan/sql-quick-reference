@@ -1,11 +1,11 @@
 # DML (INSERT / UPDATE / DELETE / MERGE)
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
 > DML đổi dữ liệu trong **transaction**. Cùng cú pháp `UPDATE … FROM` trên hai engine **không** cùng ngữ nghĩa khi một hàng khớp nhiều nguồn — đây là nguồn corruption im lặng trên PostgreSQL.
 
 `INSERT`/`UPDATE`/`DELETE`/`MERGE` là đơn vị atomic *theo statement* trong autocommit, hoặc một phần txn tường minh. SQL Server mặc định lỗi một statement **không** abort cả txn (`XACT_ABORT OFF`); PostgreSQL lỗi → abort txn trừ savepoint. Isolation, `FOR UPDATE`, leftover temporal: [transactions.md](transactions.md), [concurrency.md](concurrency.md). Trigger: [routines.md](routines.md). Constraint lúc ghi: [constraints.md](constraints.md).
 
-PostgreSQL 19 **beta**: `ON CONFLICT DO SELECT`, SIMD `COPY` (`ON_ERROR SET_NULL`, `FORCE_ARRAY`, cấm system column). SQL Server Change Event Streaming = **PREVIEW** — khác `TRUNCATE`/CDC.
+PostgreSQL 19 **GA** (19/11/2026): `ON CONFLICT DO SELECT`, SIMD `COPY` (`ON_ERROR SET_NULL`, `FORCE_ARRAY`, cấm system column). SQL Server Change Event Streaming = **PREVIEW** — khác `TRUNCATE`/CDC.
 
 ---
 
@@ -20,13 +20,12 @@ PostgreSQL 19 **beta**: `ON CONFLICT DO SELECT`, SIMD `COPY` (`ON_ERROR SET_NULL
 - [5. MERGE vs upsert](#5-merge-vs-upsert)
   - [5.1 MERGE (cả hai)](#51-merge-cả-hai)
   - [5.2 ON CONFLICT DO UPDATE / NOTHING](#52-on-conflict-do-update--nothing)
-  - [5.3 ON CONFLICT DO SELECT (PostgreSQL **19**, beta)](#53-on-conflict-do-select-postgresql-19-beta)
+  - [5.3 ON CONFLICT DO SELECT (PostgreSQL 19)](#53-on-conflict-do-select-postgresql-19)
   - [5.4 MERGE vs upsert — khi nào](#54-merge-vs-upsert--khi-nào)
 - [6. OUTPUT / RETURNING](#6-output--returning)
 - [7. TRUNCATE vs CES PREVIEW](#7-truncate-vs-ces-preview)
   - [7.1 CES PREVIEW (SQL Server 2025)](#71-ces-preview-sql-server-2025)
-- [8. Application-time — FOR PORTION OF đã bị rút](#8-application-time--for-portion-of-đã-bị-rút)
-- [9. COPY / BULK](#9-copy--bulk)
+- [8. COPY / BULK](#8-copy--bulk)
   - [9.1 PostgreSQL 19 — COPY](#91-postgresql-19--copy)
   - [9.2 SQL Server BULK](#92-sql-server-bulk)
 - [10. Worked examples](#10-worked-examples)
@@ -52,7 +51,7 @@ Ba chỗ lệch dialect:
 - **Join khi ghi:** SQL Server `UPDATE t SET … FROM t JOIN …`; PostgreSQL `UPDATE t SET … FROM … WHERE` — fan-out **không xác định** nếu nhiều hàng nguồn.
 - **Upsert:** `MERGE` (cả hai) vs `ON CONFLICT` (PostgreSQL, thường đơn giản hơn). `RETURNING OLD/NEW` (PG 18+) ≠ `OUTPUT inserted/deleted`. `DO SELECT` (**19**) = get-or-create không ghi đè.
 
-Temporal application-time khác system-versioned SQL Server; FOR PORTION OF đã bị rút khỏi PostgreSQL 19. Bulk không đi qua cùng trigger/log như từng hàng — đọc mục 7–9 trước khi “tối ưu”. CES **PREVIEW** stream DML, không thay `TRUNCATE` semantics.
+Temporal application-time (`WITHOUT OVERLAPS`) khác system-versioned SQL Server. Bulk không đi qua cùng trigger/log như từng hàng — đọc mục 7–8 trước khi “tối ưu”. CES **PREVIEW** stream DML, không thay `TRUNCATE` semantics.
 
 ---
 
@@ -294,7 +293,7 @@ Conflict target phải suy ra **đúng** index partial. Sai predicate `WHERE` = 
 
 SQL Server **không** có `ON CONFLICT`. Dùng `MERGE` hoặc `UPDATE`+`INSERT` có khóa.
 
-### 5.3 ON CONFLICT DO SELECT (PostgreSQL **19**, beta)
+### 5.3 ON CONFLICT DO SELECT (PostgreSQL 19)
 
 Insert hoặc **trả hàng đã có**, không sửa. Có thể khóa:
 
@@ -472,30 +471,11 @@ Không bật CES + mirroring + CDC cùng bảng mà không đo log reuse. Synaps
 
 PostgreSQL logical decoding / subscription: `TRUNCATE` là message riêng (`publish_via_partition_root`, replica identity không áp từng hàng). `wal_level` / publication — [internal.md](internal.md), [ddl.md](ddl.md) sequence pub.
 
-**Ghi chú:** CES không phải API load (`BULK INSERT`). Không invent “CES bắt TRUNCATE”. Replica: xác nhận truncate trước khi ETL “empty + reload” trên bảng đang stream.
+**Ghi chú:** CES không phải API load (`BULK INSERT`). Không invent “CES bắt TRUNCATE”. Replica: xác nhận truncate trước khi ETL “empty + reload” trên bảng đang stream. Khoảng application-time (`WITHOUT OVERLAPS`): [constraints.md](constraints.md).
 
 ---
 
-## 8. Application-time — FOR PORTION OF đã bị rút
-
-PostgreSQL 19 Beta 4 đã rút temporal UPDATE/DELETE `FOR PORTION OF`, xem [thông báo Beta 4](https://www.postgresql.org/about/news/postgresql-19-beta-4-released-3386/). `WITHOUT OVERLAPS` và temporal foreign key từ PostgreSQL 18 vẫn là constraint hợp lệ; chúng không tự chia một hàng thành nhiều đoạn khi UPDATE thông thường.
-
-Để thay giá trong một phần của khoảng thời gian, ứng dụng cần thực hiện trong một transaction: khóa các hàng phù hợp, tính giao/phần dư bằng range hoặc multirange, xóa/thay hàng gốc và chèn các đoạn kết quả. Mỗi đoạn phải thỏa constraint, trigger và quyền INSERT/UPDATE/DELETE. Đọc [constraints.md](constraints.md) mục 9 để phân biệt system-time và application-time.
-
-Trường hợp đơn giản thay **toàn bộ** khoảng:
-
-```sql
-UPDATE product_price
-SET price = 99
-WHERE sku = 'ABC'
-  AND valid_at = daterange(DATE '2026-01-01', DATE '2026-07-01', '[)');
-```
-
-Câu trên không tự cắt khoảng dài hơn. Đừng thay một snippet FOR PORTION OF bằng UPDATE thường rồi coi kết quả tương đương.
-
----
-
-## 9. COPY / BULK
+## 8. COPY / BULK
 
 | | SQL Server | PostgreSQL |
 |---|---|---|
@@ -635,7 +615,7 @@ RETURNING u.id;
 COMMIT;
 ```
 
-Commit từng batch để giới hạn lock/WAL. SKIP LOCKED có thể bỏ sót hàng đang khóa; cần lượt xử lý sau. T-SQL dùng CTE TOP + DELETE hoặc UPDATE OUTPUT với hint phù hợp RCSI. FOR PORTION OF đã bị rút khỏi PostgreSQL 19 Beta 4; việc chia khoảng application-time là tác vụ riêng ở mục 8.
+Commit từng batch để giới hạn lock/WAL. SKIP LOCKED có thể bỏ sót hàng đang khóa; cần lượt xử lý sau. T-SQL dùng CTE TOP + DELETE hoặc UPDATE OUTPUT với hint phù hợp RCSI.
 
 ---
 
@@ -725,7 +705,6 @@ WHEN NOT MATCHED BY SOURCE THEN
 - `TRUNCATE` trên bảng bị FK (SS) / quên `CASCADE` (PG).
 - `TRUNCATE` trên bảng CES/logical rồi tin stream đủ từng hàng.
 - CES **PREVIEW** như CDC đầy đủ / production.
-- Dùng FOR PORTION OF đã bị rút khỏi PG 19 Beta 4.
 - Coi DML application-time là cơ chế system-versioned tự lưu lịch sử như SQL Server.
 - `COPY FROM … WHERE ctid = …` trên PG 19 (system column cấm).
 - `ON_ERROR SET_NULL` load số tiền.
@@ -740,11 +719,10 @@ WHEN NOT MATCHED BY SOURCE THEN
 | `MERGE` | lâu (vá concurrency) | **15+** |
 | `WHEN NOT MATCHED BY SOURCE` | lâu | **17+** (có trên 19) |
 | `ON CONFLICT DO UPDATE` | không | **9.5+** |
-| `ON CONFLICT DO SELECT` | không | **19 beta** |
+| `ON CONFLICT DO SELECT` | không | **19 GA** |
 | `OUTPUT` | lâu | dùng `RETURNING` |
 | `RETURNING WITH (OLD, NEW)` | không | **18+** |
 | `OVERRIDING SYSTEM/USER VALUE` | không (`IDENTITY_INSERT`) | identity chuẩn |
-| FOR PORTION OF | không | Đã rút khỏi 19 Beta 4 |
 | Application-time `WITHOUT OVERLAPS` | không | **18+** |
 | System-versioned temporal | có | extension / tự quản |
 | `COPY` SIMD text/CSV | — | **19** |
@@ -761,7 +739,7 @@ DDL quanh bảng đang ghi (`REPACK`, index): [ddl.md](ddl.md). Isolation leftov
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PostgreSQL INSERT / ON CONFLICT](https://www.postgresql.org/docs/19/sql-insert.html)
 - [PostgreSQL COPY](https://www.postgresql.org/docs/19/sql-copy.html)

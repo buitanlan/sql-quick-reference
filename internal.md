@@ -1,6 +1,6 @@
 # Kiến trúc nội bộ — giống và khác
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
 > File này so sánh **engine**, không phải cú pháp. Isolation: [transactions.md](transactions.md). Khóa: [concurrency.md](concurrency.md). Index/storage: [indexes.md](indexes.md). DDL vật lý: [ddl.md](ddl.md). JSON binary: [json.md](json.md). Constraint: [constraints.md](constraints.md).
 
 Hai sản phẩm cùng nói “SQL”, cùng có page, WAL/log, buffer, statistics, replica — nhưng **không cùng máy**. Port schema rồi đo QPS mà không hiểu process model, visibility, vacuum vs ghost cleanup, tempdb vs `pgsql_tmp` là đoán mò. Mục tiêu: biết chỗ **cùng ý** (để chuyển khái niệm) và chỗ **cùng tên nhưng khác guarantee** (để không copy runbook).
@@ -623,9 +623,8 @@ PG 19 incompatibility chặn upgrade: `btree_gist` inet/cidr ([indexes.md](index
 | Index AM | Cố định + columnstore + vector **PREVIEW** | GiST/GIN/BRIN/hash + AM tùy biến (`IndexAmRoutines` **static 19**) |
 | Foreign data | Linked server, PolyBase (2025 parquet không service) | FDW (`postgres_fdw`, `file_fdw`) |
 | AI | `vector`, external model, REST proc | `pgvector`, app-side |
-| Graph | SQL Graph NODE/EDGE/MATCH | SQL/PGQ đã rút khỏi 19 Beta 4; dùng JOIN/recursive CTE |
 
-Extension C 19: hook `get_relation_info_hook` → `build_simple_rel_hook` — rebuild extension. SQL/PGQ đã bị rút khỏi PostgreSQL 19 Beta 4; xem [select.md](select.md).
+Extension C 19: hook `get_relation_info_hook` → `build_simple_rel_hook` — rebuild extension.
 
 ---
 
@@ -713,7 +712,6 @@ Không phải “cái nào mạnh hơn”. Gợi ý kiến trúc:
 - Cross-db query port sang PG không FDW.
 - CES + mirroring + CDC cùng bảng không đo log.
 - `WAITFOR` vs `WAIT FOR`.
-- Tưởng SQL Graph SS = SQL/PGQ.
 - Compat 170 ngày cutover không baseline Query Store.
 - `pg_upgrade` giữ `btree_gist` inet.
 - RCSI = MVCC heap PG.
@@ -844,7 +842,7 @@ Connection storm: SS `THREADPOOL` / PBKDF2; PG `max_connections` + `work_mem` ×
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PostgreSQL 19 release notes](https://www.postgresql.org/docs/19/release-19.html)
 - [SQL Server 2025 engine features](https://learn.microsoft.com/en-us/sql/sql-server/what-s-new-in-sql-server-2025?view=sql-server-ver17)

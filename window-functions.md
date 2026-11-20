@@ -1,6 +1,6 @@
 # Window function
 
-> **Baseline:** SQL Server **2025** · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** · PostgreSQL **19** (GA 19/11/2026).<br>
 > Window tính trên **partition** của hàng đã lọc (`WHERE` / `GROUP BY` / `HAVING`), **không** gộp mất hàng — khác aggregate thường.
 
 Window giữ từng hàng và tính thêm giá trị theo `PARTITION BY`, `ORDER BY` và frame (`ROWS` / `RANGE` / `GROUPS`). Trên cả hai engine, `SUM(total) OVER (ORDER BY dt)` mặc định dùng `RANGE … CURRENT ROW`, nên các hàng trùng dt nhận cùng tổng. Dùng ROWS và khóa sắp xếp duy nhất khi cần tổng tăng theo từng hàng. File này trình bày ngữ nghĩa frame, offset và phân trang.
@@ -815,7 +815,7 @@ SQL Server 2019-: bung từng `OVER (` đầy đủ. PG mọi bản lõi có `WI
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [PostgreSQL window functions](https://www.postgresql.org/docs/19/functions-window.html)
 - [PostgreSQL SELECT / frame](https://www.postgresql.org/docs/19/sql-select.html)

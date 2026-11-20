@@ -1,6 +1,6 @@
 # Hàm built-in
 
-> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19 Beta 4**.<br>
+> **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
 > File này: **built-in**. Hàm / procedure / trigger do người viết: [routines.md](routines.md). Window: [window-functions.md](window-functions.md). JSON: [json.md](json.md). Kiểu `vector` / `date`: [typesystem.md](typesystem.md).
 
 Hàm SQL không phải thư viện C: mỗi lời gọi gắn với *kiểu*, *collation*, *determinism*, và *khi nào engine đánh giá*. Cùng tên `SUBSTRING` / `now()` trên hai dialect **không** cùng hợp đồng. Optimizer được nhân bản hay hoãn gọi miễn kết quả logic giữ — trừ hàm volatile. File này là ngữ nghĩa để review, không phải bảng “mọi hàm có trên trái đất”.
@@ -19,7 +19,7 @@ Hàm SQL không phải thư viện C: mỗi lời gọi gắn với *kiểu*, *c
   - [3.1 SQL Server 2025 `REGEXP_*`](#31-sql-server-2025-regexp_)
   - [3.2 PostgreSQL `regexp_*` / `~`](#32-postgresql-regexp_--)
   - [3.3 Port flag & RE2](#33-port-flag--re2)
-- [4. Fuzzy (PREVIEW)](#4-fuzzy-preview)
+- [4. Fuzzy](#4-fuzzy)
 - [5. Ngày giờ](#5-ngày-giờ)
   - [5.1 “Hiện tại” & `CURRENT_DATE`](#51-hiện-tại--current_date)
   - [5.2 Cộng trừ & trunc — `DATEADD` bigint](#52-cộng-trừ--trunc--dateadd-bigint)
@@ -81,7 +81,7 @@ Gọi HTTP từ hàm (`AI_GENERATE_EMBEDDINGS`, `sp_invoke_external_rest_endpoin
 | Unicode escape | `UNISTR` (**2025**) | `U&'…'` / `chr` / `U&'\xxxx'` |
 | Base64 | `BASE64_ENCODE` / `BASE64_DECODE` (**2025**) | `encode` / `decode` (`bytea`) |
 | Base64 URL | `BASE64_ENCODE(x, 1)` (**2025**) | `encode(x, 'base64url')` (**19**) |
-| Fuzzy | `EDIT_DISTANCE`… (**PREVIEW**) | `levenshtein` (`fuzzystrmatch`) |
+| Fuzzy | `EDIT_DISTANCE`… (**GA từ CU11**) | `levenshtein` (`fuzzystrmatch`) |
 
 ### 2.1 Độ dài, cắt, trim
 
@@ -270,13 +270,11 @@ Flag PG quen: `g` (global), `i`, `m`/`n` (newline — dialect POSIX PG, **không
 
 ---
 
-## 4. Fuzzy (PREVIEW)
+## 4. Fuzzy
 
-SQL Server **2025 PREVIEW** — cần `ALTER DATABASE SCOPED CONFIGURATION SET PREVIEW_FEATURES = ON`. **Không** production trừ khi chấp nhận đổi CU.
+SQL Server **2025 CU11** (12/11/2026): bốn hàm dưới là **GA**. Không cần `PREVIEW_FEATURES`. Bản RTM đến CU10 vẫn là preview — kiểm build trước khi bỏ flag.
 
 ```sql
-ALTER DATABASE SCOPED CONFIGURATION SET PREVIEW_FEATURES = ON;
-
 SELECT
     EDIT_DISTANCE(N'Colour', N'Color'),                          -- int, số phép biến đổi
     EDIT_DISTANCE_SIMILARITY(N'Colour', N'Color'),               -- int 0–100
@@ -291,11 +289,11 @@ SELECT
 | `JARO_WINKLER_DISTANCE` | `float` | ưu tiên khớp prefix |
 | `JARO_WINKLER_SIMILARITY` | `int` 0–100 | |
 
-`NULL` đối số → `NULL`. `maximum_distance ≥ 0` có thể cắt tính; không truyền / âm → khoảng cách thật. Collation-specific comparison **chưa** được honor (docs preview) — đừng giả `CI`/`CS` đổi khoảng cách.
+`NULL` đối số → `NULL`. `maximum_distance ≥ 0` có thể cắt tính; không truyền / âm → khoảng cách thật. Collation-specific comparison **không** được honor — đừng giả `CI`/`CS` đổi khoảng cách.
 
 PostgreSQL: **không** bốn tên trên. Extension **`fuzzystrmatch`**: `levenshtein`, `levenshtein_less_equal`, `metaphone`, `dmetaphone`, `soundex` — không phải core 19. `pg_trgm` similarity (`%`, `similarity()`) là họ khác (trigram), không phải Jaro-Winkler.
 
-**Ghi chú:** Fuzzy trên cột trong `WHERE` = scan. Dedup prod: staging + ngưỡng đo, không bật `PREVIEW_FEATURES` “cho vector” kéo fuzzy theo cả database.
+**Ghi chú:** Fuzzy trên cột trong `WHERE` = scan. Dedup prod: đo ngưỡng trên fixture. `PREVIEW_FEATURES` vẫn kéo vector index và CES trên cùng database — fuzzy GA không có nghĩa những thứ đó đã GA.
 
 ---
 
@@ -807,7 +805,7 @@ Chuẩn hóa query nếu model không L2-normalize. Cột đã normalize: cosine
 - `@@IDENTITY` sau trigger.
 - `VECTOR_NORM(@q)` thiếu `'norm2'`.
 - `VECTOR_SEARCH` production khi còn PREVIEW.
-- `EDIT_DISTANCE` trên `nvarchar(max)` / không `PREVIEW_FEATURES`.
+- `EDIT_DISTANCE` trên `nvarchar(max)` (vẫn cấm) hoặc trên build trước CU11 mà không bật `PREVIEW_FEATURES`.
 - `encode(..., 'base64url')` trên PG 18.
 - Gọi `AI_GENERATE_EMBEDDINGS` per-row trong trigger OLTP.
 - `UNISTR` trên collation legacy code page.
@@ -819,7 +817,7 @@ Chuẩn hóa query nếu model không L2-normalize. Cột đã normalize: cosine
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
 | `REGEXP_*` native (RE2) | **2025** (`LIKE` TVF / `REGEXP_LIKE`: compat **170**) | `~` lâu; `regexp_like` **15+** |
-| Fuzzy `EDIT_DISTANCE`… | **2025 PREVIEW** | `fuzzystrmatch` ext |
+| Fuzzy `EDIT_DISTANCE`… | **GA từ CU11** (12/11/2026) | `fuzzystrmatch` ext |
 | `SUBSTRING` length optional | **2025** | lâu (`FROM n`) |
 | `CURRENT_DATE` | **2025** | lõi |
 | `DATEADD` `bigint` | **2025** | `interval` |
@@ -857,7 +855,7 @@ Compat 170: `REGEXP_LIKE` / TVF. Engine 2025 + compat 160: scalar `REGEXP_REPLAC
 
 ## Nguồn chính thức
 
-Đối chiếu ngày **03/10/2026**; PostgreSQL **19 Beta 4**. Trạng thái beta và build/CU có thể thay đổi; xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
+Đối chiếu ngày **21/11/2026**. PostgreSQL **19** GA **19/11/2026**. SQL Server 2025 **CU11** (12/11/2026): fuzzy GA; vector index, `VECTOR_SEARCH`, half-precision và CES vẫn PREVIEW. Xem [baseline và quy ước ví dụ](README.md#trạng-thái-phiên-bản-và-cách-kiểm-chứng).
 
 - [T-SQL STRING_SPLIT](https://learn.microsoft.com/en-us/sql/t-sql/functions/string-split-transact-sql?view=sql-server-ver17)
 - [T-SQL PRODUCT](https://learn.microsoft.com/en-us/sql/t-sql/functions/product-aggregate-transact-sql?view=sql-server-ver17)
