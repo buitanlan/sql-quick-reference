@@ -293,7 +293,7 @@ SELECT
 
 PostgreSQL: **không** bốn tên trên. Extension **`fuzzystrmatch`**: `levenshtein`, `levenshtein_less_equal`, `metaphone`, `dmetaphone`, `soundex` — không phải core 19. `pg_trgm` similarity (`%`, `similarity()`) là họ khác (trigram), không phải Jaro-Winkler.
 
-**Ghi chú:** Fuzzy trên cột trong `WHERE` = scan. Dedup prod: đo ngưỡng trên fixture. `PREVIEW_FEATURES` vẫn kéo vector index và CES trên cùng database — fuzzy GA không có nghĩa những thứ đó đã GA.
+**Ghi chú:** Fuzzy trên cột trong `WHERE` = scan. Dedup prod: đo ngưỡng trên fixture. `PREVIEW_FEATURES` vẫn kéo vector index, `VECTOR_SEARCH`, half-precision và CES trên cùng database. Fuzzy GA không kéo những thứ đó thành GA.
 
 ---
 

@@ -3,7 +3,7 @@
 > **Baseline:** SQL Server **2025** (17.x) · PostgreSQL **19** (GA 19/11/2026).<br>
 > DDL thường dùng có thể rollback trên cả SQL Server và PostgreSQL. Ngoại lệ phụ thuộc từng lệnh; GO chỉ tách batch, không COMMIT. Kiểm tra lock, log, edition và giới hạn transaction của tác vụ bảo trì.
 
-DDL lấy **schema lock** mạnh: chặn DML, xếp hàng sau transaction dài. Production: thao tác metadata-only / `NOT VALID` / `ONLINE` / `CONCURRENTLY`, không `ALTER` rewrite bảng lớn trong giờ cao điểm. Partition `SPLIT`/`MERGE` (PG **19**, **beta**) và `REPACK` không phải lệnh “rẻ mặc định”.
+DDL lấy **schema lock** mạnh: chặn DML, xếp hàng sau transaction dài. Production: thao tác metadata-only / `NOT VALID` / `ONLINE` / `CONCURRENTLY`, không `ALTER` rewrite bảng lớn trong giờ cao điểm. `REPACK` không phải lệnh “rẻ mặc định”.
 
 Constraint: [constraints.md](constraints.md). Index: [indexes.md](indexes.md). Khóa AccessExclusive: [concurrency.md](concurrency.md). Isolation khi DDL trong txn: [transactions.md](transactions.md) §10. Vacuum vs rebuild: [internal.md](internal.md) §11.
 
@@ -42,7 +42,7 @@ Constraint: [constraints.md](constraints.md). Index: [indexes.md](indexes.md). K
 
 ## 1. Tổng quan & triết lý
 
-Schema là API: đổi cột, view `SELECT *`, sequence, graph metadata đều có caller. DDL “chạy nhanh trên staging rỗng” không dự đoán lock trên production.
+Schema là API: đổi cột, view `SELECT *`, sequence đều có caller. DDL “chạy nhanh trên staging rỗng” không dự đoán lock trên production.
 
 Ba câu hỏi trước mỗi `ALTER`:
 
@@ -115,7 +115,7 @@ SQL Server object: `server.database.schema.object`. PostgreSQL: không `SELECT` 
 
 Compat **170** đổi IQP mặc định (DOP, QS secondary) — [select.md](select.md) §14. Nâng engine ≠ nâng compat.
 
-**Ghi chú:** `PREVIEW_FEATURES` production = chấp nhận breaking giữa CU (vector index, CES, fuzzy kéo theo **cả database**). PG 19: `standard_conforming_strings` luôn on; tên DB/role/tablespace không CR/LF — `pg_upgrade` từ chối. [internal.md](internal.md) §16, §19.
+**Ghi chú:** `PREVIEW_FEATURES` production = chấp nhận breaking giữa CU. Flag này vẫn kéo **cả** nhóm còn preview trên database: vector index, `VECTOR_SEARCH`, half-precision, CES. Fuzzy từ **CU11** không còn cần flag. PG 19: `standard_conforming_strings` luôn on; tên DB/role/tablespace không CR/LF — `pg_upgrade` từ chối. [internal.md](internal.md) §16, §19.
 
 ---
 
@@ -437,7 +437,7 @@ Chỉ bước 1: sequence tồn tại, **giá trị** có thể 1 trong khi prim
 
 Khác replication 19 (không lặp hết): `CREATE SUBSCRIPTION … SERVER` (tham số `postgres_fdw`); `wal_level = replica` có thể **bật logical không restart**; publication `EXCEPT` khi `ALL TABLES`; `retain_dead_tuples` + `max_retention_duration` (xmin!).
 
-**Ghi chú:** `nextval` trong `SELECT` “cho vui” tốn số. `CACHE` lớn + failover: nhảy khoảng trống lớn. Slot + `retain_dead_tuples` = bloat — [concurrency.md](concurrency.md). `IDENTITY` ẩn cũng là sequence — pub `ALL SEQUENCES` cần cover nếu failover dựa nextval. Đối chiếu docs 19 trước GA (tên mệnh đề `ALL SEQUENCES`).
+**Ghi chú:** `nextval` trong `SELECT` “cho vui” tốn số. `CACHE` lớn + failover: nhảy khoảng trống lớn. Slot + `retain_dead_tuples` = bloat — [concurrency.md](concurrency.md). `IDENTITY` ẩn cũng là sequence — publication `ALL SEQUENCES` cần cover nếu failover dựa `nextval`.
 
 ---
 
@@ -498,14 +498,17 @@ So lệnh compact:
 | Apply stash | Vẫn concurrent (chi tiết docs 19) | Bắt kịp DML trong lúc copy |
 | Swap file | `ACCESS EXCLUSIVE` **ngắn** | Đổi relfilenode; deadlock upgrade có thể |
 
-GUC `max_repack_replication_slots`. Slot + WAL lúc concurrent — disk `pg_wal` / slot giữ xmin. Một lúc một concurrent repack historically. Deadlock lock upgrade lúc swap — retry, `lock_timeout`.
+GUC `max_repack_replication_slots` mặc định **5**, chỉ đổi lúc start server. Mỗi `REPACK (CONCURRENTLY)` chiếm một slot; hết slot thì lệnh fail. Slot + WAL lúc concurrent — disk `pg_wal` / slot giữ xmin. Deadlock lock upgrade lúc swap — retry, `lock_timeout`.
 
-Hạn chế (**beta**, đọc reference hiện tại):
+`REPACK (CONCURRENTLY)` **không MVCC-safe**. Transaction đang giữ snapshot lấy từ trước khi repack bắt đầu có thể thấy bảng **rỗng** sau khi lệnh commit. Báo cáo dài hoặc cursor mở sẵn không được chồng lên job này.
 
-- Partitioned / **unlogged** / một số catalog — có thể **cấm**.
-- Không trong `BEGIN`.
-- Không thay `VACUUM` thường / autovacuum.
-- Logical decode đòi `wal_level` đủ (logical) — cluster `replica` 19 có thể bật logical không restart khi cần.
+`CONCURRENTLY` không chạy khi:
+
+- Bảng partitioned, `UNLOGGED`, catalog, TOAST, access method khác heap, hoặc `user_catalog_table`.
+- Không có primary key và không có replica identity theo index (`REPLICA IDENTITY NOTHING`, primary key `DEFERRABLE` cũng bị từ chối).
+- Relation không phải bảng (materialized view), hoặc lệnh nằm trong `BEGIN`.
+
+Không thay `VACUUM` thường / autovacuum. `wal_level=replica` có thể nâng `effective_wal_level` lên logical khi slot tồn tại, không cần restart chỉ để bật logical. `wal_level=minimal` thì không decode được. Khoảng 104 triệu hàng `UPDATE`/`DELETE` đồng thời trong lúc repack làm lệnh fail. DDL khác trên cùng bảng trong lúc chạy cũng có thể làm `CONCURRENTLY` fail.
 
 Job đêm: thử **bản sao** trước (thời gian, WAL, blocking swap). `VACUUM FULL` cũ vẫn được nếu chấp nhận exclusive suốt copy.
 
@@ -608,7 +611,7 @@ ALTER SUBSCRIPTION sub_all REFRESH SEQUENCES;
 REPACK (CONCURRENTLY, ANALYZE) orders USING INDEX orders_pkey;
 ```
 
-Ba bước thuộc các tác vụ vận hành riêng; không gói tất cả vào một transaction. PostgreSQL 19 không có SPLIT/MERGE partition hoặc property graph. SQL Server dùng partition function/scheme và `ALTER INDEX ... REBUILD`.
+Ba bước thuộc các tác vụ vận hành riêng; không gói tất cả vào một transaction. SQL Server đổi biên partition bằng `ALTER PARTITION FUNCTION`. PostgreSQL đổi biên bằng `DETACH` / `ATTACH`.
 
 ---
 
@@ -660,8 +663,7 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 - Partition: PK gồm khóa; `SPLIT`/`MERGE` trên bản sao trước; SS `NEXT USED`.
 - View: liệt kê cột; indexed view / matview chọn đúng mô hình.
 - Sequence: chấp nhận lỗ; PG 19 `ALL SEQUENCES` + `REFRESH SEQUENCES` sau failover/object mới.
-- Bloat: autovacuum trước; `REPACK (CONCURRENTLY)` có chủ đích (slot/WAL/swap).
-- Graph: metadata + index FK; beta; không variable-length.
+- Bloat: autovacuum trước; `REPACK (CONCURRENTLY)` có chủ đích (slot/WAL/swap, snapshot cũ có thể thấy bảng rỗng).
 - `DROP CASCADE` review phụ thuộc.
 - `PREVIEW_FEATURES` (vector index, CES, half-precision) không lặng lẽ lên prod. PostgreSQL 19 đã GA.
 
@@ -689,7 +691,7 @@ ALTER TABLE dbo.Orders WITH CHECK CHECK CONSTRAINT FK_Orders_Customer;
 - `REFRESH MATERIALIZED VIEW` (không concurrent) giờ cao điểm.
 - `SELECT *` view, rồi `ALTER TABLE ADD` tin API tự có cột.
 - `NATURAL`/tên cột generated đổi silently.
-- `DROP TABLE CASCADE` nuốt view / graph phụ thuộc.
+- `DROP TABLE CASCADE` nuốt view và object phụ thuộc.
 - `REPACK` trên unlogged/partitioned không đọc hạn chế.
 - `VACUUM FULL` thay `REPACK (CONCURRENTLY)` trên OLTP chưa đo exclusive.
 - `CLUSTER` cron = `REPACK CONCURRENTLY` chưa test slot.

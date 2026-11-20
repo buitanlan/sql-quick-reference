@@ -251,7 +251,7 @@ SELECT * FROM pg_stat_lock;          -- PG 19: thống kê theo loại lock
 
 `log_lock_waits` **mặc định on** từ **19**. `deadlock_timeout` mặc định 1s rồi deadlock check. `max_locks_per_transaction` default **128** (19; trước 64) — nhân đôi setting cũ nếu muốn cùng capacity; lock memory tăng.
 
-`REPACK (CONCURRENTLY)`: `SHARE UPDATE EXCLUSIVE` lúc copy + logical decoding stash; `ACCESS EXCLUSIVE` **lúc swap**. Deadlock lock-upgrade lúc swap là hazard **beta** — [indexes.md](indexes.md) §10. `lock_timeout` abort statement, không chờ vô hạn.
+`REPACK (CONCURRENTLY)`: `SHARE UPDATE EXCLUSIVE` lúc copy + logical decoding stash; `ACCESS EXCLUSIVE` **lúc swap**. Deadlock lock-upgrade lúc swap — [indexes.md](indexes.md) §10. Snapshot lấy trước repack có thể thấy bảng rỗng sau commit — [ddl.md](ddl.md) §10.1. `lock_timeout` abort statement, không chờ vô hạn.
 
 ---
 
@@ -525,7 +525,7 @@ Slot không advance → WAL giữ + `xmin` horizon → bloat **toàn cluster**. 
 
 ```sql
 SELECT slot_name, active, restart_lsn, xmin, mem_exceeded_count
-FROM pg_stat_replication_slots;   -- cột 19: đối chiếu catalog nếu CU/beta đổi tên
+FROM pg_stat_replication_slots;   -- 19: mem_exceeded_count
 ```
 
 Drop slot chết. `retain_dead_tuples` không `max_retention_duration` = bloat vô hạn.

@@ -516,7 +516,7 @@ SELECT JARO_WINKLER_SIMILARITY(a, b);
 
 PostgreSQL: extension `fuzzystrmatch` (`levenshtein`, …), dùng tên hàm khác SQL Server; cần cài extension trong database.
 
-**Ghi chú:** Fuzzy không sargable btree thông thường. `PREVIEW_FEATURES` vẫn cần cho vector index và CES trên cùng DB — [dialects.md](dialects.md). Regex GA (`REGEXP_*`) là họ khác fuzzy.
+**Ghi chú:** Fuzzy không sargable btree thông thường. Từ CU11 không cần `PREVIEW_FEATURES`. Flag này vẫn cần cho vector index, `VECTOR_SEARCH`, half-precision và CES trên cùng DB — [dialects.md](dialects.md). Regex GA (`REGEXP_*`) là họ khác fuzzy.
 
 `IGNORE NULLS` không áp dụng `EDIT_DISTANCE`. `FILTER (WHERE …)` trên aggregate PG ≠ fuzzy.
 
@@ -625,7 +625,7 @@ T2: CASE WHEN denom <> 0 THEN num/denom END > 1
 - Nối chuỗi: `CONCAT` / `||`; không `'1'+@n` T-SQL.
 - NULL-safe: `IS DISTINCT FROM`, không `=` cho khóa nullable. PG 19 fold `… NULL` = `IS NULL`.
 - Regex: `REGEXP_LIKE` (2025 GA) vs `~` / `ILIKE`; `LIKE` class `[ ]` chỉ T-SQL. Pattern `\` nhớ E-string 19.
-- JSON_CONTAINS GA; fuzzy và VECTOR_SEARCH vẫn PREVIEW.
+- `JSON_CONTAINS` GA. Fuzzy **GA từ CU11**. `VECTOR_SEARCH` vẫn PREVIEW trên on-prem.
 - `IGNORE NULLS`: window file, không `WHERE`.
 - Tập hợp: `UNION ALL` mặc định; `EXCEPT ALL` không port sang SQL Server.
 - JSON: PG `->` / `@>` vs SS hàm; đừng giả `@>` trên T-SQL.

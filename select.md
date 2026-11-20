@@ -803,7 +803,7 @@ Vẫn cần index `(CreatedAt, Id)` INCLUDE `Status` (hoặc ngược tùy selec
 | Vector search trong `SELECT` | **PREVIEW** (`VECTOR_SEARCH`) | extension `pgvector` (không phải core 19) |
 | JIT default off (analytical `SELECT`) | — | **19** |
 
-Join, semi/anti, `LATERAL`: [joins.md](joins.md). Isolation khi `SELECT` lặp: [transactions.md](transactions.md). DDL graph / generated: [ddl.md](ddl.md). Optimizer engine: [internal.md](internal.md).
+Join, semi/anti, `LATERAL`: [joins.md](joins.md). Isolation khi `SELECT` lặp: [transactions.md](transactions.md). Generated column: [ddl.md](ddl.md). Optimizer engine: [internal.md](internal.md).
 
 ---
 

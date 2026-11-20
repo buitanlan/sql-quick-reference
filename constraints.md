@@ -417,7 +417,7 @@ SQL Server không `NOT VALID` / `NOT ENFORCED`. Gần: `WITH NOCHECK ADD` (untru
 
 Disable unique/PK: drop index/constraint — không “tắt unique” nhẹ như FK.
 
-**Ghi chú:** `NOT VALID` + quên `VALIDATE` = mồ côi tồn tại mãi, hàng mới sạch. `NOT ENFORCED` quên bật lại = invariant chết trên hàng mới. Monitor `convalidated` / `conenforced` (catalog 19 — đối chiếu `pg_constraint`, đừng bịa cột nếu beta đổi tên: đọc `\d pg_constraint`).
+**Ghi chú:** `NOT VALID` + quên `VALIDATE` = mồ côi tồn tại mãi, hàng mới sạch. `NOT ENFORCED` quên bật lại = invariant chết trên hàng mới. Theo dõi `pg_constraint.convalidated` và `pg_constraint.conenforced`.
 
 ---
 
@@ -566,7 +566,7 @@ COMMIT;
 - Port `EXCLUDE` / `WITHOUT OVERLAPS` sang SS bằng unique hai cột thời điểm.
 - `BEGIN` T-SQL + `SET CONSTRAINTS` (không tồn tại).
 - CHECK subquery “thấy bảng khác” — không portable, thường illegal.
-- `NOT ENFORCED` (PG 19) quên bật lại trước GA prod.
+- `NOT ENFORCED` (PG 19) quên bật lại: hàng mới cũng lọt.
 - App unique check `SELECT` rồi `INSERT` không khóa — [concurrency.md](concurrency.md).
 - Trigger INSERT trên leftover làm nghiệp vụ “cập nhật giá” gửi mail hai lần.
 - `btree_gist` inet trên EXCLUDE — upgrade 19 chặn (khác room_id int).

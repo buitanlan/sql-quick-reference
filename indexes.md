@@ -66,7 +66,7 @@ Ba câu hỏi trước mỗi `CREATE INDEX`:
 2. **Ghi bao nhiêu?** OLTP nóng: ít index, hẹp. Analytics: columnstore / BRIN / covering rộng.
 3. **Online được không?** Production: `ONLINE = ON` / `CONCURRENTLY` / `REPACK (CONCURRENTLY)` — không chặn ghi cả bảng.
 
-PostgreSQL 19 **beta**: `REPACK`, parallel autovacuum, scoring, `pg_plan_advice`. SQL Server 2025: ordered NCCI **GA**; JSON index GA; vector index vẫn PREVIEW.
+PostgreSQL 19: `REPACK`, parallel autovacuum, scoring, `pg_plan_advice`. SQL Server 2025: ordered NCCI **GA**; JSON index GA; vector index on-prem vẫn PREVIEW.
 
 ```text
 Access path (rút gọn)
@@ -165,7 +165,7 @@ REPACK (CONCURRENTLY) orders USING INDEX orders_pkey;   -- exclusive chỉ lúc 
 
 Index-organized table (SQL Server clustered) ≠ `CLUSTER` PG. Đừng port “PK clustered” sang PostgreSQL rồi kỳ vọng heap luôn sorted.
 
-**Ghi chú:** `REPACK` **19**, **beta**, không trong txn. Slot logical + `max_repack_replication_slots` khi `CONCURRENTLY`. Chi tiết [ddl.md](ddl.md) §10, mục 10 dưới.
+**Ghi chú:** `REPACK` **19**, không trong txn. `CONCURRENTLY` dùng slot (`max_repack_replication_slots`, mặc định 5) và không MVCC-safe. Chi tiết [ddl.md](ddl.md) §10.1.
 
 ---
 
@@ -328,7 +328,7 @@ CREATE VECTOR INDEX vix ON dbo.Doc (Embedding);    -- DiskANN, PREVIEW
 -- VECTOR_SEARCH (ANN) — PREVIEW; catalog sys.vector_indexes
 ```
 
-Kiểu `vector` + `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTORPROPERTY` là surface **GA** theo what's new 2025. **Index ANN và `VECTOR_SEARCH` = PREVIEW**. Hybrid = vector + full-text,.
+Kiểu `vector` + `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTORPROPERTY` là **GA**. **Index ANN và `VECTOR_SEARCH`**: PREVIEW trên SQL Server 2025 on-prem và trên Managed Instance theo policy 2025; **GA** trên Azure SQL Database, SQL database in Fabric, và Managed Instance Always-up-to-date. Index tạo mới cho phép `INSERT` / `UPDATE` / `DELETE` / `MERGE`. `TRUNCATE TABLE` trên bảng có vector index thì không được. Cấu trúc index cũ bị deprecated — migrate theo Learn. Hybrid = vector + full-text.
 
 ```sql
 -- PostgreSQL
@@ -341,7 +341,7 @@ CREATE INDEX ON doc USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX ON doc USING ivfflat (embedding vector_l2_ops);
 ```
 
-pgvector: `hnsw` / `ivfflat` — không copy operator `<->` sang T-SQL. `PREVIEW_FEATURES` là **database scoped**: bật “cho vector” kéo CES/fuzzy theo DB — [json.md](json.md) không chứa CES; CES: [concurrency.md](concurrency.md).
+pgvector: `hnsw` / `ivfflat` — không copy operator `<->` sang T-SQL. `PREVIEW_FEATURES` là **database scoped**: bật cho vector index kéo CES, `VECTOR_SEARCH` và half-precision trên cùng database. Fuzzy từ CU11 không còn nằm trong flag này — [operators.md](operators.md). CES: [concurrency.md](concurrency.md).
 
 **Ghi chú:** Production on-prem: không bật `PREVIEW_FEATURES` trừ khi chấp nhận CU đổi. Expression btree trên `payload->>'status'` rẻ hơn GIN nếu chỉ equality một key. JSON INDEX không thay cột quan hệ + FK.
 
@@ -383,7 +383,7 @@ REPACK (VERBOSE) employees;
 
 Mặc định `ACCESS EXCLUSIVE` suốt copy. `CONCURRENTLY`: copy dưới `SHARE UPDATE EXCLUSIVE` + logical decoding vào stash; exclusive **lúc swap**. GUC `max_repack_replication_slots`. **Không** trong transaction block.
 
-Hạn chế: partitioned / unlogged / catalog; một `REPACK (CONCURRENTLY)` tại một thời điểm; deadlock khi nâng khóa lúc swap — [concurrency.md](concurrency.md). Không thay `TRUNCATE`. Slot + WAL lúc concurrent — job đêm thử replica trước. Autovacuum song song **không** thay REPACK khi bloat nặng.
+`CONCURRENTLY` cấm partitioned, unlogged, catalog/TOAST, bảng không phải heap, và bảng không có PK hoặc replica identity theo index. `max_repack_replication_slots` mặc định **5**. Snapshot lấy trước khi repack bắt đầu có thể thấy bảng rỗng sau commit — [ddl.md](ddl.md) §10.1. Deadlock khi nâng khóa lúc swap — [concurrency.md](concurrency.md). Không thay `TRUNCATE`. Slot + WAL lúc concurrent — job đêm thử replica trước. Autovacuum song song **không** thay REPACK khi bloat nặng.
 
 SS `REBUILD ONLINE` ≈ ý “không exclusive suốt copy”; **không** logical decoding. `REORGANIZE` ≠ `VACUUM` ≠ `REPACK`.
 
@@ -608,7 +608,7 @@ Hai pha CIC: (1) build, (2) validate — txn dài mở trước pha 2 chặn ho�
 - Port clustered PK sang PG rồi tin `CLUSTER` duy trì.
 - `VACUUM FULL` đêm thay vì `VACUUM` / `REPACK (CONCURRENTLY)` đã test.
 - JSON INDEX path chồng (`$.a`, `$.a.b`); JSON INDEX trên heap.
-- Vector index prod khi mới `PREVIEW_FEATURES` (kéo CES/fuzzy).
+- Vector index prod on-prem khi mới `PREVIEW_FEATURES` (kéo CES, `VECTOR_SEARCH`, half-precision). Fuzzy từ CU11 không cần flag này.
 - Dùng JSON INDEX mà chưa kiểm clustered PK, kiểu cột json và path chồng nhau.
 - Rebuild 30% frag trên bảng 200 page.
 - Giữ `btree_gist` inet đến cutover 19.
@@ -626,9 +626,9 @@ Hai pha CIC: (1) build, (2) validate — txn dài mở trước pha 2 chặn ho�
 | Ordered NCCI + CS online | **2025 GA** | — |
 | JSON INDEX / `JSON_CONTAINS` | **2025 GA** | GIN `jsonb` |
 | Kiểu `vector` + distance | **2025 GA** | pgvector ext |
-| `CREATE VECTOR INDEX` / `VECTOR_SEARCH` | **2025 PREVIEW** | hnsw/ivfflat |
+| `CREATE VECTOR INDEX` / `VECTOR_SEARCH` | **PREVIEW** on-prem; **GA** Azure SQL / Fabric / MI Always-up-to-date | hnsw/ivfflat |
 | Persisted stats secondary | **2025** | — (physical = file primary) |
-| `REPACK` / `CONCURRENTLY` | `REBUILD ONLINE` | **19** (**beta**) |
+| `REPACK` / `CONCURRENTLY` | `REBUILD ONLINE` | **19** |
 | Extended stats virtual generated | — | **19** |
 | `pg_stat_autovacuum_scores` | — | **19** |
 | `pg_plan_advice` / `pg_stash_advice` | QS force plan | **19** contrib |
@@ -700,7 +700,7 @@ WHERE relid = 'orders'::regclass;
 -- Operator <-> / <=> không có trên T-SQL (VECTOR_DISTANCE)
 ```
 
-On-prem: không khóa schema ANN. Azure vector index có thể GA khác on-prem — đo. `PREVIEW_FEATURES` kéo CES/fuzzy theo database — [concurrency.md](concurrency.md) CES, [operators.md](operators.md) fuzzy (không nhét changelog vào đây).
+On-prem: vector index vẫn PREVIEW, cần `PREVIEW_FEATURES`. Azure SQL Database, SQL database in Fabric và Managed Instance Always-up-to-date: vector index và `VECTOR_SEARCH` đã GA. Index mới cho DML; `TRUNCATE` bảng có vector index thì không. `PREVIEW_FEATURES` trên on-prem kéo CES, `VECTOR_SEARCH` và half-precision — [concurrency.md](concurrency.md), [operators.md](operators.md). Fuzzy từ CU11 không còn cần flag.
 
 IVFFLAT cần `ANALYZE` / lists phù hợp; HNSW RAM lúc build. Không `REPACK` thay rebuild HNSW. SS DiskANN: đọc Learn CU, không bịa WITH option.
 
@@ -713,7 +713,7 @@ REPACK (CONCURRENTLY)
   SHARE UPDATE EXCLUSIVE  → copy heap + logical decode DML vào stash
   ACCESS EXCLUSIVE        → swap file; deadlock upgrade nếu session khác nâng lock
   max_repack_replication_slots  → hết slot = fail, không “giống VACUUM”
-Không trong BEGIN. Partitioned/unlogged/catalog: docs beta — có thể cấm.
+Không trong BEGIN. `CONCURRENTLY` cấm partitioned, unlogged, catalog/TOAST, và bảng không có PK hoặc replica identity. Snapshot cũ có thể thấy bảng rỗng sau commit. `max_repack_replication_slots` mặc định 5.
 Sau swap: ANALYZE nếu không (ANALYZE) trong lệnh. Autovacuum scoring không thay REPACK.
 ```
 

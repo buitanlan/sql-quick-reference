@@ -643,7 +643,7 @@ TDS 8 / TLS 1.3 vs libpq SSL + SNI 19: đều breaking client cũ nếu bắt TL
 
 ## 19. Edition, compat, GUC
 
-**SQL Server:** SKU (Express 50 GB, Standard 32 core / 256 GB **2025**, EE). Feature `ONLINE` index historically EE. Resource Governor trên **Standard** 2025 (tempdb governor). Compat **160 vs 170** đổi optimizer, không đổi parser hết. `PREVIEW_FEATURES` database scoped (vector index, CES, fuzzy, …). Developer tách Standard vs Enterprise — staging khớp prod. Web **discontinued**.
+**SQL Server:** SKU (Express 50 GB, Standard 32 core / 256 GB **2025**, EE). Feature `ONLINE` index historically EE. Resource Governor trên **Standard** 2025 (tempdb governor). Compat **160 vs 170** đổi optimizer, không đổi parser hết. `PREVIEW_FEATURES` database scoped (vector index, `VECTOR_SEARCH`, half-precision, CES). Fuzzy từ CU11 không cần flag này. Developer tách Standard vs Enterprise — staging khớp prod. Web **discontinued**.
 
 **PostgreSQL:** không SKU. Mọi thứ core + extension. GUC `postgresql.conf` / `ALTER SYSTEM` / `SET`. Major version = feature gate. JIT **off mặc định 19**; `max_locks_per_transaction` default **128**.
 
@@ -730,7 +730,7 @@ Không phải “cái nào mạnh hơn”. Gợi ý kiến trúc:
 | Temp | ADR + governor GA (1138) | I/O workers scale; COPY SIMD |
 | Visibility cleanup | Ghost + ADR | Parallel AV; all-visible on scan; `REPACK` |
 | Replica extras | QS+stats secondary ON; Fabric mirror | Sequence logical; `WAIT FOR LSN` |
-| Preview | Vector index, CES, fuzzy | Cả 19 **beta** đến GA |
+| Preview | Vector index, `VECTOR_SEARCH`, half-precision, CES. Fuzzy **GA từ CU11** | — (19 đã GA) |
 
 Cú pháp: [select.md](select.md), [dml.md](dml.md), [ddl.md](ddl.md), [json.md](json.md), [typesystem.md](typesystem.md). Isolation: [transactions.md](transactions.md). Khóa: [concurrency.md](concurrency.md).
 

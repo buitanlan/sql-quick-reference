@@ -495,7 +495,7 @@ SELECT VECTORPROPERTY(@q, 'Dimensions');
 | `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTOR_NORMALIZE` / `VECTORPROPERTY` | **GA** | Metric `'cosine'` / docs metric khác — đối chiếu Learn, không bịa tên metric |
 | `CREATE EXTERNAL MODEL` / `ALTER` / `DROP` | GA surface | REST embedding, credential **tách** engine |
 | `AI_GENERATE_EMBEDDINGS` / `AI_GENERATE_CHUNKS` | GA surface | Chunk + gọi model đã định nghĩa |
-| `CREATE VECTOR INDEX` (DiskANN), `VECTOR_SEARCH` | **PREVIEW** | Cần `PREVIEW_FEATURES`; catalog `sys.vector_indexes` |
+| `CREATE VECTOR INDEX` (DiskANN), `VECTOR_SEARCH` | **PREVIEW** on-prem và MI policy 2025; **GA** trên Azure SQL Database, Fabric, MI Always-up-to-date | On-prem cần `PREVIEW_FEATURES`; catalog `sys.vector_indexes`. Index mới cho DML; `TRUNCATE` bảng có index này thì không |
 | Hybrid vector + full-text | GA ý |pgvector là extension |
 
 ```sql
@@ -520,11 +520,11 @@ CREATE TABLE doc (
 
 - SQL Server `vector` expose JSON array khi đọc client, lưu binary. Đừng `varchar` hóa embedding.
 - Model/REST: credential store, không hard-code key trong proc. `sp_invoke_external_rest_endpoint` cùng họ rủi ro mạng từ engine — không phải kiểu cột.
-- `VECTOR_SEARCH` / `CREATE VECTOR INDEX` = **PREVIEW**. Kiểu + distance dùng được không bật preview; ANN thì phải.
-- Bật `PREVIEW_FEATURES` “cho vector” kéo CES/fuzzy trên **cùng** database — [dialects.md](dialects.md).
+- `VECTOR_SEARCH` / `CREATE VECTOR INDEX`: **PREVIEW** trên SQL Server 2025 on-prem và Managed Instance theo policy 2025. **GA** trên Azure SQL Database, SQL database in Fabric, và Managed Instance Always-up-to-date. Kiểu + distance dùng được không bật preview.
+- Index tạo mới cho phép `INSERT` / `UPDATE` / `DELETE` / `MERGE` và được bảo trì khi ghi. `TRUNCATE TABLE` trên bảng có vector index thì không được. Cấu trúc index cũ bị deprecated — migrate theo Learn trước khi bản sau gỡ.
+- Bật `PREVIEW_FEATURES` “cho vector” kéo CES, `VECTOR_SEARCH` và half-precision trên **cùng** database. Fuzzy từ CU11 không còn cần flag — [dialects.md](dialects.md).
 - pgvector operators (`<->`, `<=>`) không có trên SQL Server; đừng copy. Chiều `vector(1536)` phải khớp model; `VECTORPROPERTY(…, 'Dimensions')` vs typmod.
 - Half-precision: cùng số chiều, khác dung lượng; mix float32/half trong một `VECTOR_DISTANCE` — kiểm docs (thường đòi cùng layout). Không bịa implicit cast.
--
 
 Hai session — PREVIEW index:
 

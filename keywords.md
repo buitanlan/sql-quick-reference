@@ -287,7 +287,7 @@ REPACK (VERBOSE) employees;
 
 Mặc định `ACCESS EXCLUSIVE` suốt copy. `CONCURRENTLY`: copy dưới `SHARE UPDATE EXCLUSIVE` + logical decoding vào stash; exclusive **lúc swap**. GUC `max_repack_replication_slots`.
 
-Hạn chế (**beta**, đọc reference): partitioned / unlogged / catalog; deadlock lock upgrade lúc swap. Không thay `TRUNCATE`.
+`CONCURRENTLY` cấm partitioned, unlogged, catalog/TOAST, và bảng không có PK hoặc replica identity. Snapshot cũ có thể thấy bảng rỗng sau commit. Deadlock lock upgrade lúc swap. Không thay `TRUNCATE`. Chi tiết [ddl.md](ddl.md) §10.1.
 
 SQL Server tương đương gần: `ALTER INDEX … REBUILD` (`ONLINE = ON` historically Enterprise — [internal.md](internal.md) edition). Không logical decoding, không keyword `REPACK`.
 
@@ -460,7 +460,7 @@ ALTER … OWNER TO …
 
 `AUTHORIZATION` lúc `CREATE SCHEMA`. Principal, `PUBLIC`, schema, RLS, ownership: [permissions.md](permissions.md). `SECURITY DEFINER` / `EXECUTE AS`: [routines.md](routines.md) + `search_path`.
 
-PG 19: `GRANT`/`REVOKE … GRANTED BY` — role hiệu lực khi ghi ACL. `USAGE` trên property graph — đọc docs, không bịa quyền. SQL Server 2025: Purview policies discontinued → role `##MS_*##` — [internal.md](internal.md), không keyword SQL mới trong file này.
+PG 19: `GRANT`/`REVOKE … GRANTED BY` — role hiệu lực khi ghi ACL. SQL Server 2025: Purview policies discontinued → role `##MS_*##` — [internal.md](internal.md), không keyword SQL mới trong file này.
 
 ---
 
@@ -494,11 +494,10 @@ Fuzzy `EDIT_DISTANCE*` / `JARO_WINKLER*`: **GA từ CU11** (12/11/2026). CES / v
 
 | Keyword / clause | Mục đích | Ghi chú |
 |---|---|---|
-| `REPACK` [`CONCURRENTLY`] | Rebuild bảng/index | Không trong txn; **beta 19** |
+| `REPACK` [`CONCURRENTLY`] | Rebuild bảng/index | Không trong txn; `CONCURRENTLY` không MVCC-safe |
 | `WAIT` `FOR` | Chờ LSN standby | ≠ `WAITFOR` T-SQL |
-| `PROPERTY` `GRAPH` `VERTEX` `EDGE` | DDL graph | `DROP` không drop bảng |
 | `IGNORE NULLS` / `RESPECT NULLS` | Window | Không `WHERE` |
-| `DO SELECT` | `ON CONFLICT DO SELECT` | Khóa hàng đã có; **beta** |
+| `DO SELECT` | `ON CONFLICT DO SELECT` | Khóa hàng đã có; **19** |
 | `CHECK [NOT] ENFORCED` | Constraint | Khác `NOT VALID` |
 
 ```sql
@@ -518,9 +517,9 @@ Conflict: **không** update, **trả** hàng đã có (`RETURNING`), tùy chọn
 
 ## 21. Hay đụng identifier
 
-Tránh unquoted (cột/bảng/schema). Quote được nhưng ORM/graph/SQL động khổ.
+Tránh unquoted (cột/bảng/schema). Quote được nhưng ORM và SQL động khổ.
 
-`order`, `user`, `group`, `table`, `index`, `key`, `value`, `type`, `name`, `date`, `time`, `level`, `offset`, `window`, `rank`, `left`, `right`, `inner`, `check`, `default`, `constraint`, `primary`, `references`, `session_user`, `current_user`, `current_date`, `current_timestamp`, `json`, `xml`, `vector`, `end`, `file`, `plan`, `limit`, `both`, `all`, `any`, `some`, `role`, `grant`, `match`, `filter`, `over`, `range`, `rows`, `lead`, `lag`, `first`, `next`, `percent`, `ties`, `output`, `merge`, `apply`, `pivot`, `identity`, `national`, `zone`, `precision`, `interval`, `cascade`, `restrict`, `replace`, `return`, `language`, `external`, `cursor`, `fetch`, `deallocate`, `declare`, `execute`, `backup`, `restore`, `waitfor`, `partition`, `clusters`/`cluster`, `analyse`/`analyze`, `verbose`, `freeze`, `repack`, `portion`, `graph`, `vertex`, `edge`, `columns`, `wait`.
+`order`, `user`, `group`, `table`, `index`, `key`, `value`, `type`, `name`, `date`, `time`, `level`, `offset`, `window`, `rank`, `left`, `right`, `inner`, `check`, `default`, `constraint`, `primary`, `references`, `session_user`, `current_user`, `current_date`, `current_timestamp`, `json`, `xml`, `vector`, `end`, `file`, `plan`, `limit`, `both`, `all`, `any`, `some`, `role`, `grant`, `match`, `filter`, `over`, `range`, `rows`, `lead`, `lag`, `first`, `next`, `percent`, `ties`, `output`, `merge`, `apply`, `pivot`, `identity`, `national`, `zone`, `precision`, `interval`, `cascade`, `restrict`, `replace`, `return`, `language`, `external`, `cursor`, `fetch`, `deallocate`, `declare`, `execute`, `backup`, `restore`, `waitfor`, `partition`, `clusters`/`cluster`, `analyse`/`analyze`, `verbose`, `freeze`, `repack`, `columns`, `wait`.
 
 ```sql
 -- PostgreSQL: USER reserved

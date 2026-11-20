@@ -737,11 +737,12 @@ Luôn schema-qualify trong app.
 ```text
 T1: ALTER DATABASE SCOPED CONFIGURATION SET PREVIEW_FEATURES = ON;
     CREATE VECTOR INDEX … ;              -- PREVIEW, lab
-T2: cùng DB, job CES / fuzzy cũng vào surface preview
+T2: cùng DB, CES, VECTOR_SEARCH và half-precision cũng vào surface preview
+    -- Fuzzy từ CU11 không cần flag này
     -- Tắt PREVIEW_FEATURES: object preview có thể fail / không tạo mới
 ```
 
-Không có GUC PG tương đương; beta 19 là cả cluster.
+Không có GUC PostgreSQL tương đương. PostgreSQL 19 đã GA trên cả cluster.
 
 ---
 
@@ -754,7 +755,7 @@ Chỉ mục **parser / session / client / identifier**. Optimizer/HA/SKU đầy 
 1. **Driver TDS 8 / TLS 1.3** (ODBC, JDBC, sqlcmd, bcp, linked server, replication, log shipping, PolyBase) — client cũ đứt sau patch, không phải `SET ANSI`.
 2. **Nâng engine, giữ compat 160** đo Query Store — 170 đổi plan (DOP/OPPO), không đổi folding tên.
 3. **Compat 170 khi ổn** — IQP mặc định ON; không giả “script cũ parse fail”.
-4. **`PREVIEW_FEATURES` off production** — vector index / CES / fuzzy; JSON GA không cần flag này.
+4. **`PREVIEW_FEATURES` off production** — vector index / CES / half-precision. Fuzzy từ CU11 và JSON GA không cần flag này.
 5. **So `SET` options app vs SSMS** — `QUOTED_IDENTIFIER` / `ANSI_NULLS` gắn proc; indexed view fail lúc deploy.
 6. **Pool reset** — `#temp`, `SESSION_CONTEXT`, `USE` không leak request sau.
 7. **SKU staging = prod** (Standard vs Enterprise Developer) — chỉ khi hint/`ONLINE`/RG; identifier không đổi.
@@ -779,7 +780,7 @@ Chỉ mục **parser / session / client / identifier**. Optimizer/HA/SKU đầy 
 - `CHECK` không thay `NOT NULL`.
 - Collation / encoding: ghi rõ trong migration; test `'a' = 'A'` trên cả hai.
 - `SET` ANSI_* `ON` trước filtered/computed index (SQL Server).
-- Production: `PREVIEW_FEATURES` off; PG 19 graph/temporal chỉ sau GA + test.
+- Production: `PREVIEW_FEATURES` off. Fuzzy từ CU11 không cần flag này.
 - Connection pool: reset session (`search_path`, `#temp`, GUC) — đừng leak.
 - Dump PG: client ≥ 19; không restore `standard_conforming_strings=off`.
 - Linked server / sqlcmd: test TLS 1.3 trước cutover 2025.
@@ -804,7 +805,7 @@ Chỉ mục **parser / session / client / identifier**. Optimizer/HA/SKU đầy 
 - `SET escape_string_warning` trên PG 19.
 - Newline trong tên role “cho đẹp” — chặn `pg_upgrade`.
 - Compat 170 ngày cutover không baseline Query Store — [internal.md](internal.md).
-- Bật `PREVIEW_FEATURES` “chỉ vector” kéo CES/fuzzy.
+- Bật `PREVIEW_FEATURES` “chỉ vector” kéo CES, `VECTOR_SEARCH` và half-precision. Fuzzy từ CU11 không nằm trong flag này.
 - Tưởng SKU Standard đổi luật identifier / `sysname`.
 - FDW upsert trong `BEGIN READ ONLY` sau nâng 19.
 - Client OLE DB cũ sau TDS 8 — “SQL lỗi” nhưng là handshake.
@@ -816,7 +817,7 @@ Chỉ mục **parser / session / client / identifier**. Optimizer/HA/SKU đầy 
 | Mục | SQL Server | PostgreSQL |
 |---|---|---|
 | Compatibility 170 | **2025** | — (không có compat level) |
-| `PREVIEW_FEATURES` | **2025** | — (cả 19 **beta**) |
+| `PREVIEW_FEATURES` | **2025** (fuzzy không còn cần từ CU11) | — |
 | `FETCH` / `OFFSET` | 2012+ | lâu |
 | `\|\|` nối chuỗi | **2022+** | lõi |
 | `IS [NOT] DISTINCT FROM` | **2022+** | lõi; **19** fold `… NULL` |

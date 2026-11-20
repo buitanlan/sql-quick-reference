@@ -669,7 +669,7 @@ WHEN NOT MATCHED BY SOURCE THEN
 - Nguồn `MERGE`/`INSERT` unique trên khóa.
 - Lấy id mới: `RETURNING` / `OUTPUT`, không `MAX(id)+1`.
 - Xóa lớn: lô + vacuum/index maintain.
-- Temporal PG 19: `FOR UPDATE` trước portion ở RC; hiểu leftover = INSERT.
+- Chia khoảng `WITHOUT OVERLAPS` trong ứng dụng: khóa hàng (`FOR UPDATE`) trước khi cắt; đoạn mới là `INSERT`.
 - Bulk: staging + constraint sau; `ON_ERROR SET_NULL` không cho tiền.
 - `TRUNCATE` vs `DELETE`: trigger, identity, CES/logical.
 - Sequence/identity lỗ là bình thường.
